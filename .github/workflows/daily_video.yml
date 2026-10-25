@@ -4,15 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       video_topic:
-        description: 'Topic for the video'
+        description: 'Leave as AUTO for AI topic generation, or type a custom topic'
         required: true
-        default: 'Why Sleep Deprivation Destroys Your Brain Within 48 Hours'
+        default: 'AUTO'
+      channel_niche:
+        description: 'Your channel niche (used when topic is AUTO)'
+        required: true
+        default: 'Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries'
       is_shorts:
         description: 'Render as 9:16 YouTube Short? (true/false)'
         required: true
         default: 'true'
   schedule:
     - cron: '0 8 * * *'
+
+permissions:
+  contents: write
 
 jobs:
   render-and-publish:
@@ -37,10 +44,19 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'How Caffeine Hijacks Your Adenosine Receptors' }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'AUTO' }}
+          CHANNEL_NICHE: ${{ github.event.inputs.channel_niche || 'Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries' }}
           IS_SHORTS: ${{ github.event.inputs.is_shorts || 'true' }}
         run: python agent_core.py
+
+      - name: Save Used Topic History to Repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add used_topics.txt
+          git diff --staged --quiet || git commit -m "chore: log generated video topic"
+          git push
 
       - name: Upload to YouTube (If YOUTUBE_TOKEN_JSON is set)
         env:

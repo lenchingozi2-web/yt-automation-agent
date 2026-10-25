@@ -1,7 +1,9 @@
 import os
+import shutil
 import json
 import asyncio
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import List
 from pydantic import BaseModel, Field
@@ -15,13 +17,15 @@ from groq import Groq
 load_dotenv()
 
 WORK_DIR = Path("output_run")
-WORK_DIR.mkdir(exist_ok=True)
+USED_TOPICS_FILE = Path("used_topics.txt")
 
 
 class Scene(BaseModel):
     scene_number: int
     narration: str = Field(description="Spoken voiceover text for this scene (15-25 words).")
-    search_queries: List[str] = Field(description="2-3 specific Pexels video search keywords.")
+    search_queries: List[str] = Field(
+        description="2-3 simple 2-to-3-word stock video search keywords, e.g. ['brain neurons', 'doctor hospital']"
+    )
 
 
 class VideoScript(BaseModel):
@@ -31,16 +35,45 @@ class VideoScript(BaseModel):
     scenes: List[Scene]
 
 
+def generate_autonomous_topic(niche: str) -> str:
+    past_topics = []
+    if USED_TOPICS_FILE.exists():
+        past_topics = [line.strip() for line in USED_TOPICS_FILE.read_text().splitlines() if line.strip()]
+
+    avoid_str = ", ".join(past_topics[-30:]) if past_topics else "None yet"
+    prompt = (
+        f"You are a viral YouTube producer in the niche: '{niche}'. "
+        "Generate ONE ultra-clickable, curiosity-inducing YouTube video topic idea (10-14 words max). "
+        f"Do NOT repeat any of these previous topics: [{avoid_str}]. "
+        "Reply with ONLY the raw topic title and nothing else."
+    )
+
+    try:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        topic = resp.text.strip().strip('"')
+    except Exception:
+        groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        topic = completion.choices[0].message.content.strip().strip('"')
+
+    with open(USED_TOPICS_FILE, "a", encoding="utf-8") as f:
+        f.write(topic + "\n")
+
+    print(f"[★] Auto-Generated New Daily Topic: '{topic}'")
+    return topic
+
+
 def generate_script(topic: str, num_scenes: int = 5) -> VideoScript:
     script_path = WORK_DIR / "script.json"
-    if script_path.exists():
-        print("[✓] Loaded cached script.json")
-        return VideoScript.model_validate_json(script_path.read_text())
 
     prompt = (
         f"Write a high-retention YouTube script about: '{topic}'. "
         f"Break it into exactly {num_scenes} scenes with punchy hooks and clear storytelling. "
-        "Provide 2-3 specific stock video search queries per scene."
+        "Provide 2-3 simple, broad stock video search keywords (2-3 words max each) per scene."
     )
 
     try:
@@ -57,7 +90,7 @@ def generate_script(topic: str, num_scenes: int = 5) -> VideoScript:
         )
         script_data = VideoScript.model_validate_json(response.text)
     except Exception as e:
-        print(f"[!] Gemini failed ({e}). Falling back to Groq Llama-3.3-70B...")
+        print(f"[!] Gemini unavailable ({e}). Switching to Groq Llama-3.3-70B...")
         groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -81,10 +114,6 @@ async def generate_audio_and_subs(scene: Scene, voice: str = "en-US-ChristopherN
     audio_path = WORK_DIR / f"scene_{scene.scene_number:02d}.mp3"
     srt_path = WORK_DIR / f"scene_{scene.scene_number:02d}.srt"
 
-    if audio_path.exists() and srt_path.exists():
-        print(f"[✓] Cached audio/subs for Scene {scene.scene_number}")
-        return audio_path, srt_path
-
     print(f"[*] Synthesizing voiceover for Scene {scene.scene_number}...")
     communicate = edge_tts.Communicate(scene.narration, voice)
     submaker = edge_tts.SubMaker()
@@ -102,36 +131,69 @@ async def generate_audio_and_subs(scene: Scene, voice: str = "en-US-ChristopherN
     return audio_path, srt_path
 
 
-async def fetch_broll(scene: Scene, orientation: str = "portrait") -> Path:
+async def fetch_broll(scene: Scene, is_shorts: bool = True) -> Path:
     raw_video_path = WORK_DIR / f"raw_{scene.scene_number:02d}.mp4"
-    if raw_video_path.exists():
-        print(f"[✓] Cached B-Roll for Scene {scene.scene_number}")
-        return raw_video_path
+    pixabay_key = os.getenv("PIXABAY_API_KEY")
+    width, height = (1080, 1920) if is_shorts else (1920, 1080)
 
-    pexels_key = os.getenv("PEXELS_API_KEY")
-    headers = {"Authorization": pexels_key} if pexels_key else {}
+    async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
+        # TIER 1: Pixabay Video API
+        if pixabay_key:
+            for query in scene.search_queries:
+                print(f"[*] Searching Pixabay Videos for Scene {scene.scene_number}: '{query}'")
+                resp = await client.get(
+                    "https://pixabay.com/api/videos/",
+                    params={
+                        "key": pixabay_key,
+                        "q": query[:100],
+                        "per_page": 5,
+                        "safesearch": "true",
+                    },
+                )
+                if resp.status_code == 200:
+                    hits = resp.json().get("hits", [])
+                    if hits:
+                        vids = hits[0].get("videos", {})
+                        video_url = (
+                            vids.get("large", {}).get("url")
+                            or vids.get("medium", {}).get("url")
+                            or vids.get("small", {}).get("url")
+                        )
+                        if video_url:
+                            dl_resp = await client.get(video_url)
+                            raw_video_path.write_bytes(dl_resp.content)
+                            print(f"[✓] Downloaded Pixabay video for Scene {scene.scene_number}")
+                            return raw_video_path
 
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        for query in scene.search_queries:
-            print(f"[*] Searching Pexels for Scene {scene.scene_number}: '{query}'")
-            resp = await client.get(
-                "https://api.pexels.com/videos/search",
-                params={"query": query, "per_page": 3, "orientation": orientation, "size": "medium"},
-                headers=headers,
-            )
-            if resp.status_code == 200:
-                videos = resp.json().get("videos", [])
-                if videos:
-                    video_files = videos[0].get("video_files", [])
-                    best_file = next((f for f in video_files if f.get("height", 0) >= 720), video_files[0])
-                    dl_resp = await client.get(best_file["link"])
-                    raw_video_path.write_bytes(dl_resp.content)
-                    return raw_video_path
+        # TIER 2: Zero-Key AI Image Generation (Pollinations) + FFmpeg Motion
+        try:
+            prompt_str = f"{scene.search_queries[0]}, cinematic, high detail, 8k"
+            encoded_prompt = urllib.parse.quote(prompt_str)
+            img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={scene.scene_number}"
+            print(f"[*] Generating keyless AI visual for Scene {scene.scene_number}...")
+            img_resp = await client.get(img_url)
+            if img_resp.status_code == 200:
+                img_path = WORK_DIR / f"temp_{scene.scene_number:02d}.jpg"
+                img_path.write_bytes(img_resp.content)
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
+                        "-vf", f"scale={width}:{height},fps=30",
+                        "-t", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(raw_video_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+                return raw_video_path
+        except Exception as e:
+            print(f"[!] AI image fallback skipped ({e})")
 
-    print(f"[!] No stock clip found for Scene {scene.scene_number}, generating dark fallback canvas...")
+    # TIER 3: Dark Fallback Canvas
+    print(f"[!] Generating dark fallback canvas for Scene {scene.scene_number}...")
     subprocess.run(
         [
-            "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x111827:s=1080x1920:d=10",
+            "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x111827:s={width}x{height}:d=10",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(raw_video_path),
         ],
         stdout=subprocess.DEVNULL,
@@ -151,9 +213,6 @@ def get_audio_duration(audio_path: Path) -> float:
 
 def render_scene(scene_num: int, raw_video: Path, audio: Path, srt: Path, is_shorts: bool = True) -> Path:
     out_scene = WORK_DIR / f"rendered_{scene_num:02d}.mp4"
-    if out_scene.exists():
-        return out_scene
-
     duration = get_audio_duration(audio) + 0.25
     width, height = (1080, 1920) if is_shorts else (1920, 1080)
     srt_escaped = str(srt).replace("\\", "/").replace(":", "\\:")
@@ -197,16 +256,28 @@ def stitch_final_video(rendered_scenes: List[Path]) -> Path:
 
 
 async def run_pipeline():
-    topic = os.getenv("VIDEO_TOPIC", "Why Sleep Deprivation Destroys Your Brain Within 48 Hours")
+    # Clean previous run folder so every execution makes a fresh video
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    WORK_DIR.mkdir(exist_ok=True)
+
+    raw_topic = os.getenv("VIDEO_TOPIC", "AUTO").strip()
+    niche = os.getenv("CHANNEL_NICHE", "Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries")
     is_shorts = os.getenv("IS_SHORTS", "true").lower() == "true"
-    orientation = "portrait" if is_shorts else "landscape"
+
+    if not raw_topic or raw_topic.upper() == "AUTO":
+        topic = generate_autonomous_topic(niche)
+    else:
+        topic = raw_topic
+        with open(USED_TOPICS_FILE, "a", encoding="utf-8") as f:
+            f.write(topic + "\n")
 
     script = generate_script(topic, num_scenes=5)
     rendered_scenes = []
 
     for scene in script.scenes:
         audio_path, srt_path = await generate_audio_and_subs(scene)
-        raw_video_path = await fetch_broll(scene, orientation=orientation)
+        raw_video_path = await fetch_broll(scene, is_shorts=is_shorts)
         rendered_path = render_scene(scene.scene_number, raw_video_path, audio_path, srt_path, is_shorts)
         rendered_scenes.append(rendered_path)
 
