@@ -1,16 +1,16 @@
-name: Automated YouTube Video Pipeline
+name: LenxiQ Automated YouTube Pipeline
 
 on:
   workflow_dispatch:
     inputs:
       video_topic:
-        description: 'Leave as AUTO for AI topic generation, or type a custom topic'
+        description: 'Leave as AUTO for LenxiQ AI topic generation, or type a custom topic'
         required: true
         default: 'AUTO'
       channel_niche:
-        description: 'Your channel niche (used when topic is AUTO)'
+        description: 'LenxiQ Brand Pillars (used when topic is AUTO)'
         required: true
-        default: 'Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries'
+        default: 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense'
       is_shorts:
         description: 'Render as 9:16 YouTube Short? (true/false)'
         required: true
@@ -46,7 +46,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'AUTO' }}
-          CHANNEL_NICHE: ${{ github.event.inputs.channel_niche || 'Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries' }}
+          CHANNEL_NICHE: ${{ github.event.inputs.channel_niche || 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense' }}
           IS_SHORTS: ${{ github.event.inputs.is_shorts || 'true' }}
         run: python agent_core.py
 
@@ -55,7 +55,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add used_topics.txt
-          git diff --staged --quiet || git commit -m "chore: log generated video topic"
+          git diff --staged --quiet || git commit -m "chore: log generated LenxiQ video topic"
           git push
 
       - name: Upload to YouTube (If YOUTUBE_TOKEN_JSON is set)
@@ -66,7 +66,7 @@ jobs:
       - name: Save Rendered Video as Downloadable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rendered-youtube-video
+          name: lenxiq-rendered-video
           path: |
             output_run/final_video.mp4
             output_run/script.json

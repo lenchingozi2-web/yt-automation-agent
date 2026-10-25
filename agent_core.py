@@ -16,6 +16,18 @@ from groq import Groq
 
 load_dotenv()
 
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+PIXABAY_KEY = os.getenv("PIXABAY_API_KEY")
+
+LENXIQ_BRAND_IDENTITY = (
+    "LenxiQ (Umbrella Brand): "
+    "1. The advent of AI and its real-world impact on Medicine & Healthcare. "
+    "2. AI's transformation of Learning, Education, and Accelerated Mastery. "
+    "3. Building real AI products, autonomous agents, and software systems. "
+    "4. Human Intelligence, First-Principles Thinking, and Common Sense in the AI era."
+)
+
 WORK_DIR = Path("output_run")
 USED_TOPICS_FILE = Path("used_topics.txt")
 
@@ -24,7 +36,7 @@ class Scene(BaseModel):
     scene_number: int
     narration: str = Field(description="Spoken voiceover text for this scene (15-25 words).")
     search_queries: List[str] = Field(
-        description="2-3 simple 2-to-3-word stock video search keywords, e.g. ['brain neurons', 'doctor hospital']"
+        description="2-3 simple 2-to-3-word stock video search keywords, e.g. ['doctor technology', 'coding laptop', 'brain network']"
     )
 
 
@@ -35,25 +47,26 @@ class VideoScript(BaseModel):
     scenes: List[Scene]
 
 
-def generate_autonomous_topic(niche: str) -> str:
+def generate_autonomous_topic(brand_pillars: str) -> str:
     past_topics = []
     if USED_TOPICS_FILE.exists():
         past_topics = [line.strip() for line in USED_TOPICS_FILE.read_text().splitlines() if line.strip()]
 
     avoid_str = ", ".join(past_topics[-30:]) if past_topics else "None yet"
     prompt = (
-        f"You are a viral YouTube producer in the niche: '{niche}'. "
-        "Generate ONE ultra-clickable, curiosity-inducing YouTube video topic idea (10-14 words max). "
+        f"You are the chief content strategist for the brand: {brand_pillars}\n"
+        "Pick ONE of the brand's pillars and generate ONE sharp, thought-provoking, high-retention "
+        "YouTube video topic idea (8-14 words max) that builds authority for the LenxiQ brand. "
         f"Do NOT repeat any of these previous topics: [{avoid_str}]. "
         "Reply with ONLY the raw topic title and nothing else."
     )
 
     try:
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        client = genai.Client(api_key=GEMINI_KEY)
         resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         topic = resp.text.strip().strip('"')
     except Exception:
-        groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        groq_client = Groq(api_key=GROQ_KEY)
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
@@ -63,7 +76,7 @@ def generate_autonomous_topic(niche: str) -> str:
     with open(USED_TOPICS_FILE, "a", encoding="utf-8") as f:
         f.write(topic + "\n")
 
-    print(f"[★] Auto-Generated New Daily Topic: '{topic}'")
+    print(f"[★] LenxiQ Auto-Generated Topic: '{topic}'")
     return topic
 
 
@@ -71,14 +84,17 @@ def generate_script(topic: str, num_scenes: int = 5) -> VideoScript:
     script_path = WORK_DIR / "script.json"
 
     prompt = (
-        f"Write a high-retention YouTube script about: '{topic}'. "
-        f"Break it into exactly {num_scenes} scenes with punchy hooks and clear storytelling. "
+        f"You are writing for the 'LenxiQ' brand (focused on AI in Medicine, AI in Education, "
+        f"Building AI Products, and Intelligence/Common Sense).\n"
+        f"Write a sharp, insightful, high-retention YouTube script about: '{topic}'. "
+        f"Break it into exactly {num_scenes} scenes with a strong hook, grounded practical insight, "
+        "and a smart takeaway. Avoid cheesy clichés; sound like a builder and thinker. "
         "Provide 2-3 simple, broad stock video search keywords (2-3 words max each) per scene."
     )
 
     try:
         print("[*] Generating script via Gemini 2.5 Flash...")
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        client = genai.Client(api_key=GEMINI_KEY)
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -91,7 +107,7 @@ def generate_script(topic: str, num_scenes: int = 5) -> VideoScript:
         script_data = VideoScript.model_validate_json(response.text)
     except Exception as e:
         print(f"[!] Gemini unavailable ({e}). Switching to Groq Llama-3.3-70B...")
-        groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        groq_client = Groq(api_key=GROQ_KEY)
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -133,18 +149,16 @@ async def generate_audio_and_subs(scene: Scene, voice: str = "en-US-ChristopherN
 
 async def fetch_broll(scene: Scene, is_shorts: bool = True) -> Path:
     raw_video_path = WORK_DIR / f"raw_{scene.scene_number:02d}.mp4"
-    pixabay_key = os.getenv("PIXABAY_API_KEY")
     width, height = (1080, 1920) if is_shorts else (1920, 1080)
 
     async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
-        # TIER 1: Pixabay Video API
-        if pixabay_key:
+        if PIXABAY_KEY:
             for query in scene.search_queries:
                 print(f"[*] Searching Pixabay Videos for Scene {scene.scene_number}: '{query}'")
                 resp = await client.get(
                     "https://pixabay.com/api/videos/",
                     params={
-                        "key": pixabay_key,
+                        "key": PIXABAY_KEY,
                         "q": query[:100],
                         "per_page": 5,
                         "safesearch": "true",
@@ -165,9 +179,8 @@ async def fetch_broll(scene: Scene, is_shorts: bool = True) -> Path:
                             print(f"[✓] Downloaded Pixabay video for Scene {scene.scene_number}")
                             return raw_video_path
 
-        # TIER 2: Zero-Key AI Image Generation (Pollinations) + FFmpeg Motion
         try:
-            prompt_str = f"{scene.search_queries[0]}, cinematic, high detail, 8k"
+            prompt_str = f"{scene.search_queries[0]}, futuristic clean aesthetic, cinematic lighting, 8k"
             encoded_prompt = urllib.parse.quote(prompt_str)
             img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&nologo=true&seed={scene.scene_number}"
             print(f"[*] Generating keyless AI visual for Scene {scene.scene_number}...")
@@ -189,7 +202,6 @@ async def fetch_broll(scene: Scene, is_shorts: bool = True) -> Path:
         except Exception as e:
             print(f"[!] AI image fallback skipped ({e})")
 
-    # TIER 3: Dark Fallback Canvas
     print(f"[!] Generating dark fallback canvas for Scene {scene.scene_number}...")
     subprocess.run(
         [
@@ -251,22 +263,21 @@ def stitch_final_video(rendered_scenes: List[Path]) -> Path:
         "-i", str(concat_file), "-c", "copy", str(final_output),
     ]
     subprocess.run(cmd, cwd=WORK_DIR, check=True)
-    print(f"\n[✓] SUCCESS! Final video rendered at: {final_output}")
+    print(f"\n[✓] SUCCESS! Look at the left Explorer sidebar -> click 'output_run' -> click 'final_video.mp4'!")
     return final_output
 
 
 async def run_pipeline():
-    # Clean previous run folder so every execution makes a fresh video
     if WORK_DIR.exists():
         shutil.rmtree(WORK_DIR)
     WORK_DIR.mkdir(exist_ok=True)
 
     raw_topic = os.getenv("VIDEO_TOPIC", "AUTO").strip()
-    niche = os.getenv("CHANNEL_NICHE", "Mind-Blowing Human Body Facts, Neuroscience, and Medical Mysteries")
+    brand_pillars = os.getenv("CHANNEL_NICHE", LENXIQ_BRAND_IDENTITY)
     is_shorts = os.getenv("IS_SHORTS", "true").lower() == "true"
 
     if not raw_topic or raw_topic.upper() == "AUTO":
-        topic = generate_autonomous_topic(niche)
+        topic = generate_autonomous_topic(brand_pillars)
     else:
         topic = raw_topic
         with open(USED_TOPICS_FILE, "a", encoding="utf-8") as f:
