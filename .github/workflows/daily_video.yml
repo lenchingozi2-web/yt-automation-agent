@@ -1,0 +1,57 @@
+name: Automated YouTube Video Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_topic:
+        description: 'Topic for the video'
+        required: true
+        default: 'Why Sleep Deprivation Destroys Your Brain Within 48 Hours'
+      is_shorts:
+        description: 'Render as 9:16 YouTube Short? (true/false)'
+        required: true
+        default: 'true'
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  render-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg and Fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate and Render Video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'How Caffeine Hijacks Your Adenosine Receptors' }}
+          IS_SHORTS: ${{ github.event.inputs.is_shorts || 'true' }}
+        run: python agent_core.py
+
+      - name: Upload to YouTube (If YOUTUBE_TOKEN_JSON is set)
+        env:
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: python upload_youtube.py
+
+      - name: Save Rendered Video as Downloadable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-youtube-video
+          path: |
+            output_run/final_video.mp4
+            output_run/script.json
+          retention-days: 7

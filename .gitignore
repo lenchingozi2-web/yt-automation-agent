@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+output_run/
+.env
+client_secret.json
+token.json
+*.mp4
+*.mp3
+*.srt
