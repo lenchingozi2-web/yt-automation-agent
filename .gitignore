@@ -7,3 +7,6 @@ token.json
 *.mp4
 *.mp3
 *.srt
+.youtube-token.json
+*.onnx
+voices.bin

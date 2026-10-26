@@ -7,3 +7,7 @@ python-dotenv>=1.0.1
 google-api-python-client>=2.150.0
 google-auth-oauthlib>=1.2.1
 google-auth-httplib2>=0.2.0
+supabase>=2.10.0
+soundfile>=0.12.1
+kokoro-onnx>=0.4.9
+faster-whisper>=1.1.0
