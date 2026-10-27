@@ -104,21 +104,31 @@ def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
     return audio, srt
 
 
-async def fetch_pexels(scene: dict[str, Any], target: Path) -> bool:
-    key = os.getenv("PEXELS_API_KEY", "").strip()
+async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
+    key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key: return False
-    headers = {"Authorization": key}
     async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
         for query in scene.get("search_queries", []):
-            response = await client.get("https://api.pexels.com/videos/search", headers=headers, params={"query": query, "orientation": "portrait", "size": "medium", "per_page": 10})
+            # Pixabay has no orientation query parameter, so enforce portrait
+            # geometry and the 720p minimum while parsing each hit's variants.
+            response = await client.get("https://pixabay.com/api/videos/", params={
+                "key": key, "q": query, "video_type": "all",
+                "safesearch": "true", "per_page": 20,
+            })
             if response.status_code != 200: continue
-            candidates = []
-            for item in response.json().get("videos", []):
-                files = [f for f in item.get("video_files", []) if f.get("width", 0) < f.get("height", 0) and f.get("height", 0) >= 720 and f.get("link")]
-                if files: candidates.append(max(files, key=lambda f: f.get("height", 0)))
+            candidates: list[dict[str, Any]] = []
+            for item in response.json().get("hits", []):
+                # Pixabay returns quality variants under `videos` with url,
+                # width, and height fields.
+                variants = item.get("videos", {})
+                files = [file for file in variants.values() if isinstance(file, dict)
+                         and file.get("url")
+                         and int(file.get("width", 0)) < int(file.get("height", 0))
+                         and int(file.get("height", 0)) >= 720]
+                if files: candidates.extend(files)
             if not candidates: continue
-            clip = max(candidates, key=lambda f: f.get("height", 0))
-            download = await client.get(clip["link"])
+            clip = max(candidates, key=lambda f: int(f.get("height", 0)))
+            download = await client.get(clip["url"])
             if download.status_code == 200 and len(download.content) > 10000:
                 target.write_bytes(download.content)
                 return True
@@ -133,8 +143,8 @@ def fetch_broll(scene: dict[str, Any], directory: Path) -> Path:
     target = directory / f"raw_{int(scene['scene_number']):02d}.mp4"
     if target.exists() and target.stat().st_size > 0: return target
     try:
-        if asyncio.run(fetch_pexels(scene, target)): return target
-    except Exception as error: print(f"[b-roll] Pexels failed: {error}")
+        if asyncio.run(fetch_pixabay(scene, target)): return target
+    except Exception as error: print(f"[b-roll] Pixabay failed: {error}")
     print(f"[b-roll] using dark motion canvas for scene {scene['scene_number']}")
     dark_canvas(target)
     return target
