@@ -1,0 +1,12 @@
+Can AI Agents Replace Doctors? A Deep Dive Into Automated Diagnostics
+AI-Driven Early Cancer Detection: Algorithms Outperform Radiologists in Accuracy
+0.9726340770721436
+How AI Agents Can Personalize Medical Education for Every Student
+AI's Blind Spots: When Machine Learning Struggles With Human Common Sense
+0.9834518432617188
+0.9768675565719604
+0.03625587373971939
+0.037875689566135406
+The Ethics and Humanities of AI in Healthcare: Navigating Balance Between Precision Medicine and Empathy
+AI’s Common‑Sense Gap: Why Machines Still Miss Human Nuance
+AI Coaching for Lifelong Learning: How Personal Agents Transform Student Outcomes

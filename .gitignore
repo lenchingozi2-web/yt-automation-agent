@@ -7,3 +7,5 @@ token.json
 *.mp4
 *.mp3
 *.srt
+node_modules/
+.next/
