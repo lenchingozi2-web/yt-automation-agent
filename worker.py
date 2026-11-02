@@ -29,7 +29,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 ROOT = Path(os.getenv("WORKER_OUTPUT_DIR", "output_run"))
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-ChristopherNeural")
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "20"))
-MAX_SCENE_SECONDS = int(os.getenv("MAX_SCENE_SECONDS", "18"))
+MAX_SCENE_SECONDS = int(os.getenv("MAX_SCENE_SECONDS", "30"))
 
 
 def require_env(name: str) -> str:
@@ -109,8 +109,8 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
     if not key: return False
     async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
         for query in scene.get("search_queries", []):
-            # Pixabay has no orientation query parameter, so enforce portrait
-            # geometry and the 720p minimum while parsing each hit's variants.
+            # Pixabay has no orientation query parameter, so enforce the
+            # requested geometry while parsing each hit's variants.
             response = await client.get("https://pixabay.com/api/videos/", params={
                 "key": key, "q": query, "video_type": "all",
                 "safesearch": "true", "per_page": 20,
@@ -121,10 +121,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
                 # Pixabay returns quality variants under `videos` with url,
                 # width, and height fields.
                 variants = item.get("videos", {})
+                portrait = str(scene.get("format", "16:9")) == "9:16"
                 files = [file for file in variants.values() if isinstance(file, dict)
                          and file.get("url")
-                         and int(file.get("width", 0)) < int(file.get("height", 0))
-                         and int(file.get("height", 0)) >= 720]
+                         and ((int(file.get("width", 0)) < int(file.get("height", 0))) == portrait)
+                         and max(int(file.get("width", 0)), int(file.get("height", 0))) >= 720]
                 if files: candidates.extend(files)
             if not candidates: continue
             clip = max(candidates, key=lambda f: int(f.get("height", 0)))
@@ -135,8 +136,9 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
     return False
 
 
-def dark_canvas(target: Path) -> None:
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x101827:s=1080x1920:r=30", "-t", str(MAX_SCENE_SECONDS), "-pix_fmt", "yuv420p", "-c:v", "libx264", str(target)])
+def dark_canvas(target: Path, format: str = "16:9") -> None:
+    size = "1080x1920" if format == "9:16" else "1920x1080"
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x101827:s={size}:r=30", "-t", str(MAX_SCENE_SECONDS), "-pix_fmt", "yuv420p", "-c:v", "libx264", str(target)])
 
 
 def fetch_broll(scene: dict[str, Any], directory: Path) -> Path:
@@ -146,7 +148,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path) -> Path:
         if asyncio.run(fetch_pixabay(scene, target)): return target
     except Exception as error: print(f"[b-roll] Pixabay failed: {error}")
     print(f"[b-roll] using dark motion canvas for scene {scene['scene_number']}")
-    dark_canvas(target)
+    dark_canvas(target, str(scene.get("format", "16:9")))
     return target
 
 
@@ -154,9 +156,11 @@ def render_scene(scene: dict[str, Any], raw: Path, audio: Path, srt: Path, direc
     output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
     if output.exists() and output.stat().st_size > 0: return output
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=90'"
-    duration = min(MAX_SCENE_SECONDS, ffprobe_duration(audio) + 0.35)
-    run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw), "-i", str(audio), "-t", str(duration), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output)], timeout=240)
+    portrait = str(scene.get("format", "16:9")) == "9:16"
+    width, height = (1080, 1920) if portrait else (1920, 1080)
+    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=90'"
+    duration = ffprobe_duration(audio)
+    run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw), "-i", str(audio), "-t", str(duration), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output)], timeout=300)
     return output
 
 
@@ -202,6 +206,7 @@ def process(video: dict[str, Any], supabase) -> None:
     scenes = video.get("scenes") or []
     rendered: list[Path] = []
     for scene in scenes:
+        scene.setdefault("format", str(video.get("format", "16:9")))
         audio, srt = make_audio(scene, directory)
         raw = fetch_broll(scene, directory)
         rendered.append(render_scene(scene, raw, audio, srt, directory))
