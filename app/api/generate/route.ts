@@ -1,4 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 import { getAdminClient } from "@/src/lib/supabase-admin";
 
@@ -32,25 +31,20 @@ function cleanJson(text: string) {
   return text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
 }
 
-async function availableFallbackModel(apiKey: string) {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, { cache: "no-store" });
-  if (response.status === 401 || response.status === 403) {
-    throw new Error("Gemini API authentication failed. Set GEMINI_API_KEY to a valid Google AI Studio API key in Vercel, then redeploy.");
-  }
-  if (!response.ok) throw new Error(`Gemini model discovery failed (${response.status})`);
-  const body = (await response.json()) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[] }> };
-  const model = body.models?.find((item) => item.supportedGenerationMethods?.includes("generateContent"));
-  if (!model?.name) throw new Error("No Gemini model supporting generateContent is available.");
-  return model.name.replace(/^models\//, "");
-}
-
-async function generateWithModel(ai: GoogleGenAI, model: string, prompt: string) {
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: { responseMimeType: "application/json", maxOutputTokens: 65536 },
+async function generateWithModel(apiKey: string, model: string, prompt: string) {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: "application/json", maxOutputTokens: 65536 },
+    }),
+    cache: "no-store",
   });
-  return JSON.parse(cleanJson(response.text ?? "{}")) as Script;
+  const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; error?: { message?: string } };
+  if (!response.ok) throw new Error(body.error?.message || `Gemini ${model} request failed (${response.status})`);
+  const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "{}";
+  return JSON.parse(cleanJson(text)) as Script;
 }
 
 function normalizeScript(script: Script, format: "16:9" | "9:16", seconds: number): Script {
@@ -74,25 +68,25 @@ export async function POST(request: Request) {
     const body = await request.json() as { prompt?: unknown; duration?: unknown; format?: unknown };
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
     if (prompt.length < 3) return NextResponse.json({ error: "Add a topic or creative brief." }, { status: 400 });
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim().replace(/^["']|["']$/g, "");
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
     const seconds = durationSeconds(body.duration, prompt);
     const format = body.format === "9:16" ? "9:16" : "16:9";
     const plannedScenes = sceneCount(seconds);
     const generationPrompt = `${schemaPrompt}\nTarget duration: ${seconds} seconds.\nTarget format: ${format}.\nCreate approximately ${plannedScenes} scenes, with about 15-20 seconds of narration per scene.\nCreative brief: ${prompt}`;
-    const ai = new GoogleGenAI({ apiKey });
+    const candidateModels = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"];
     let script: Script | undefined;
-    for (const model of ["gemini-2.5-flash", "gemini-2.5-pro"]) {
+    let firstModelError = "";
+    for (const model of candidateModels) {
       try {
-        script = normalizeScript(await generateWithModel(ai, model, generationPrompt), format, seconds);
+        script = normalizeScript(await generateWithModel(apiKey, model, generationPrompt), format, seconds);
         break;
-      } catch { /* try the next supported model */ }
+      } catch (error) {
+        if (!firstModelError) firstModelError = error instanceof Error ? error.message : String(error);
+      }
     }
-    if (!script!) {
-      const fallback = await availableFallbackModel(apiKey);
-      script = normalizeScript(await generateWithModel(ai, fallback, generationPrompt), format, seconds);
-    }
+    if (!script) throw new Error(firstModelError || "Gemini generation failed.");
 
     let dbWarning: string | null = null;
     let video: Record<string, unknown> | null = null;
