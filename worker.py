@@ -198,6 +198,30 @@ def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
     return request.execute()["id"]
 
 
+def mark_completed(supabase, video_id: str, youtube_id: str) -> None:
+    completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    full_update = {
+        "status": "completed",
+        "youtube_id": youtube_id,
+        "youtube_video_id": youtube_id,
+        "youtube_url": f"https://www.youtube.com/watch?v={youtube_id}",
+        "completed_at": completed_at,
+        "error_message": None,
+    }
+    try:
+        result = supabase.table("videos").update(full_update).eq("id", video_id).execute()
+        if not getattr(result, "error", None): return
+        print(f"[status] full completion update failed: {result.error}; retrying core fields")
+    except Exception as error:
+        print(f"[status] full completion update failed: {error}; retrying core fields")
+    fallback = supabase.table("videos").update({
+        "status": "completed",
+        "youtube_url": f"https://www.youtube.com/watch?v={youtube_id}",
+    }).eq("id", video_id).execute()
+    if getattr(fallback, "error", None):
+        raise RuntimeError(f"Could not save completed video status: {fallback.error}")
+
+
 def process(video: dict[str, Any], supabase) -> None:
     video_id = str(video["id"])
     directory = ROOT / video_id
@@ -212,7 +236,7 @@ def process(video: dict[str, Any], supabase) -> None:
         rendered.append(render_scene(scene, raw, audio, srt, directory))
     final = stitch(rendered, directory)
     youtube_id = upload_youtube(video, final)
-    supabase.table("videos").update({"status": "completed", "youtube_video_id": youtube_id, "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "error_message": None}).eq("id", video_id).execute()
+    mark_completed(supabase, video_id, youtube_id)
     shutil.rmtree(directory, ignore_errors=True)
     print(f"[complete] {video_id} uploaded privately as https://youtu.be/{youtube_id}")
 
@@ -228,7 +252,10 @@ def main() -> None:
             try: process(video, supabase)
             except Exception as error:
                 print(f"[failed] {video.get('id')}: {error}")
-                supabase.table("videos").update({"status": "failed", "error_message": str(error)[:1000]}).eq("id", video["id"]).eq("status", "rendering").execute()
+                try:
+                    supabase.table("videos").update({"status": "failed", "error_message": str(error)[:1000]}).eq("id", video["id"]).eq("status", "rendering").execute()
+                except Exception as status_error:
+                    print(f"[failed] could not persist failure status: {status_error}")
         elif args.once: return
         else: time.sleep(POLL_SECONDS)
 
