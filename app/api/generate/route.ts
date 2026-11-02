@@ -41,7 +41,14 @@ async function generateWithModel(apiKey: string, model: string, prompt: string) 
     }),
     cache: "no-store",
   });
-  const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; error?: { message?: string } };
+  const raw = await response.text();
+  let body: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; error?: { message?: string } } = {};
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    if (!response.ok) throw new Error(raw.trim() || `Gemini ${model} request failed (${response.status})`);
+    throw new Error(`Gemini ${model} returned a non-JSON response: ${raw.trim().slice(0, 300) || "empty response"}`);
+  }
   if (!response.ok) throw new Error(body.error?.message || `Gemini ${model} request failed (${response.status})`);
   const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "{}";
   return JSON.parse(cleanJson(text)) as Script;
