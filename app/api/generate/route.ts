@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAdminClient } from "@/src/lib/supabase-admin";
+import { getRequestClient } from "@/src/lib/supabase-admin";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -91,11 +91,11 @@ export async function POST(request: Request) {
     let dbWarning: string | null = null;
     let video: Record<string, unknown> | null = null;
     try {
-      const { data, error } = await getAdminClient().from("videos").insert({ ...script, status: "pending" }).select().single();
+      const { data, error } = await getRequestClient(request).from("videos").insert({ ...script, status: "pending" }).select().single();
       if (error) {
         const message = String(error.message || error);
         if (/column|schema cache|does not exist/i.test(message)) {
-          const minimal = await getAdminClient().from("videos").insert({ title: script.title, description: script.description, scenes: script.scenes, status: "pending" }).select().single();
+          const minimal = await getRequestClient(request).from("videos").insert({ title: script.title, description: script.description, scenes: script.scenes, status: "pending" }).select().single();
           if (minimal.error) throw minimal.error;
           video = minimal.data as Record<string, unknown>;
           dbWarning = `Saved with core columns only after schema error: ${message}`;
