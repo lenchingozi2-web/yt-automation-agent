@@ -34,6 +34,9 @@ function cleanJson(text: string) {
 
 async function availableFallbackModel(apiKey: string) {
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, { cache: "no-store" });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error("Gemini API authentication failed. Set GEMINI_API_KEY to a valid Google AI Studio API key in Vercel, then redeploy.");
+  }
   if (!response.ok) throw new Error(`Gemini model discovery failed (${response.status})`);
   const body = (await response.json()) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[] }> };
   const model = body.models?.find((item) => item.supportedGenerationMethods?.includes("generateContent"));
@@ -71,7 +74,7 @@ export async function POST(request: Request) {
     const body = await request.json() as { prompt?: unknown; duration?: unknown; format?: unknown };
     const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
     if (prompt.length < 3) return NextResponse.json({ error: "Add a topic or creative brief." }, { status: 400 });
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
     const seconds = durationSeconds(body.duration, prompt);
