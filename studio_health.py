@@ -24,6 +24,20 @@ def main() -> int:
     except Exception as error:
         print("BLOCKED: videos table read failed:", type(error).__name__, str(error)[:320])
         return 3
+    available = []
+    columns = ("id", "title", "status", "created_at", "scenes", "script", "metadata",
+               "video_url", "thumbnail_url", "youtube_url", "description", "tags",
+               "duration_seconds", "duration", "format", "aspect_ratio", "error_message", "user_id")
+    for column in columns:
+        try:
+            client.table("videos").select(column).limit(0).execute()
+            available.append(column)
+        except Exception:
+            pass
+    print("SCHEMA: Existing videos columns: " + ", ".join(available), flush=True)
+    if not ({"scenes", "script"} & set(available)):
+        print("BLOCKED: videos table needs a scenes or script column to hold render data.")
+        return 4
     if not os.getenv("PIXABAY_API_KEY"):
         print("WARNING: PIXABAY_API_KEY is missing in GitHub Actions (safe dark fallback only).")
     else:
