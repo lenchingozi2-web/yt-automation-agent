@@ -10,7 +10,7 @@ export async function GET(request: Request) {
     const videos = (data || []).map(normalizeVideo);
     return NextResponse.json({ ok: true, videos }, { headers: { "Cache-Control": "no-store, max-age=0" } });
   } catch (error) {
-    console.error("Studio queue fetch failed", error);
+    if (statusFor(error) !== 401) console.error("Studio queue fetch failed", error);
     return NextResponse.json(errorResponse(error), { status: statusFor(error), headers: { "Cache-Control": "no-store" } });
   }
 }

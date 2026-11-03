@@ -25,6 +25,7 @@ export default function Home() {
     if (!supabase) return;
     try {
       const session = await supabase.auth.getSession();
+      if (!session.data.session?.access_token) return;
       const response = await fetch("/api/videos", { cache: "no-store", headers: { ...(session.data.session?.access_token ? { Authorization: `Bearer ${session.data.session.access_token}` } : {}) } });
       const payload = await response.json() as { videos?: Video[]; error?: unknown };
       if (!response.ok) throw new Error(toSafeMessage(payload.error));

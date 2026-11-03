@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
@@ -336,14 +337,31 @@ def main() -> None:
             if changed.data:
                 video = {**candidate, "status": "rendering"}
                 break
+        if not video:
+            # Recover a genuinely abandoned render, never an actively running one.
+            stale = supabase.table("videos").select("*").eq("status", "rendering").order("created_at").limit(5).execute()
+            for candidate in stale.data or []:
+                try:
+                    started = datetime.fromisoformat(str(candidate["created_at"]).replace("Z", "+00:00"))
+                    if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
+                    age_seconds = (datetime.now(timezone.utc) - started).total_seconds()
+                    if age_seconds > 7200:
+                        video = candidate
+                        print(f"[recovery] retrying abandoned job {candidate['id']}", flush=True)
+                        break
+                except (KeyError, TypeError, ValueError):
+                    continue
         if video:
             try:
                 process(video, supabase)
             except Exception as error:
                 print(f"[failed] {video.get('id')}: {error}", flush=True)
                 try:
+                    artifact = ROOT / str(video["id"]) / "final_video.mp4"
+                    run_url = "https://github.com/" + os.getenv("GITHUB_REPOSITORY", "lenchingozi2-web/yt-automation-agent") + "/actions/runs/" + os.getenv("GITHUB_RUN_ID", "")
+                    note = ("MP4 preserved as workflow artifact: " + run_url) if artifact.exists() else "Rendering failed"
                     save_fields(supabase, video, status="failed",
-                                error_message=str(error)[:1000], progress_note="Rendering failed")
+                                error_message=str(error)[:1000], progress_note=note)
                 except Exception as status_error:
                     print(f"[failed] cannot persist error: {status_error}", flush=True)
         elif args.once: return
