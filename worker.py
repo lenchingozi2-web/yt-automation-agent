@@ -275,6 +275,42 @@ def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
     row.update(payload)
 
 
+def storage_preview(path: Path) -> Path:
+    """Create a playable preview under the Supabase Free 50 MB single-file limit.
+
+    The 1080p master stays on disk for optional YouTube upload and Actions artifact.
+    """
+    maximum = 48_000_000
+    if path.stat().st_size < maximum:
+        return path
+    seconds = ffprobe_duration(path)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=True)
+    width, height = [int(v) for v in probe.stdout.strip().split(",")[:2]]
+    portrait = height > width
+    # Long-form: favor a crisp and small 480p preview over a 1080p upload rejection.
+    target_width, target_height = (480, 854) if portrait else (854, 480)
+    if seconds < 300:
+        target_width, target_height = ((720, 1280) if portrait else (1280, 720))
+    preview = path.with_name("stream_preview.mp4")
+    nominal_kbps = int((45_000_000 * 8 / seconds / 1000 - 64) * 0.84)
+    for shrink in (1.0, 0.70, 0.50):
+        bitrate = max(120, min(3200, int(nominal_kbps * shrink)))
+        run(["ffmpeg", "-y", "-i", str(path),
+             "-vf", f"scale={target_width}:{target_height}:flags=lanczos",
+             "-c:v", "libx264", "-preset", "veryfast",
+             "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
+             "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "64k", "-ac", "2",
+             "-movflags", "+faststart", str(preview)], timeout=1200)
+        if preview.stat().st_size < maximum:
+            print(f"[storage] preview {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
+            return preview
+    raise RuntimeError("Preview could not fit under the 50 MB Supabase Free file limit. The master MP4 is saved as a GitHub Actions artifact.")
+
+
 def upload_mp4(client, path: Path, video_id: str) -> str:
     bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     try:
@@ -284,7 +320,8 @@ def upload_mp4(client, path: Path, video_id: str) -> str:
             client.storage.create_bucket(bucket, options={"public": True})
         else: raise
     filename = f"{video_id}.mp4"
-    client.storage.from_(bucket).upload(filename, path.read_bytes(),
+    preview = storage_preview(path)
+    client.storage.from_(bucket).upload(filename, preview.read_bytes(),
         file_options={"content-type": "video/mp4", "upsert": "true"})
     return client.storage.from_(bucket).get_public_url(filename)
 
@@ -317,7 +354,7 @@ def process(video: dict[str, Any], supabase) -> None:
     save_fields(supabase, video, status="completed", video_url=storage_url,
                 storage_url=storage_url, youtube_url=youtube_url,
                 progress_note=note, error_message=None)
-    shutil.rmtree(directory, ignore_errors=True)
+    # Keep the full-resolution master for the GitHub Actions artifact upload.
     print(f"[completed] {video_id} {storage_url}", flush=True)
 
 
