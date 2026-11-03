@@ -75,6 +75,19 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
   }
   throw new Error("Could not save approved video: " + toSafeMessage(lastError, "Check the videos table schema and RLS policies."));
 }
+export const STUDIO_DAILY_LIMIT = Math.max(1, Math.min(20, Number(process.env.STUDIO_DAILY_LIMIT || 3) || 3));
+export function lagosStartOfDay(): string {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Africa/Lagos", day: "2-digit", month: "2-digit", year: "numeric" }).formatToParts(new Date());
+  const get = (kind: string) => parts.find(p => p.type === kind)?.value || "";
+  return new Date(get("year") + "-" + get("month") + "-" + get("day") + "T00:00:00+01:00").toISOString();
+}
+export async function quotaOf(client: SupabaseClient) {
+  const { count, error } = await client.from("videos").select("id", { count: "exact", head: true })
+    .gte("created_at", lagosStartOfDay());
+  if (error) throw error;
+  return { used: count ?? 0, limit: STUDIO_DAILY_LIMIT, timezone: "Africa/Lagos" };
+}
+
 export async function dispatchStudioWorker() {
   const token = process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
   if (!token) return { dispatched: false, note: "Queued. Scheduled GitHub Actions will collect the video (workflow dispatch token is not configured)." };
