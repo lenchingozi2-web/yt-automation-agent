@@ -42,7 +42,10 @@ def require_env(name: str) -> str:
 
 
 def run(command: list[str], *, timeout: int = 180) -> None:
-    subprocess.run(command, check=True, timeout=timeout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    result = subprocess.run(command, check=False, timeout=timeout, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("FFmpeg exited " + str(result.returncode) + ": " + result.stderr[-1200:])
 
 
 def ffprobe_duration(path: Path) -> float:

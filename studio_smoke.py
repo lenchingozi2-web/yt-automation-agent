@@ -13,6 +13,7 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from worker import ROOT, process
+# Diagnostic retry: print the end of FFmpeg stderr for the test run.
 
 
 def main() -> int:
