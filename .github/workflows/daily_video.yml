@@ -46,7 +46,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'AUTO' }}
-          CHANNEL_NICHE: ${{ github.event.inputs.channel_niche || 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense' }}
+          CHANNEL_NICHE: "${{ github.event.inputs.channel_niche || 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense' }}"
           IS_SHORTS: ${{ github.event.inputs.is_shorts || 'true' }}
         run: python agent_core.py
 
