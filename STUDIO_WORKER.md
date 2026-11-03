@@ -1,20 +1,29 @@
-# LenxiQ Studio worker
+# YT Automation Studio — operational handbook
 
-`worker.py` is intentionally not deployed to Vercel. It polls the Supabase `videos` table for `rendering` jobs, checkpoints each scene under `output_run/<video-id>/`, uses edge-tts with a Kokoro/faster-whisper CPU fallback, downloads portrait 720p+ clips from Pixabay, renders with FFmpeg, uploads privately to YouTube, and marks the row `completed`.
+## Video production
+- Root Next.js handles signed-in Studio drafts, scene editor, queue, daily allowance and media previews.
+- GitHub Actions runs root worker.py on dispatch or its five-minute fallback schedule.
+- Worker claims pending jobs, downloads B-roll strictly from Pixabay, generates voiceover and subtitles,
+  builds the MP4 with FFmpeg, and generates a 1280x720 branded JPEG thumbnail from the first scene.
+- The Scene Editor includes an editable thumbnail headline.
+- Previews are saved under the public renders bucket, and thumbnails under public thumbnails.
+- Full-resolution masters are retained as seven-day GitHub Actions artifacts ONLY when the repository is private; public repository artifacts can expose unpublished media.
+- YouTube uploads default to private; YouTube thumbnails are uploaded where channel permissions allow.
+- Default new-video allowance: 3 per day in Africa/Lagos, configurable with STUDIO_DAILY_LIMIT (1-20).
+- A successful YouTube upload is independent of thumbnail publishing or Supabase preview availability.
 
-## One-time setup
+## Safe retention policy
+- studio_maintenance.py runs daily at 02:15 UTC through studio_maintenance.yml.
+- Only a completed video with a saved YouTube URL/ID is eligible for automatic media deletion:
+  preview after 7 days, thumbnail after 90 days.
+- If YouTube fails, Supabase preview remains as a recovery copy, not deleted by this workflow.
+- The videos database row, title, description, scenes and YouTube URL remain indefinitely.
+- Manual workflow_dispatch defaults to dry-run so operators can review eligible files.
+- Database and storage usage can be checked in the dashboard; the Billing dashboard is authoritative.
 
-1. Apply `LensiQ/supabase/migrations/0046_video_studio.sql` to the LensiQ Supabase project.
-2. Install FFmpeg and Python dependencies with `pip install -r requirements.txt`.
-3. Set `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `PIXABAY_API_KEY` locally. Set `YOUTUBE_TOKEN_JSON` for unattended GitHub Actions runs.
-4. For the first local OAuth setup only, set `YOUTUBE_CLIENT_SECRET_JSON` to the contents of the Google `client_secret.json`; run the worker once interactively and keep the generated `.youtube-token.json` private. GitHub Actions cannot complete an interactive OAuth consent flow, so the refreshed authorized token must be stored as the `YOUTUBE_TOKEN_JSON` repository secret.
-5. For Kokoro fallback, provide `KOKORO_MODEL` and `KOKORO_VOICES` model files locally or as GitHub Actions secrets/artifacts.
-
-## Run
-
-```bash
-python worker.py --once   # process one rendering job
-python worker.py          # poll continuously
-```
-
-The worker retries neither provider calls nor uploads blindly. Existing audio, subtitles, raw clips, rendered scenes, and final output are reused on restart. Failed rows are marked `failed` with a bounded error message.
+## Required secrets
+Vercel: NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+STUDIO_ALLOWED_EMAILS, GEMINI_API_KEY. Optional GITHUB_TOKEN/GH_PAT for fast dispatch.
+GitHub Actions: SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL; SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY;
+PIXABAY_API_KEY. Optional YOUTUBE_TOKEN_JSON enables private upload and custom thumbnail publishing.
+See Studio integration probe workflow for read-only diagnostics. Never paste keys into logs or commits.

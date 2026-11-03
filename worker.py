@@ -24,6 +24,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
+from studio_media import create_thumbnail
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -189,6 +190,15 @@ def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
     return request.execute()["id"]
 
 
+def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
+    """Apply the custom JPEG to the uploaded YouTube video if the channel permits it."""
+    youtube = build("youtube", "v3", credentials=youtube_credentials())
+    youtube.thumbnails().set(
+        videoId=video_id,
+        media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
+    ).execute()
+
+
 def mark_completed(supabase, video_id: str, youtube_id: str) -> None:
     completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     full_update = {
@@ -326,6 +336,21 @@ def upload_mp4(client, path: Path, video_id: str) -> str:
     return client.storage.from_(bucket).get_public_url(filename)
 
 
+def upload_thumbnail(client, path: Path, video_id: str) -> str:
+    bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
+    try:
+        client.storage.get_bucket(bucket)
+    except Exception as error:
+        if "404" in str(error) or "not found" in str(error).lower():
+            client.storage.create_bucket(bucket, options={"public": True})
+        else:
+            raise
+    name = f"{video_id}.jpg"
+    client.storage.from_(bucket).upload(name, path.read_bytes(),
+        file_options={"content-type": "image/jpeg", "upsert": "true"})
+    return client.storage.from_(bucket).get_public_url(name)
+
+
 def process(video: dict[str, Any], supabase) -> None:
     video_id = str(video["id"])
     directory = ROOT / video_id
@@ -339,22 +364,56 @@ def process(video: dict[str, Any], supabase) -> None:
         rendered.append(render_scene(scene, raw, audio, srt, directory))
     save_fields(supabase, video, progress_note="Joining scenes")
     final = stitch(rendered, directory)
-    save_fields(supabase, video, progress_note="Saving MP4 to storage")
-    storage_url = upload_mp4(supabase, final, video_id)
-    youtube_url = ""
-    note = "MP4 ready. YouTube upload not configured."
+    # Render the thumbnail from the same Pixabay B-roll rather than paying for another image API.
+    headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
+    thumbnail_path = directory / "thumbnail.jpg"
+    create_thumbnail(directory / "raw_01.mp4", headline, thumbnail_path)
+    thumbnail_url, thumbnail_error = "", ""
+    try:
+        thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
+    except Exception as error:
+        thumbnail_error = f"Thumbnail storage: {str(error)[:180]}"
+        print(f"[thumbnail] {thumbnail_error}", flush=True)
+
+    save_fields(supabase, video, progress_note="Saving MP4 preview")
+    storage_url, storage_error = "", ""
+    try:
+        storage_url = upload_mp4(supabase, final, video_id)
+    except Exception as error:
+        storage_error = f"MP4 preview storage: {str(error)[:250]}"
+        print(f"[storage] {storage_error}", flush=True)
+
+    youtube_url, youtube_error, thumb_publish_error = "", "", ""
     if os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
         try:
             youtube_id = upload_youtube(details, final)
             youtube_url = f"https://www.youtube.com/watch?v={youtube_id}"
-            note = "MP4 ready. Uploaded privately to YouTube."
+            try:
+                set_youtube_thumbnail(youtube_id, thumbnail_path)
+            except Exception as error:
+                thumb_publish_error = f"YouTube thumbnail: {str(error)[:180]}"
+                print(f"[thumbnail] {thumb_publish_error}", flush=True)
         except Exception as error:
-            note = f"MP4 ready. YouTube upload failed: {str(error)[:300]}"
-            print(f"[youtube] {note}", flush=True)
-    save_fields(supabase, video, status="completed", video_url=storage_url,
-                storage_url=storage_url, youtube_url=youtube_url,
-                progress_note=note, error_message=None)
-    # Keep the full-resolution master for the GitHub Actions artifact upload.
+            youtube_error = f"YouTube upload: {str(error)[:250]}"
+            print(f"[youtube] {youtube_error}", flush=True)
+
+    warnings = [text for text in (thumbnail_error, storage_error, youtube_error, thumb_publish_error) if text]
+    if not storage_url and not youtube_url:
+        raise RuntimeError("Rendered master exists, but neither Supabase preview nor YouTube saved the video. " +
+                           " ".join(warnings) + " If the repository is private, download the short-lived GitHub artifact; otherwise retry after fixing publishing.")
+    note = "MP4 ready." if storage_url else "Full-size MP4 uploaded only to YouTube."
+    if youtube_url:
+        note += " YouTube upload saved privately, with custom thumbnail where permitted."
+    elif not os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
+        note += " YouTube publishing not configured."
+    if warnings:
+        note += " " + " ".join(warnings)
+    save_fields(supabase, video, status="completed", video_url=storage_url or None,
+                storage_url=storage_url or None, youtube_url=youtube_url or None,
+                thumbnail_url=thumbnail_url or None,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                progress_note=note[:1000], error_message=None)
+    # Retain local master until workflow ends. Artifact backup is private-repository-only.
     print(f"[completed] {video_id} {storage_url}", flush=True)
 
 

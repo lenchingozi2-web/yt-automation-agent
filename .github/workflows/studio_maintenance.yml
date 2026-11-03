@@ -1,0 +1,41 @@
+name: Studio media retention
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Inspect eligible files without deleting
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    - cron: '15 2 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: studio-media-retention
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Apply published-only media retention
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          STUDIO_PUBLISHED_PREVIEW_DAYS: '7'
+          STUDIO_PUBLISHED_THUMBNAIL_DAYS: '90'
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python studio_maintenance.py --dry-run
+          else
+            python studio_maintenance.py
+          fi

@@ -10,3 +10,4 @@ google-auth-httplib2>=0.2.0
 supabase>=2.10.0
 
 gTTS>=2.5.0
+Pillow>=11.0.0,<13

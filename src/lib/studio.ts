@@ -1,6 +1,6 @@
 export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number };
-export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[] };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; error_message?: string; progress_note?: string; created_at?: string };
+export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; created_at?: string };
 export function toSafeMessage(input: unknown, fallback = "Action completed."): string {
   const seen = new WeakSet<object>();
   function read(value: unknown, depth: number): string {
@@ -45,7 +45,8 @@ export function normalizeDraft(value: unknown): Draft {
   return { title: stringOf(source.title, "Untitled production"), description: stringOf(source.description || nested.description),
     tags: (Array.isArray(source.tags) ? source.tags : Array.isArray(nested.tags) ? nested.tags : stringOf(source.tags).split(",")).filter((t: unknown): t is string => typeof t === "string" && !!t.trim()),
     format: ratio === "9:16" ? "9:16" : "16:9",
-    duration_seconds: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 180, scenes };
+    duration_seconds: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 180, scenes,
+    thumbnail_title: stringOf(source.thumbnail_title || nested.thumbnail_title || source.thumbnailTitle || source.title, "New story") };
 }
 export function normalizeVideo(raw: unknown): StudioVideo {
   const row = objectOf(raw);
@@ -58,6 +59,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     video_url: stringOf(meta.video_url || meta.storage_url),
     youtube_url: stringOf(meta.youtube_url) || (youtubeId ? "https://www.youtube.com/watch?v=" + encodeURIComponent(youtubeId) : ""),
     youtube_id: youtubeId, created_at: stringOf(meta.created_at),
+    thumbnail_url: stringOf(meta.thumbnail_url), preview_expired_at: stringOf(meta.preview_expired_at),
     error_message: stringOf(meta.error_message || meta.error),
     progress_note: stringOf(meta.progress_note || meta.progress || meta.note) };
 }
