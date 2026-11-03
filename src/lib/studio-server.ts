@@ -90,7 +90,7 @@ export async function quotaOf(client: SupabaseClient) {
 
 export async function dispatchStudioWorker() {
   const token = process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
-  if (!token) return { dispatched: false, note: "Queued. Scheduled GitHub Actions will collect the video (workflow dispatch token is not configured)." };
+  if (!token) return { dispatched: false, note: "The automatic render worker checks the queue on a schedule. Processing may be delayed." };
   try {
     const response = await fetch("https://api.github.com/repos/lenchingozi2-web/yt-automation-agent/actions/workflows/studio_worker.yml/dispatches", {
       method: "POST",
@@ -98,8 +98,8 @@ export async function dispatchStudioWorker() {
       body: JSON.stringify({ ref: "main" }), cache: "no-store", signal: AbortSignal.timeout(8000),
     });
     return response.ok ? { dispatched: true, note: "Worker dispatched." } :
-      { dispatched: false, note: "Queued. Worker dispatch returned " + response.status + "; scheduled workflow may collect it." };
+      { dispatched: false, note: "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable (" + response.status + ")." };
   } catch {
-    return { dispatched: false, note: "Queued. Worker dispatch unreachable; scheduled workflow may collect it." };
+    return { dispatched: false, note: "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable." };
   }
 }
