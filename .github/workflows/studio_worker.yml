@@ -16,15 +16,62 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Check queue before installing rendering dependencies
+        id: queue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from urllib.request import Request, urlopen
+
+          url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
+          key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
+          work = True  # Fail open: let the renderer report missing credentials or API errors.
+          if url and key:
+              request = Request(
+                  url + "/rest/v1/videos?select=status,created_at&status=in.(pending,rendering)&order=created_at.asc&limit=100",
+                  headers={"apikey": key, "Authorization": "Bearer " + key},
+              )
+              try:
+                  with urlopen(request, timeout=15) as response:
+                      rows = json.load(response)
+                  now = datetime.now(timezone.utc)
+                  work = False
+                  for row in rows:
+                      if row.get("status") == "pending":
+                          work = True
+                          break
+                      if row.get("status") == "rendering":
+                          created = datetime.fromisoformat(str(row.get("created_at", "")).replace("Z", "+00:00"))
+                          if created.tzinfo is None:
+                              created = created.replace(tzinfo=timezone.utc)
+                          if (now - created).total_seconds() > 7200:
+                              work = True
+                              break
+              except Exception as error:
+                  print("Queue probe unavailable; running worker for safe recovery:", type(error).__name__)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("work=" + ("true" if work else "false") + "\n")
+          print("Rendering required:", work)
+          PY
       - name: Install FFmpeg and fonts
+        if: steps.queue.outputs.work == 'true'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
       - name: Install worker dependencies
+        if: steps.queue.outputs.work == 'true'
         run: pip install -r requirements.txt
       - name: Process one queued video
+        if: steps.queue.outputs.work == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
@@ -35,7 +82,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python worker.py --once
       - name: Preserve MP4 only when repository is private
-        if: github.event.repository.private == true
+        if: github.event.repository.private == true && steps.queue.outputs.work == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: studio-mp4-backup
