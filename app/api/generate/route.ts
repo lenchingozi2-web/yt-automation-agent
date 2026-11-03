@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRequestClient } from "@/src/lib/supabase-admin";
+import { getAdminClient, getRequestClient } from "@/src/lib/supabase-admin";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -14,6 +14,28 @@ type Script = {
   duration_seconds: number;
   scenes: Array<{ scene_number: number; narration: string; search_queries: string[] }>;
 };
+
+
+function queueClient(request: Request) {
+  try { return getAdminClient(); }
+  catch { return getRequestClient(request); }
+}
+
+function messageOf(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const value = error as { message?: unknown; error?: unknown; details?: unknown };
+    for (const candidate of [value.message, value.error, value.details]) {
+      if (typeof candidate === "string" && candidate.trim()) return candidate;
+    }
+    try { return JSON.stringify(error); } catch { return "Database request failed."; }
+  }
+  return "Database request failed.";
+}
+
+function isSchemaError(error: unknown) {
+  return /column|schema cache|does not exist|could not find the .* column/i.test(messageOf(error));
+}
 
 function durationSeconds(value: unknown, prompt: string) {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.round(value);
@@ -98,24 +120,29 @@ export async function POST(request: Request) {
     let dbWarning: string | null = null;
     let video: Record<string, unknown> | null = null;
     try {
-      const { data, error } = await getRequestClient(request).from("videos").insert({ ...script, status: "pending" }).select().single();
-      if (error) {
-        const message = String(error.message || error);
-        if (/column|schema cache|does not exist/i.test(message)) {
-          const minimal = await getRequestClient(request).from("videos").insert({ title: script.title, description: script.description, scenes: script.scenes, status: "pending" }).select().single();
-          if (minimal.error) throw minimal.error;
-          video = minimal.data as Record<string, unknown>;
-          dbWarning = `Saved with core columns only after schema error: ${message}`;
-        } else throw error;
-      } else video = data as Record<string, unknown>;
+      const client = queueClient(request);
+      const full = await client.from("videos").insert({ ...script, status: "pending" }).select().single();
+      if (!full.error) video = full.data as Record<string, unknown>;
+      else if (isSchemaError(full.error)) {
+        const core = await client.from("videos").insert({ title: script.title, status: "pending", scenes: script.scenes }).select().single();
+        if (!core.error) {
+          video = core.data as Record<string, unknown>;
+          dbWarning = `Saved with core columns only after schema error: ${messageOf(full.error)}`;
+        } else {
+          const fallback = await client.from("videos").insert({ title: script.title, status: "pending", script: { ...script } }).select().single();
+          if (fallback.error) throw fallback.error;
+          video = fallback.data as Record<string, unknown>;
+          dbWarning = `Saved with script column after schema error: ${messageOf(full.error)}`;
+        }
+      } else throw full.error;
     } catch (error) {
-      dbWarning = error instanceof Error ? error.message : String(error);
+      dbWarning = messageOf(error);
       console.warn("Script generated but database insert failed", error);
     }
 
     return NextResponse.json({ script, video, dbWarning });
   } catch (error) {
     console.error("Script generation failed", error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return NextResponse.json({ error: messageOf(error) }, { status: 500 });
   }
 }
