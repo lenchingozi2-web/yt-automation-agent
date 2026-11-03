@@ -15,6 +15,13 @@ export async function studioClient(request: Request): Promise<SupabaseClient> {
   const { data, error } = await userClient.auth.getUser(jwt);
   if (error || !data.user) throw new StudioAuthError("Your session has expired. Please sign in again.");
   if (!role()) return userClient;
+  // A service-role key bypasses RLS: never grant it to arbitrary authenticated users.
+  const allowed = (process.env.STUDIO_ALLOWED_EMAILS || process.env.STUDIO_OWNER_EMAIL || "")
+    .split(/[,;]/).map(email => email.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.length) throw new Error("Set STUDIO_ALLOWED_EMAILS to the studio owner's sign-in email before enabling service-role access.");
+  if (!data.user.email || !allowed.includes(data.user.email.toLowerCase())) {
+    throw new StudioAuthError("Your account is not authorized for this Studio.");
+  }
   return createClient(url(), role(), { auth: { autoRefreshToken: false, persistSession: false } });
 }
 export function statusFor(error: unknown) { return error instanceof StudioAuthError ? 401 : 500; }
