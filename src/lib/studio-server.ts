@@ -24,6 +24,14 @@ export async function studioClient(request: Request): Promise<SupabaseClient> {
   }
   return createClient(url(), role(), { auth: { autoRefreshToken: false, persistSession: false } });
 }
+export async function studioUserId(request: Request): Promise<string> {
+  const match = /^Bearer (.+)$/i.exec(request.headers.get("authorization") || "");
+  if (!match) throw new StudioAuthError();
+  const client = createClient(url(), anon(), { auth: { autoRefreshToken: false, persistSession: false } });
+  const { data, error } = await client.auth.getUser(match[1]);
+  if (error || !data.user) throw new StudioAuthError("Your session has expired. Please sign in again.");
+  return data.user.id;
+}
 export function statusFor(error: unknown) { return error instanceof StudioAuthError ? 401 : 500; }
 export function errorResponse(error: unknown) { return { ok: false, error: toSafeMessage(error, "The request failed.") }; }
 const missingColumn = (error: unknown) => {
@@ -35,41 +43,38 @@ function scriptPayload(draft: Draft) {
     aspect_ratio: draft.format, duration: draft.duration_seconds, description: draft.description,
     tags: draft.tags, scenes: draft.scenes, video_url: "", youtube_url: "", error_message: "" } };
 }
-export async function safeInsertVideo(client: SupabaseClient, approved: unknown) {
+export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string) {
   const draft = normalizeDraft(approved);
-  if (!draft.title.trim() || draft.scenes.length < 1 || draft.scenes.some(s => !s.narration.trim())) throw new Error("A title and narration for every scene are required.");
+  if (!draft.title.trim() || draft.scenes.length < 1 || draft.scenes.some(scene => !scene.narration.trim())) {
+    throw new Error("A title and narration for every scene are required.");
+  }
   if (draft.scenes.length > 60) throw new Error("Maximum 60 scenes per video.");
   const packed = scriptPayload(draft);
+  // Actual production table uses scenes JSON and may have no metadata/script columns.
+  // Keep custom thumbnail, duration and YouTube metadata alongside the first scene.
+  const enrichedScenes = draft.scenes.map((scene, index) => index === 0
+    ? { ...scene, _studio: { ...packed.metadata, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title } }
+    : scene);
+  const withUser = (payload: Record<string, unknown>) => userId ? { ...payload, user_id: userId } : payload;
   const candidates: Record<string, unknown>[] = [
-    { title: draft.title, status: "pending", description: draft.description, tags: draft.tags, format: draft.format, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, scenes: draft.scenes },
-    { title: draft.title, status: "pending", script: packed },
-    { title: draft.title, status: "pending", scenes: packed },
-    { title: draft.title, status: "pending", scenes: draft.scenes },
-    { title: draft.title, status: "pending", script: JSON.stringify(packed) },
+    withUser({ title: draft.title, status: "pending", description: draft.description, tags: draft.tags,
+      format: draft.format, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, scenes: enrichedScenes }),
+    withUser({ title: draft.title, status: "pending", description: draft.description, scenes: enrichedScenes }),
+    withUser({ title: draft.title, status: "pending", scenes: enrichedScenes }),
+    { title: draft.title, status: "pending", scenes: enrichedScenes },
+    withUser({ title: draft.title, status: "pending", scenes: JSON.stringify(enrichedScenes) }),
+    withUser({ title: draft.title, status: "pending", script: packed }),
+    withUser({ title: draft.title, status: "pending", scenes: packed }),
   ];
   let lastError: unknown;
   for (const payload of candidates) {
     const { data, error } = await client.from("videos").insert(payload).select("*").single();
     if (!error && data) return data;
     lastError = error;
-    if (!missingColumn(error) && !/invalid input syntax for type|json|expected array|type mismatch/i.test(toSafeMessage(error))) break;
+    if (!missingColumn(error) && !/invalid input syntax|json|expected array|type mismatch|null value|check constraint|violates not-null/i.test(toSafeMessage(error))) break;
   }
   throw new Error("Could not save approved video: " + toSafeMessage(lastError, "Check the videos table schema and RLS policies."));
 }
-const LAGOS = "Africa/Lagos";
-export const STUDIO_DAILY_LIMIT = Math.max(1, Math.min(20, Number(process.env.STUDIO_DAILY_LIMIT || 3) || 3));
-export function lagosStartOfDay(): string {
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: LAGOS, day: "2-digit", month: "2-digit", year: "numeric" }).formatToParts(new Date());
-  const get = (kind: string) => parts.find(p => p.type === kind)?.value || "";
-  return new Date(get("year") + "-" + get("month") + "-" + get("day") + "T00:00:00+01:00").toISOString();
-}
-export async function quotaOf(client: SupabaseClient) {
-  const { count, error } = await client.from("videos").select("id", { count: "exact", head: true })
-    .gte("created_at", lagosStartOfDay());
-  if (error) throw error;
-  return { used: count ?? 0, limit: STUDIO_DAILY_LIMIT, timezone: LAGOS };
-}
-
 export async function dispatchStudioWorker() {
   const token = process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
   if (!token) return { dispatched: false, note: "Queued. Scheduled GitHub Actions will collect the video (workflow dispatch token is not configured)." };

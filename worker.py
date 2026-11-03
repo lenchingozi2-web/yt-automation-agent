@@ -247,7 +247,8 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
         scenes = script.get("scenes", metadata.get("scenes", []))
     if not isinstance(scenes, list) or not scenes:
         raise ValueError("This video has no scenes; submit it from Scene Editor.")
-    merged = {**metadata, **script, **row}
+    first_metadata = decode(scenes[0].get("_studio")) if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
+    merged = {**first_metadata, **metadata, **script, **row}
     ratio = merged.get("aspect_ratio") or merged.get("format") or "16:9"
     ratio = "9:16" if ratio == "9:16" else "16:9"
     result = []

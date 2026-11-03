@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { normalizeVideo, toSafeMessage } from "@/src/lib/studio";
-import { dispatchStudioWorker, errorResponse, quotaOf, safeInsertVideo, statusFor, studioClient } from "@/src/lib/studio-server";
+import { dispatchStudioWorker, errorResponse, quotaOf, safeInsertVideo, statusFor, studioClient, studioUserId } from "@/src/lib/studio-server";
 export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
           error: "Today's production allowance is full (" + quota.limit + "/" + quota.limit + "). Your next allowance starts at midnight Nigeria time. Failed jobs can still be retried.",
           quota }, { status: 429 });
       }
-      saved = await safeInsertVideo(client, body);
+      saved = await safeInsertVideo(client, body, await studioUserId(request));
     }
     const dispatch = await dispatchStudioWorker();
     return NextResponse.json({ ok: true, message: "Video queued for rendering!",
