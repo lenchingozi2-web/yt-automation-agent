@@ -96,6 +96,17 @@ def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
     except Exception as error:
         print(f"[audio] edge-tts failed for scene {number}: {error}; using gTTS fallback")
         kokoro_scene(text, audio, srt)
+    # Edge TTS WordBoundary events are not guaranteed. Always write a valid,
+    # deterministic SRT synchronized to measured audio length so libass works.
+    actual_seconds = ffprobe_duration(audio)
+    tokens = text.split()
+    phrases = [" ".join(tokens[i:i + 9]) for i in range(0, len(tokens), 9)] or [text]
+    captions = [(i * actual_seconds / len(phrases),
+                 (i + 1) * actual_seconds / len(phrases),
+                 phrase) for i, phrase in enumerate(phrases)]
+    write_srt(captions, srt)
+    if not srt.is_file() or srt.stat().st_size < 35:
+        raise RuntimeError("Failed to generate usable subtitles for scene " + str(number))
     return audio, srt
 
 

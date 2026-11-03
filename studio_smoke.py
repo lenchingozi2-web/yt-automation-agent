@@ -13,7 +13,7 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from worker import ROOT, process
-# Third diagnostic run: confirm Pixabay clip geometry and bounded FFmpeg memory.
+# Fourth diagnostic run: verify deterministic subtitles and final media storage.
 
 
 def main() -> int:
