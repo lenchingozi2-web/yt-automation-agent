@@ -1,14 +1,19 @@
-name: LenxiQ Studio Worker
+name: Studio Render Worker
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [render_video]
   schedule:
     - cron: '*/5 * * * *'
 permissions:
   contents: read
+concurrency:
+  group: studio-render-worker
+  cancel-in-progress: false
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install FFmpeg and fonts
@@ -21,10 +26,11 @@ jobs:
         run: pip install -r requirements.txt
       - name: Process one queued video
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-          KOKORO_MODEL: ${{ secrets.KOKORO_MODEL }}
-          KOKORO_VOICES: ${{ secrets.KOKORO_VOICES }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python worker.py --once

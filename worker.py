@@ -70,25 +70,15 @@ async def edge_tts_scene(text: str, audio: Path, srt: Path) -> None:
 
 
 def kokoro_scene(text: str, audio: Path, srt: Path) -> None:
-    """CPU fallback. Install kokoro-onnx and provide KOKORO_MODEL/KOKORO_VOICES."""
-    import soundfile as sf
-    from kokoro_onnx import Kokoro
-    from faster_whisper import WhisperModel
-    model = os.getenv("KOKORO_MODEL", "kokoro-v1.0.onnx")
-    voices = os.getenv("KOKORO_VOICES", "voices.bin")
-    voice = os.getenv("KOKORO_VOICE", "af_heart")
-    samples, sample_rate = Kokoro(model, voices).create(text, voice=voice, speed=1.0, lang="en-us")
-    wav = audio.with_suffix(".wav")
-    sf.write(wav, samples, sample_rate)
-    run(["ffmpeg", "-y", "-i", str(wav), "-codec:a", "libmp3lame", "-q:a", "3", str(audio)])
-    whisper = WhisperModel(os.getenv("WHISPER_MODEL", "tiny.en"), device="cpu", compute_type="int8")
-    segments, _ = whisper.transcribe(str(wav), word_timestamps=True)
-    words: list[tuple[float, float, str]] = []
-    for segment in segments:
-        for word in segment.words or []:
-            words.append((float(word.start), float(word.end), word.word))
-    write_srt(words, srt)
-    wav.unlink(missing_ok=True)
+    """Small fallback when Edge TTS is unavailable."""
+    from gtts import gTTS
+    gTTS(text=text, lang="en").save(str(audio))
+    seconds = ffprobe_duration(audio)
+    words = text.split()
+    groups = [" ".join(words[i:i + 10]) for i in range(0, len(words), 10)] or [text]
+    entries = [(i * seconds / len(groups), (i + 1) * seconds / len(groups), group)
+               for i, group in enumerate(groups)]
+    write_srt(entries, srt)
 
 
 def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
@@ -97,9 +87,9 @@ def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
     if audio.exists() and srt.exists() and audio.stat().st_size > 0: return audio, srt
     text = str(scene["narration"]).strip()
     try:
-        asyncio.run(asyncio.wait_for(edge_tts_scene(text, audio, srt), timeout=45))
+        asyncio.run(asyncio.wait_for(edge_tts_scene(text, audio, srt), timeout=120))
     except Exception as error:
-        print(f"[audio] edge-tts failed for scene {number}: {error}; using Kokoro fallback")
+        print(f"[audio] edge-tts failed for scene {number}: {error}; using gTTS fallback")
         kokoro_scene(text, audio, srt)
     return audio, srt
 
@@ -108,7 +98,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key: return False
     async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
-        for query in scene.get("search_queries", []):
+        for query in list(scene.get("search_queries", [])) + ["nature", "technology", "cinematic background"]:
             # Pixabay has no orientation query parameter, so enforce the
             # requested geometry while parsing each hit's variants.
             response = await client.get("https://pixabay.com/api/videos/", params={
@@ -124,8 +114,8 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
                 portrait = str(scene.get("format", "16:9")) == "9:16"
                 files = [file for file in variants.values() if isinstance(file, dict)
                          and file.get("url")
-                         and ((int(file.get("width", 0)) < int(file.get("height", 0))) == portrait)
-                         and max(int(file.get("width", 0)), int(file.get("height", 0))) >= 720]
+                         and ((portrait and int(file.get("height", 0)) >= 720 and int(file.get("width", 0)) >= 720) or
+                              (not portrait and int(file.get("width", 0)) >= 1280 and int(file.get("height", 0)) >= 720))]
                 if files: candidates.extend(files)
             if not candidates: continue
             clip = max(candidates, key=lambda f: int(f.get("height", 0)))
@@ -138,7 +128,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
 
 def dark_canvas(target: Path, format: str = "16:9") -> None:
     size = "1080x1920" if format == "9:16" else "1920x1080"
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x101827:s={size}:r=30", "-t", str(MAX_SCENE_SECONDS), "-pix_fmt", "yuv420p", "-c:v", "libx264", str(target)])
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x101827:s={size}:r=30", "-t", "2", "-vf", "noise=alls=3:allf=t", "-pix_fmt", "yuv420p", "-c:v", "libx264", str(target)])
 
 
 def fetch_broll(scene: dict[str, Any], directory: Path) -> Path:
@@ -222,41 +212,144 @@ def mark_completed(supabase, video_id: str, youtube_id: str) -> None:
         raise RuntimeError(f"Could not save completed video status: {fallback.error}")
 
 
+def decode(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict): return value
+    if isinstance(value, str):
+        try:
+            item = json.loads(value)
+            return item if isinstance(item, dict) else {}
+        except ValueError: return {}
+    return {}
+
+
+def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    script = decode(row.get("script"))
+    scenes = row.get("scenes")
+    if isinstance(scenes, str):
+        try: scenes = json.loads(scenes)
+        except ValueError: scenes = None
+    metadata = decode(row.get("metadata"))
+    if isinstance(scenes, dict):
+        metadata.update(scenes)
+        scenes = scenes.get("scenes")
+    if not isinstance(scenes, list):
+        scenes = script.get("scenes", metadata.get("scenes", []))
+    if not isinstance(scenes, list) or not scenes:
+        raise ValueError("This video has no scenes; submit it from Scene Editor.")
+    merged = {**metadata, **script, **row}
+    ratio = merged.get("aspect_ratio") or merged.get("format") or "16:9"
+    ratio = "9:16" if ratio == "9:16" else "16:9"
+    result = []
+    for i, raw in enumerate(scenes):
+        item = raw if isinstance(raw, dict) else {"narration": str(raw)}
+        narration = str(item.get("narration", "")).strip()
+        if not narration: raise ValueError(f"Scene {i + 1} is missing narration.")
+        result.append({"scene_number": i + 1, "narration": narration,
+                       "search_queries": item.get("search_queries", []) or [],
+                       "format": ratio})
+    return result, ratio, merged
+
+
+def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
+    """Update existing columns and embed optional fields in available JSON."""
+    known = set(row.keys())
+    payload = {k: v for k, v in changes.items() if k in known}
+    extras = {k: v for k, v in changes.items() if k not in known}
+    if extras and "metadata" in known:
+        payload["metadata"] = {**decode(row.get("metadata")), **extras}
+    elif extras and "script" in known:
+        existing = {**decode(row.get("script")), **extras}
+        payload["script"] = json.dumps(existing) if isinstance(row.get("script"), str) else existing
+    elif extras and "scenes" in known:
+        scenes = row.get("scenes")
+        if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict):
+            scenes = [dict(x) for x in scenes]
+            scenes[0]["_studio"] = {**decode(scenes[0].get("_studio")), **extras}
+            payload["scenes"] = scenes
+        elif isinstance(scenes, dict):
+            payload["scenes"] = {**scenes, **extras}
+    if not payload: raise RuntimeError("videos table has no supported status column.")
+    answer = client.table("videos").update(payload).eq("id", row["id"]).execute()
+    if answer.data is None: raise RuntimeError("Could not persist video status.")
+    row.update(payload)
+
+
+def upload_mp4(client, path: Path, video_id: str) -> str:
+    bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
+    try:
+        client.storage.get_bucket(bucket)
+    except Exception as err:
+        if "404" in str(err) or "not found" in str(err).lower():
+            client.storage.create_bucket(bucket, options={"public": True})
+        else: raise
+    filename = f"{video_id}.mp4"
+    client.storage.from_(bucket).upload(filename, path.read_bytes(),
+        file_options={"content-type": "video/mp4", "upsert": "true"})
+    return client.storage.from_(bucket).get_public_url(filename)
+
+
 def process(video: dict[str, Any], supabase) -> None:
     video_id = str(video["id"])
     directory = ROOT / video_id
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "video.json").write_text(json.dumps(video, indent=2), encoding="utf-8")
-    scenes = video.get("scenes") or []
+    scenes, ratio, details = video_details(video)
     rendered: list[Path] = []
     for scene in scenes:
-        scene.setdefault("format", str(video.get("format", "16:9")))
+        save_fields(supabase, video, progress_note=f"Rendering scene {scene['scene_number']} of {len(scenes)}")
         audio, srt = make_audio(scene, directory)
         raw = fetch_broll(scene, directory)
         rendered.append(render_scene(scene, raw, audio, srt, directory))
+    save_fields(supabase, video, progress_note="Joining scenes")
     final = stitch(rendered, directory)
-    youtube_id = upload_youtube(video, final)
-    mark_completed(supabase, video_id, youtube_id)
+    save_fields(supabase, video, progress_note="Saving MP4 to storage")
+    storage_url = upload_mp4(supabase, final, video_id)
+    youtube_url = ""
+    note = "MP4 ready. YouTube upload not configured."
+    if os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
+        try:
+            youtube_id = upload_youtube(details, final)
+            youtube_url = f"https://www.youtube.com/watch?v={youtube_id}"
+            note = "MP4 ready. Uploaded privately to YouTube."
+        except Exception as error:
+            note = f"MP4 ready. YouTube upload failed: {str(error)[:300]}"
+            print(f"[youtube] {note}", flush=True)
+    save_fields(supabase, video, status="completed", video_url=storage_url,
+                storage_url=storage_url, youtube_url=youtube_url,
+                progress_note=note, error_message=None)
     shutil.rmtree(directory, ignore_errors=True)
-    print(f"[complete] {video_id} uploaded privately as https://youtu.be/{youtube_id}")
+    print(f"[completed] {video_id} {storage_url}", flush=True)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("--once", action="store_true"); args = parser.parse_args()
-    supabase = create_client(require_env("NEXT_PUBLIC_SUPABASE_URL"), require_env("SUPABASE_SERVICE_ROLE_KEY"))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    url = os.getenv("SUPABASE_URL") or require_env("NEXT_PUBLIC_SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or require_env("SUPABASE_KEY")
+    supabase = create_client(url, key)
     ROOT.mkdir(parents=True, exist_ok=True)
     while True:
-        result = supabase.table("videos").select("*").eq("status", "rendering").order("created_at").limit(1).execute()
-        video = (result.data or [None])[0]
+        result = supabase.table("videos").select("*").eq("status", "pending").order("created_at").limit(1).execute()
+        video = None
+        for candidate in result.data or []:
+            changed = supabase.table("videos").update({"status": "rendering"}).eq("id", candidate["id"]).eq("status", "pending").execute()
+            if changed.data:
+                video = {**candidate, "status": "rendering"}
+                break
         if video:
-            try: process(video, supabase)
+            try:
+                process(video, supabase)
             except Exception as error:
-                print(f"[failed] {video.get('id')}: {error}")
+                print(f"[failed] {video.get('id')}: {error}", flush=True)
                 try:
-                    supabase.table("videos").update({"status": "failed", "error_message": str(error)[:1000]}).eq("id", video["id"]).eq("status", "rendering").execute()
+                    save_fields(supabase, video, status="failed",
+                                error_message=str(error)[:1000], progress_note="Rendering failed")
                 except Exception as status_error:
-                    print(f"[failed] could not persist failure status: {status_error}")
+                    print(f"[failed] cannot persist error: {status_error}", flush=True)
         elif args.once: return
         else: time.sleep(POLL_SECONDS)
+        if args.once: return
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

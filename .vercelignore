@@ -3,3 +3,4 @@ requirements.txt
 *.py
 pyproject.toml
 .github/
+lenxiq-studio/
