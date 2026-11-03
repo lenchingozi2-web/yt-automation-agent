@@ -13,7 +13,7 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from worker import ROOT, process
-# Diagnostic retry: print the end of FFmpeg stderr for the test run.
+# Third diagnostic run: confirm Pixabay clip geometry and bounded FFmpeg memory.
 
 
 def main() -> int:
@@ -70,7 +70,7 @@ def main() -> int:
         print("PASS: Real test render saved; MP4 and thumbnail downloaded and validated.")
         return 0
     except Exception as error:
-        print("FAILED: Real render:", type(error).__name__, str(error)[:500])
+        print("FAILED: Real render:", type(error).__name__, str(error)[-1200:])
         return 4
     finally:
         for bucket, suffix in (("renders", ".mp4"), ("thumbnails", ".jpg")):

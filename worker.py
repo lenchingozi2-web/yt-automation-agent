@@ -100,34 +100,66 @@ def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
 
 
 async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
+    """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
-    if not key: return False
-    async with httpx.AsyncClient(timeout=40, follow_redirects=True) as client:
-        for query in list(scene.get("search_queries", [])) + ["nature", "technology", "cinematic background"]:
-            # Pixabay has no orientation query parameter, so enforce the
-            # requested geometry while parsing each hit's variants.
+    if not key:
+        return False
+    portrait = str(scene.get("format", "16:9")) == "9:16"
+    queries = list(scene.get("search_queries", [])) + ["nature", "technology", "cinematic background"]
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        for query in queries:
+            if not str(query).strip():
+                continue
             response = await client.get("https://pixabay.com/api/videos/", params={
-                "key": key, "q": query, "video_type": "all",
+                "key": key, "q": str(query).strip(), "video_type": "all",
                 "safesearch": "true", "per_page": 20,
             })
-            if response.status_code != 200: continue
-            candidates: list[dict[str, Any]] = []
-            for item in response.json().get("hits", []):
-                # Pixabay returns quality variants under `videos` with url,
-                # width, and height fields.
-                variants = item.get("videos", {})
-                portrait = str(scene.get("format", "16:9")) == "9:16"
-                files = [file for file in variants.values() if isinstance(file, dict)
-                         and file.get("url")
-                         and ((portrait and int(file.get("height", 0)) >= 720 and int(file.get("width", 0)) >= 720) or
-                              (not portrait and int(file.get("width", 0)) >= 1280 and int(file.get("height", 0)) >= 720))]
-                if files: candidates.extend(files)
-            if not candidates: continue
-            clip = max(candidates, key=lambda f: int(f.get("height", 0)))
-            download = await client.get(clip["url"])
-            if download.status_code == 200 and len(download.content) > 10000:
-                target.write_bytes(download.content)
-                return True
+            if response.status_code != 200:
+                continue
+            preferred = []
+            fallback = []
+            for hit in response.json().get("hits", []):
+                variants = hit.get("videos", {})
+                if not isinstance(variants, dict):
+                    continue
+                for variant in variants.values():
+                    if not isinstance(variant, dict) or not variant.get("url"):
+                        continue
+                    width = int(variant.get("width", 0) or 0)
+                    height = int(variant.get("height", 0) or 0)
+                    if width < 1 or height < 1:
+                        continue
+                    # Landscape must never select vertical media.
+                    # Portrait prefers true vertical; horizontal HD can be center cropped.
+                    if portrait and height > width and width >= 480 and height >= 720:
+                        preferred.append((width * height, variant))
+                    elif not portrait and width >= height and width >= 1280 and height >= 720:
+                        preferred.append((width * height, variant))
+                    elif portrait and width >= height and width >= 1280 and height >= 720:
+                        fallback.append((width * height, variant))
+            eligible = sorted(preferred, key=lambda item: item[0])
+            if portrait and not eligible:
+                eligible = sorted(fallback, key=lambda item: item[0])
+            # Try smallest adequate variants; cap response size to avoid 4K memory spikes.
+            for _, variant in eligible[:4]:
+                count = 0
+                try:
+                    async with client.stream("GET", variant["url"]) as download:
+                        if download.status_code != 200:
+                            continue
+                        with target.open("wb") as handle:
+                            async for chunk in download.aiter_bytes(chunk_size=262144):
+                                count += len(chunk)
+                                if count > 60_000_000:
+                                    raise ValueError("Pixabay footage exceeds 60 MB safety limit")
+                                handle.write(chunk)
+                    if count > 10000 and ffprobe_duration(target) > 0.5:
+                        return True
+                except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
+                    print(f"[b-roll] skipping unusable Pixabay clip: {str(error)[:180]}")
+                finally:
+                    if target.exists() and target.stat().st_size <= 10000:
+                        target.unlink(missing_ok=True)
     return False
 
 
@@ -155,7 +187,7 @@ def render_scene(scene: dict[str, Any], raw: Path, audio: Path, srt: Path, direc
     width, height = (1080, 1920) if portrait else (1920, 1080)
     vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=90'"
     duration = ffprobe_duration(audio)
-    run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw), "-i", str(audio), "-t", str(duration), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output)], timeout=300)
+    run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw), "-i", str(audio), "-t", str(duration), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output)], timeout=300)
     return output
 
 
