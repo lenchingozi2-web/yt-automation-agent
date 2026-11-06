@@ -66,7 +66,7 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
-        assert stored.get("render_version") == "studio-v4"
+        assert stored.get("render_version") == "studio-v5"
         from studio_audio import validate_audio
         for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
             validate_audio(scene_file)

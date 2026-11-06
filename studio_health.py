@@ -73,7 +73,7 @@ def main() -> int:
             note = str(state.get("progress_note", ""))
             stage = note if re.fullmatch(r"Rendering scene \d+ of \d+|Joining scenes|Saving MP4 preview|Starting narration and footage preparation", note) else "Processing"
             print("ACTIVE RENDER:", stage, "heartbeat:", state.get("worker_heartbeat_at", "unknown"), flush=True)
-    print("V4 RENDERS:", sum(metadata(r).get("render_version") == "studio-v4" for r in rows), flush=True)
+    print("V5 RENDERS:", sum(metadata(r).get("render_version") == "studio-v5" for r in rows), flush=True)
     print("PASS: Read-only Studio database integration probe.")
     return 0
 

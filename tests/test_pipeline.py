@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from studio_audio import make_audio, validate_audio, write_srt
 from studio_automation import generate_json, validate_script
-from worker import render_scene, stitch, video_details, safe_publish_error, save_fields
+from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage
 
 
 def ffmpeg(*args):
@@ -80,6 +80,14 @@ class MediaRegression(unittest.TestCase):
                 make_audio({**scene,'narration':'New narration'},directory)
                 self.assertEqual(len(calls),3)
                 validate_audio(audio)
+
+    def test_green_screen_stock_is_rejected(self):
+        with TemporaryDirectory() as tmp:
+            source=Path(tmp)/'keyed.mp4'
+            ffmpeg('-f','lavfi','-i','color=0x00ff00:s=320x180:r=30','-t','2','-c:v','libx264','-pix_fmt','yuv420p',source)
+            self.assertFalse(usable_footage(source))
+            ffmpeg('-f','lavfi','-i','color=0x14232b:s=320x180:r=30','-t','2','-c:v','libx264','-pix_fmt','yuv420p',source)
+            self.assertTrue(usable_footage(source))
 
     def test_silent_audio_is_rejected(self):
         with TemporaryDirectory() as tmp:

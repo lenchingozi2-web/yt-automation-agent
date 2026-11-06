@@ -101,6 +101,9 @@ def validate_script(data: dict, seconds: int, ratio: str) -> dict:
             raise ValueError(f"Scene {i} has no relevant footage search")
         scene["scene_number"] = i
         scene["format"] = ratio
+    narration = " ".join(s["narration"] for s in scenes)
+    if re.search(r"\bstud(?:y|ies)\s+(?:found|shows?|suggests?|where|reported|demonstrated)|\bclinical trial|\d+\s*%|\bpercent(?:age)?\b|reduces? hospital visits|lower hospital visits", narration, re.I):
+        raise ValueError("Unverified study or outcome claim in automatic narration")
     count = sum(len(s["narration"].split()) for s in scenes)
     if count < seconds * 1.6 or count > seconds * 3.4:
         raise ValueError("Script word count does not match the requested duration")
@@ -113,19 +116,25 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     recent = client.table("videos").select("*").order("created_at", desc=True).limit(100).execute().data or []
     job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "lenxiq-studio-daily:" + now.date().isoformat()))
     existing = client.table("videos").select("*").eq("id", job_id).execute().data or []
+    refresh = None
     if existing:
-        print("[automation] Daily video already queued; no duplicate created.", flush=True)
-        return existing[0]
+        from studio_maintenance import metadata
+        meta = metadata(existing[0])
+        if meta.get("automation") == "daily" and meta.get("render_version") == "studio-v4" and not meta.get("youtube_url") and existing[0].get("status") == "completed":
+            refresh = existing[0]
+        else:
+            print("[automation] Daily video already queued; no duplicate created.", flush=True)
+            return existing[0]
     limit = max(1, min(20, int(os.getenv("STUDIO_DAILY_LIMIT", "3"))))
     quota = client.table("videos").select("id", count="exact").gte("created_at", start).execute()
-    if (quota.count or 0) >= limit:
+    if not refresh and (quota.count or 0) >= limit:
         print("[automation] Daily allowance reached; keeping existing jobs.", flush=True)
         return None
     objects = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).list(options={"limit": 1000})
     if sum(int((o.get("metadata") or {}).get("size") or 0) for o in objects) >= 800 * 1024 * 1024:
         raise RuntimeError("Preview storage nearly full; archive older videos before producing another")
     owners = {r["user_id"] for r in recent if r.get("user_id")}
-    owner = os.getenv("STUDIO_OWNER_USER_ID", "")
+    owner = str(refresh.get("user_id") or "") if refresh else os.getenv("STUDIO_OWNER_USER_ID", "")
     if not owner:
         if len(owners) == 1:
             owner = next(iter(owners))
@@ -145,7 +154,10 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
               "Each scene has scene_number, narration, search_queries (2-3 specific simple Pixabay video phrases). "
               f"Use about {round(seconds * 2.45)} spoken words in total. Natural conversational English, contractions, varied sentence lengths, "
               "a strong opening hook, one concrete example, and a useful closing thought. No markdown, stage directions, canned intros or invented studies/statistics. "
-              "Medical topics: explain general concepts without treatment advice or unsupported clinical claims. Every narration must be nonempty. "
+              "Do not mention studies, trials, percentages or clinical outcomes. Do not claim AI predicts or prevents heart attacks, improves treatment or reduces hospital visits. "
+              "For health topics explain basic technology and limits; examples must be explicitly hypothetical and must not imply a diagnosis or proven clinical benefit. Every narration must be nonempty. "
+              "Footage queries must describe visible objects or actions: doctor patient, smart watch, medical laboratory, computer code, student studying. "
+              "Never request green screen, countdowns, like/subscribe graphics, rivers, scenery or abstract concepts for health content. "
               "Use meaningful sentences rather than dictation. Visual sources must be Pixabay only.")
     try:
         draft = validate_script(generate_json(prompt), seconds, ratio)
@@ -156,6 +168,13 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     scenes[0]["_studio"].update({"aspect_ratio": ratio, "automation": "daily", "automation_date": now.date().isoformat()})
     payload = {"id": job_id, "title": draft["title"], "description": str(draft.get("description", "")),
                "status": "pending", "user_id": owner, "scenes": scenes}
+    if refresh:
+        scenes[0]["_studio"]["previous_narration"] = [x.get("narration", "") for x in refresh.get("scenes", [])]
+        saved = client.table("videos").update({k: v for k, v in payload.items() if k != "id"}).eq("id", job_id).eq("status", "completed").execute().data
+        if not saved:
+            raise RuntimeError("Could not queue the unpublished quality upgrade")
+        print("[automation] Unpublished daily video queued for footage and caption quality upgrade.", flush=True)
+        return saved[0]
     try:
         saved = client.table("videos").insert(payload).execute().data
     except Exception:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 import os
 import subprocess
@@ -52,6 +53,24 @@ def ffprobe_duration(path: Path) -> float:
     return max(0.5, float(result.stdout.strip()))
 
 
+def usable_footage(path: Path) -> bool:
+    """Reject unkeyed green-screen assets rather than showing them to viewers."""
+    from collections import Counter
+    for seconds in (.5, min(2.0, ffprobe_duration(path) / 2)):
+        result = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(path),
+            "-frames:v", "1", "-vf", "scale=64:64", "-pix_fmt", "rgb24", "-threads", "1", "-f", "rawvideo", "-"],
+            capture_output=True, timeout=30)
+        pixels = result.stdout
+        if result.returncode or len(pixels) != 64 * 64 * 3:
+            return False
+        colors = Counter((pixels[i] // 32, pixels[i + 1] // 32, pixels[i + 2] // 32)
+                         for i in range(0, len(pixels), 3))
+        for (red, green, blue), count in colors.items():
+            if green >= 5 and red <= 3 and blue <= 3 and green > red + 1 and green > blue + 1 and count > 4096 * .4:
+                return False
+    return True
+
+
 async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | None = None) -> bool:
     """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
@@ -60,6 +79,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
     used = used if used is not None else set()
     portrait = str(scene.get("format", "16:9")) == "9:16"
     queries = list(scene.get("search_queries", []))
+    context = str(scene.get("visual_context", scene.get("narration", ""))).lower()
+    medical = bool(re.search(r"\b(medical|health|hospital|doctor|patient|clinician|heart|wearable)\b", context))
+    if medical:
+        queries = [q for q in queries if not re.search(r"nature|landscape|river|subscribe|green.?screen", str(q), re.I)]
+        queries += ["doctor patient", "hospital computer", "medical laboratory"]
     if not queries:
         queries = ["technology"]
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -75,6 +99,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
             preferred = []
             fallback = []
             for hit in response.json().get("hits", []):
+                tags = str(hit.get("tags", "")).lower()
+                if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|intro|outro", tags):
+                    continue
+                if medical and not re.search(r"medic|doctor|patient|health|hospital|laborator|wearable|watch|fitness|heart|nurse|science|data|computer|technolog|artificial|brain|\bai\b", tags):
+                    continue
                 if str(hit.get("id")) in used:
                     continue
                 variants = hit.get("videos", {})
@@ -111,7 +140,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
                                 if count > 60_000_000:
                                     raise ValueError("Pixabay footage exceeds 60 MB safety limit")
                                 handle.write(chunk)
-                    if count > 10000 and ffprobe_duration(target) > 0.5:
+                    if count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target):
                         used.add(variant["clip_id"])
                         return True
                 except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
@@ -124,7 +153,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
 
 def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str] | None = None, shot: int = 0) -> Path:
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
-    if target.exists() and target.stat().st_size > 0:
+    if target.exists() and target.stat().st_size > 0 and usable_footage(target):
         return target
     if not asyncio.run(fetch_pixabay(scene, target, used)):
         raise RuntimeError(f"No usable Pixabay footage for scene {scene['scene_number']}; retry or edit its search keywords")
@@ -151,9 +180,11 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
                        f"setsar=1,fps=30,trim=duration={shot_duration:.6f},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
     filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
-    filters.append("[visuals]subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,"
+    font_size, margin_v = (64, 300) if portrait else (54, 100)
+    filters.append("[visuals]subtitles='" + escaped + "':force_style='"
+                   f"PlayResX={width},PlayResY={height},FontName=DejaVu Sans,FontSize={font_size},"
                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
-                   "Alignment=2,MarginV=70'[vout]")
+                   f"Alignment=2,MarginV={margin_v},MarginL=80,MarginR=80'[vout]")
     command += ["-i", str(audio), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
                 "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-t", str(duration),
                 "-af", "loudnorm=I=-16:TP=-1.5:LRA=9,aresample=48000", "-ar", "48000", "-ac", "2",
@@ -274,6 +305,9 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
         for chunk in chunks:
             result.append({"scene_number": len(result) + 1, "narration": chunk,
                            "search_queries": queries, "format": ratio})
+    context = str(merged.get("title", "")) + " " + " ".join(x["narration"] for x in result)
+    for item in result:
+        item["visual_context"] = context[:12000]
     return result, ratio, merged
 
 
@@ -428,7 +462,7 @@ def process(video: dict[str, Any], supabase) -> None:
     warnings = [x for x in (thumbnail_error, storage_error) if x]
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v4",
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v5",
                 publish_status="pending", publish_attempts=0, render_attempts=0,
                 progress_note="MP4 ready. " + " ".join(warnings), error_message=None)
     if os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
