@@ -18,7 +18,7 @@ on:
     - cron: '17 8,10,12 * * *'
   push:
     branches: [main]
-    paths: [studio_automation.py]
+    paths: [studio_automation.py, .github/workflows/daily_video.yml]
 permissions:
   contents: read
 concurrency:
