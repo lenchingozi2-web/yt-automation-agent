@@ -398,6 +398,10 @@ def process(video: dict[str, Any], supabase) -> None:
             shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
             raw.append(fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, shot))
         rendered.append(render_scene(scene, raw, audio, srt, directory))
+        # Large productions must not accumulate hundreds of stock downloads.
+        for source in raw:
+            if source.name != "raw_01_00.mp4":
+                source.unlink(missing_ok=True)
     save_fields(supabase, video, progress_note="Joining scenes")
     final = stitch(rendered, directory)
     # Render the thumbnail from the same Pixabay B-roll rather than paying for another image API.

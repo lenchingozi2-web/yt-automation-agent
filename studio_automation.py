@@ -53,7 +53,18 @@ def generate_json(instruction: str) -> dict:
         key = os.getenv("GROQ_API_KEY", "").strip()
         if key:
             # Never choose the first catalog entry: it may be a speech recognizer.
-            for name in dict.fromkeys([os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile"), "llama-3.1-8b-instant"]):
+            preferred = list(dict.fromkeys([os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-120b"]))
+            # Confirm account access when the catalog is reachable. Never route
+            # scripts to an audio or moderation model, including an invalid override.
+            preferred = [n for n in preferred if n.startswith("openai/gpt-oss-") and "safeguard" not in n]
+            try:
+                catalog = client.get("https://api.groq.com/openai/v1/models", headers={"Authorization": "Bearer " + key})
+                catalog.raise_for_status()
+                active = {m["id"] for m in catalog.json().get("data", [])}
+                preferred = [n for n in preferred if n in active]
+            except Exception:
+                pass
+            for name in preferred:
                 try:
                     reply = client.post("https://api.groq.com/openai/v1/chat/completions",
                         headers={"Authorization": "Bearer " + key}, json={"model": name,

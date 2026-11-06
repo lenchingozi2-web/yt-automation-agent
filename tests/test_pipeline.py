@@ -105,9 +105,10 @@ class PipelineRegression(unittest.TestCase):
             def json(self): return {'choices':[{'message':{'content':'{"title":"A useful topic"}'}}]}
         with patch.dict(os.environ,{'GEMINI_API_KEY':'','GROQ_API_KEY':'dummy'}), patch('studio_automation.httpx.Client') as client:
             client.return_value.__enter__.return_value.post.return_value=Response()
+            client.return_value.__enter__.return_value.get.side_effect=ConnectionError("catalog unavailable")
             result=generate_json('Return a JSON script')
             request=client.return_value.__enter__.return_value.post.call_args.kwargs
-            self.assertNotIn('whisper',request['json']['model'])
+            self.assertEqual(request['json']['model'],'openai/gpt-oss-20b')
             self.assertEqual(result['title'],'A useful topic')
 
     def test_missing_narration_fails_validation(self):
