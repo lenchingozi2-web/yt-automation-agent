@@ -47,7 +47,7 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           VIDEO_TOPIC: ${{ inputs.video_topic || 'AUTO' }}
-          CHANNEL_NICHE: ${{ inputs.channel_niche || 'LenxiQ: AI in healthcare, learning, building products and human intelligence' }}
+          CHANNEL_NICHE: "${{ inputs.channel_niche || 'LenxiQ: AI in healthcare, learning, building products and human intelligence' }}"
           IS_SHORTS: ${{ github.event_name == 'workflow_dispatch' && inputs.is_shorts == false && 'false' || 'true' }}
           STUDIO_OWNER_USER_ID: ${{ vars.STUDIO_OWNER_USER_ID }}
           STUDIO_DAILY_LIMIT: '3'
