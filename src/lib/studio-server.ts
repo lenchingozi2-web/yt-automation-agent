@@ -41,27 +41,30 @@ const missingColumn = (error: unknown) => {
 function scriptPayload(draft: Draft) {
   return { ...draft, aspect_ratio: draft.format, duration: draft.duration_seconds, metadata: {
     aspect_ratio: draft.format, duration: draft.duration_seconds, description: draft.description,
-    tags: draft.tags, scenes: draft.scenes, video_url: "", youtube_url: "", error_message: "" } };
+    tags: draft.tags, video_url: "", youtube_url: "", error_message: "" } };
 }
-export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string) {
+export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string, jobId?: string) {
   const draft = normalizeDraft(approved);
   if (!draft.title.trim() || draft.scenes.length < 1 || draft.scenes.some(scene => !scene.narration.trim())) {
     throw new Error("A title and narration for every scene are required.");
   }
   if (draft.scenes.length > 60) throw new Error("Maximum 60 scenes per video.");
+  const { data: stored, error: storageError } = await client.storage.from(process.env.SUPABASE_VIDEO_BUCKET || "renders").list("", { limit: 1000 });
+  if (!storageError && stored && stored.reduce((sum, obj) => sum + (Number(obj.metadata?.size) || 0), 0) >= 800 * 1024 * 1024) {
+    throw new Error("Preview storage is nearly full. Archive older videos before generating another.");
+  }
   const packed = scriptPayload(draft);
   // Actual production table uses scenes JSON and may have no metadata/script columns.
   // Keep custom thumbnail, duration and YouTube metadata alongside the first scene.
   const enrichedScenes = draft.scenes.map((scene, index) => index === 0
-    ? { ...scene, _studio: { ...packed.metadata, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title } }
+    ? { ...scene, _studio: { ...packed.metadata, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, format: draft.format, tags: draft.tags } }
     : scene);
-  const withUser = (payload: Record<string, unknown>) => userId ? { ...payload, user_id: userId } : payload;
+  const withUser = (payload: Record<string, unknown>) => ({ ...payload, ...(userId ? { user_id: userId } : {}), ...(jobId ? { id: jobId } : {}) });
   const candidates: Record<string, unknown>[] = [
     withUser({ title: draft.title, status: "pending", description: draft.description, tags: draft.tags,
       format: draft.format, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, scenes: enrichedScenes }),
     withUser({ title: draft.title, status: "pending", description: draft.description, scenes: enrichedScenes }),
     withUser({ title: draft.title, status: "pending", scenes: enrichedScenes }),
-    { title: draft.title, status: "pending", scenes: enrichedScenes },
     withUser({ title: draft.title, status: "pending", scenes: JSON.stringify(enrichedScenes) }),
     withUser({ title: draft.title, status: "pending", script: packed }),
     withUser({ title: draft.title, status: "pending", scenes: packed }),
@@ -70,6 +73,10 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
   for (const payload of candidates) {
     const { data, error } = await client.from("videos").insert(payload).select("*").single();
     if (!error && data) return data;
+    if (error?.code === "23505" && jobId) {
+      const existing = await client.from("videos").select("*").eq("id", jobId).single();
+      if (existing.data) return existing.data;
+    }
     lastError = error;
     if (!missingColumn(error) && !/invalid input syntax|json|expected array|type mismatch|null value|check constraint|violates not-null/i.test(toSafeMessage(error))) break;
   }

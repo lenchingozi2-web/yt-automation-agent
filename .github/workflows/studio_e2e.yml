@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: studio-render-worker
+  group: studio-render-smoke
   cancel-in-progress: false
 jobs:
   render-smoke:

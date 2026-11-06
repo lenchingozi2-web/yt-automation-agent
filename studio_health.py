@@ -17,6 +17,8 @@ def main() -> int:
     if missing:
         print("BLOCKED: GitHub Actions repository secrets missing:", ", ".join(missing))
         return 2
+    from urllib.parse import urlparse
+    print("PROJECT:", urlparse(url).hostname, flush=True)
     client = create_client(url, key)
     try:
         response = client.table("videos").select("id,title,status,created_at").limit(1).execute()
@@ -45,7 +47,13 @@ def main() -> int:
     if not os.getenv("YOUTUBE_TOKEN_JSON"):
         print("NOTICE: YouTube automatic uploads disabled until YOUTUBE_TOKEN_JSON is configured.")
     else:
-        print("OK: YouTube token configured (refresh and channel permissions not verified).")
+        from worker import youtube_credentials, safe_publish_error
+        try:
+            youtube_credentials()
+            print("OK: YouTube credentials refreshed successfully (no video uploaded).")
+        except Exception as error:
+            _, note = safe_publish_error(error)
+            print("BLOCKED:", note, flush=True)
     for name in ("renders", "thumbnails"):
         try:
             client.storage.get_bucket(name)
@@ -53,6 +61,12 @@ def main() -> int:
         except Exception:
             print("NOTICE: Storage bucket not created yet:", name,
                   "(worker will create it on its first successful upload).")
+    from studio_maintenance import metadata
+    rows = client.table("videos").select("*").order("created_at", desc=True).limit(100).execute().data or []
+    from collections import Counter
+    print("QUEUE COUNTS:", dict(Counter(r.get("status") for r in rows)), flush=True)
+    print("UPLOAD COUNTS:", dict(Counter(metadata(r).get("publish_status", "legacy") for r in rows)), flush=True)
+    print("V4 RENDERS:", sum(metadata(r).get("render_version") == "studio-v4" for r in rows), flush=True)
     print("PASS: Read-only Studio database integration probe.")
     return 0
 

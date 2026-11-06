@@ -1,6 +1,6 @@
 export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number };
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; created_at?: string };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string };
 export function toSafeMessage(input: unknown, fallback = "Action completed."): string {
   const seen = new WeakSet<object>();
   function read(value: unknown, depth: number): string {
@@ -29,7 +29,8 @@ export function normalizeDraft(value: unknown): Draft {
   const outer = objectOf(value);
   const packed = objectOf(outer.script);
   const metadata = objectOf(outer.metadata);
-  const source = { ...metadata, ...packed, ...outer };
+  const firstRaw = Array.isArray(outer.scenes) ? objectOf(outer.scenes[0]) : {};
+  const source = { ...objectOf(firstRaw._studio), ...metadata, ...packed, ...Object.fromEntries(Object.entries(outer).filter(([,v]) => v != null && v !== "")) };
   const nested = objectOf(source.scenes);
   const entries = Array.isArray(source.scenes) ? source.scenes : Array.isArray(nested.scenes) ? nested.scenes : Array.isArray(outer.script) ? outer.script : [];
   const scenes: Scene[] = entries.map((raw: unknown, index: number) => {
@@ -53,7 +54,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
   const draft = normalizeDraft(raw);
   const packed = objectOf(row.script);
   const firstScene = Array.isArray(row.scenes) && row.scenes.length > 0 ? objectOf(row.scenes[0]) : {};
-  const meta = { ...objectOf(firstScene._studio), ...objectOf(row.scenes), ...objectOf(packed.metadata), ...objectOf(row.metadata), ...packed, ...row };
+  const meta = { ...objectOf(firstScene._studio), ...objectOf(row.scenes), ...objectOf(packed.metadata), ...objectOf(row.metadata), ...packed, ...Object.fromEntries(Object.entries(row).filter(([,v]) => v != null && v !== "")) };
   const youtubeId = stringOf(meta.youtube_id || meta.youtube_video_id);
   return { ...draft, id: stringOf(meta.id), status: stringOf(meta.status, "pending").toLowerCase(),
     video_url: stringOf(meta.video_url || meta.storage_url),
@@ -61,5 +62,8 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     youtube_id: youtubeId, created_at: stringOf(meta.created_at),
     thumbnail_url: stringOf(meta.thumbnail_url), preview_expired_at: stringOf(meta.preview_expired_at),
     error_message: stringOf(meta.error_message || meta.error),
-    progress_note: stringOf(meta.progress_note || meta.progress || meta.note) };
+    progress_note: stringOf(meta.progress_note || meta.progress || meta.note),
+    publish_status: stringOf(meta.publish_status), publish_error: stringOf(meta.publish_error),
+    actual_duration_seconds: Number(meta.actual_duration_seconds) || undefined,
+    render_version: stringOf(meta.render_version), automation: stringOf(meta.automation) };
 }

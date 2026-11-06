@@ -13,7 +13,7 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from worker import ROOT, process
-# Fourth diagnostic run: verify deterministic subtitles and final media storage.
+# Verify multi-scene neural narration, montage, final audio and real storage.
 
 
 def main() -> int:
@@ -36,6 +36,9 @@ def main() -> int:
         "scene_number": 1, "narration": "This is a short system verification video for Studio.",
         "search_queries": ["ocean waves"], "format": "16:9",
         "_studio": {"aspect_ratio": "16:9", "thumbnail_title": "STUDIO VIDEO TEST", "duration_seconds": 8},
+    }, {
+        "scene_number": 2, "narration": "The second scene checks that narration continues after the video cut.",
+        "search_queries": ["forest", "nature"], "format": "16:9",
     }]
     base = {"title": "Studio disposable rendering test", "status": "rendering",
             "description": "Temporary integration test. Removed after validation.",
@@ -63,6 +66,11 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
+        assert stored.get("render_version") == "studio-v4"
+        from studio_audio import validate_audio
+        for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
+            validate_audio(scene_file)
+        validate_audio(ROOT / video_id / "final_video.mp4")
         mp4 = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4")
         jpg = client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(video_id + ".jpg")
         assert len(mp4) > 10000 and b"ftyp" in mp4[:64], "MP4 not playable"

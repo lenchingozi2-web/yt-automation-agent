@@ -10,7 +10,6 @@ import asyncio
 import json
 from datetime import datetime, timezone
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -20,18 +19,18 @@ import httpx
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import create_thumbnail
+from studio_audio import make_audio, validate_audio
+from studio_maintenance import metadata as stored_metadata
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 ROOT = Path(os.getenv("WORKER_OUTPUT_DIR", "output_run"))
-VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-ChristopherNeural")
 POLL_SECONDS = int(os.getenv("WORKER_POLL_SECONDS", "20"))
-MAX_SCENE_SECONDS = int(os.getenv("MAX_SCENE_SECONDS", "30"))
+SHOT_SECONDS = max(3, min(8, float(os.getenv("STUDIO_SHOT_SECONDS", "5"))))
 
 
 def require_env(name: str) -> str:
@@ -53,70 +52,16 @@ def ffprobe_duration(path: Path) -> float:
     return max(0.5, float(result.stdout.strip()))
 
 
-def write_srt(words: list[tuple[float, float, str]], path: Path) -> None:
-    def stamp(seconds: float) -> str:
-        millis = int(max(0, seconds) * 1000)
-        return f"{millis // 3600000:02d}:{(millis // 60000) % 60:02d}:{(millis // 1000) % 60:02d},{millis % 1000:03d}"
-    lines: list[str] = []
-    for index, (start, end, word) in enumerate(words, 1):
-        lines.extend([str(index), f"{stamp(start)} --> {stamp(max(end, start + 0.08))}", word.strip(), ""])
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
-async def edge_tts_scene(text: str, audio: Path, srt: Path) -> None:
-    import edge_tts
-    communicate = edge_tts.Communicate(text, VOICE)
-    submaker = edge_tts.SubMaker()
-    with audio.open("wb") as handle:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio": handle.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary": submaker.feed(chunk)
-    srt.write_text(submaker.get_srt(), encoding="utf-8")
-
-
-def kokoro_scene(text: str, audio: Path, srt: Path) -> None:
-    """Small fallback when Edge TTS is unavailable."""
-    from gtts import gTTS
-    gTTS(text=text, lang="en").save(str(audio))
-    seconds = ffprobe_duration(audio)
-    words = text.split()
-    groups = [" ".join(words[i:i + 10]) for i in range(0, len(words), 10)] or [text]
-    entries = [(i * seconds / len(groups), (i + 1) * seconds / len(groups), group)
-               for i, group in enumerate(groups)]
-    write_srt(entries, srt)
-
-
-def make_audio(scene: dict[str, Any], directory: Path) -> tuple[Path, Path]:
-    number = int(scene["scene_number"])
-    audio, srt = directory / f"scene_{number:02d}.mp3", directory / f"scene_{number:02d}.srt"
-    if audio.exists() and srt.exists() and audio.stat().st_size > 0: return audio, srt
-    text = str(scene["narration"]).strip()
-    try:
-        asyncio.run(asyncio.wait_for(edge_tts_scene(text, audio, srt), timeout=120))
-    except Exception as error:
-        print(f"[audio] edge-tts failed for scene {number}: {error}; using gTTS fallback")
-        kokoro_scene(text, audio, srt)
-    # Edge TTS WordBoundary events are not guaranteed. Always write a valid,
-    # deterministic SRT synchronized to measured audio length so libass works.
-    actual_seconds = ffprobe_duration(audio)
-    tokens = text.split()
-    phrases = [" ".join(tokens[i:i + 9]) for i in range(0, len(tokens), 9)] or [text]
-    captions = [(i * actual_seconds / len(phrases),
-                 (i + 1) * actual_seconds / len(phrases),
-                 phrase) for i, phrase in enumerate(phrases)]
-    write_srt(captions, srt)
-    if not srt.is_file() or srt.stat().st_size < 35:
-        raise RuntimeError("Failed to generate usable subtitles for scene " + str(number))
-    return audio, srt
-
-
-async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
+async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | None = None) -> bool:
     """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key:
         return False
+    used = used if used is not None else set()
     portrait = str(scene.get("format", "16:9")) == "9:16"
-    queries = list(scene.get("search_queries", [])) + ["nature", "technology", "cinematic background"]
+    queries = list(scene.get("search_queries", []))
+    if not queries:
+        queries = ["technology"]
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         for query in queries:
             if not str(query).strip():
@@ -130,6 +75,8 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
             preferred = []
             fallback = []
             for hit in response.json().get("hits", []):
+                if str(hit.get("id")) in used:
+                    continue
                 variants = hit.get("videos", {})
                 if not isinstance(variants, dict):
                     continue
@@ -143,11 +90,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
                     # Landscape must never select vertical media.
                     # Portrait prefers true vertical; horizontal HD can be center cropped.
                     if portrait and height > width and width >= 480 and height >= 720:
-                        preferred.append((width * height, variant))
+                        preferred.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
                     elif not portrait and width >= height and width >= 1280 and height >= 720:
-                        preferred.append((width * height, variant))
+                        preferred.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
                     elif portrait and width >= height and width >= 1280 and height >= 720:
-                        fallback.append((width * height, variant))
+                        fallback.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
             eligible = sorted(preferred, key=lambda item: item[0])
             if portrait and not eligible:
                 eligible = sorted(fallback, key=lambda item: item[0])
@@ -165,6 +112,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
                                     raise ValueError("Pixabay footage exceeds 60 MB safety limit")
                                 handle.write(chunk)
                     if count > 10000 and ffprobe_duration(target) > 0.5:
+                        used.add(variant["clip_id"])
                         return True
                 except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
                     print(f"[b-roll] skipping unusable Pixabay clip: {str(error)[:180]}")
@@ -174,40 +122,59 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path) -> bool:
     return False
 
 
-def dark_canvas(target: Path, format: str = "16:9") -> None:
-    size = "1080x1920" if format == "9:16" else "1920x1080"
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x101827:s={size}:r=30", "-t", "2", "-vf", "noise=alls=3:allf=t", "-pix_fmt", "yuv420p", "-c:v", "libx264", str(target)])
-
-
-def fetch_broll(scene: dict[str, Any], directory: Path) -> Path:
-    target = directory / f"raw_{int(scene['scene_number']):02d}.mp4"
-    if target.exists() and target.stat().st_size > 0: return target
-    try:
-        if asyncio.run(fetch_pixabay(scene, target)): return target
-    except Exception as error: print(f"[b-roll] Pixabay failed: {error}")
-    print(f"[b-roll] using dark motion canvas for scene {scene['scene_number']}")
-    dark_canvas(target, str(scene.get("format", "16:9")))
+def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str] | None = None, shot: int = 0) -> Path:
+    target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    if not asyncio.run(fetch_pixabay(scene, target, used)):
+        raise RuntimeError(f"No usable Pixabay footage for scene {scene['scene_number']}; retry or edit its search keywords")
     return target
 
 
-def render_scene(scene: dict[str, Any], raw: Path, audio: Path, srt: Path, directory: Path) -> Path:
+def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path) -> Path:
     output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
-    if output.exists() and output.stat().st_size > 0: return output
+    output.unlink(missing_ok=True)  # Never reuse a partial or outdated render.
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     portrait = str(scene.get("format", "16:9")) == "9:16"
     width, height = (1080, 1920) if portrait else (1920, 1080)
-    vf = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30,subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=90'"
-    duration = ffprobe_duration(audio)
-    run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw), "-i", str(audio), "-t", str(duration), "-vf", vf, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-shortest", str(output)], timeout=300)
+    duration = validate_audio(audio)
+    sources = raw if isinstance(raw, list) else [raw]
+    command = ["ffmpeg", "-y"]
+    filters = []
+    shot_duration = duration / len(sources)
+    for i, source in enumerate(sources):
+        # Continuous camera movement and new footage every few seconds.
+        command += ["-stream_loop", "-1", "-i", str(source)]
+        scaled_w, scaled_h = int(width * 1.06) // 2 * 2, int(height * 1.06) // 2 * 2
+        filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
+                       f"crop={width}:{height}:x='(iw-ow)*(0.5+0.45*sin(t/3+{i}))':y='(ih-oh)/2',"
+                       f"setsar=1,fps=30,trim=duration={shot_duration:.6f},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+    labels = "".join(f"[v{i}]" for i in range(len(sources)))
+    filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
+    filters.append("[visuals]subtitles='" + escaped + "':force_style='FontName=DejaVu Sans,FontSize=22,"
+                   "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
+                   "Alignment=2,MarginV=70'[vout]")
+    command += ["-i", str(audio), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
+                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-t", str(duration),
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=9,aresample=48000", "-ar", "48000", "-ac", "2",
+                "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(output)]
+    run(command, timeout=max(300, int(duration * 20)))
+    validate_audio(output, expected=duration)
     return output
 
 
 def stitch(rendered: list[Path], directory: Path) -> Path:
+    if not rendered:
+        raise ValueError("Cannot join an empty video")
     final = directory / "final_video.mp4"
-    if final.exists() and final.stat().st_size > 0: return final
+    final.unlink(missing_ok=True)
     concat = directory / "concat.txt"
     concat.write_text("\n".join(f"file '{p.resolve()}'" for p in rendered), encoding="utf-8")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(final)], timeout=300)
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
+         "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+         "-af", "aresample=async=1:first_pts=0", "-b:a", "160k", "-movflags", "+faststart", str(final)], timeout=600)
+    validate_audio(final, expected=sum(ffprobe_duration(p) for p in rendered))
     return final
 
 
@@ -215,25 +182,34 @@ def youtube_credentials() -> Credentials:
     token_json = os.getenv("YOUTUBE_TOKEN_JSON", "").strip()
     if token_json:
         credentials = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-        if credentials.expired and credentials.refresh_token: credentials.refresh(GoogleAuthRequest())
+        if credentials.refresh_token and (not credentials.valid or credentials.expiry is None or credentials.expired):
+            credentials.refresh(GoogleAuthRequest())
+        if not credentials.valid:
+            raise RuntimeError("invalid_grant: YouTube authorization must be renewed")
         return credentials
-    client_json = os.getenv("YOUTUBE_CLIENT_SECRET_JSON", "").strip()
-    if not client_json: raise RuntimeError("Set YOUTUBE_TOKEN_JSON for CI or YOUTUBE_CLIENT_SECRET_JSON for first local OAuth setup.")
-    secret_path = Path("client_secret.json"); secret_path.write_text(client_json, encoding="utf-8")
-    token_path = Path(os.getenv("YOUTUBE_TOKEN_PATH", ".youtube-token.json"))
-    credentials = None
-    if token_path.exists(): credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token: credentials.refresh(GoogleAuthRequest())
-        else: credentials = InstalledAppFlow.from_client_secrets_file(str(secret_path), SCOPES).run_local_server(port=0)
-        token_path.write_text(credentials.to_json(), encoding="utf-8")
-    return credentials
+    raise RuntimeError("YouTube is not connected. Reconnect and update the YOUTUBE_TOKEN_JSON repository secret.")
 
 
 def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
     youtube = build("youtube", "v3", credentials=youtube_credentials())
-    request = youtube.videos().insert(part="snippet,status", body={"snippet": {"title": str(video["title"])[:100], "description": str(video.get("description", "")), "categoryId": "27"}, "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}, media_body=MediaFileUpload(str(file_path), mimetype="video/mp4", resumable=True))
-    return request.execute()["id"]
+    request = youtube.videos().insert(part="snippet,status", body={"snippet": {
+        "title": str(video["title"])[:100], "description": str(video.get("description", "")),
+        "tags": video.get("tags", []), "categoryId": "27"}, "status": {
+        "privacyStatus": "private", "selfDeclaredMadeForKids": False}},
+        media_body=MediaFileUpload(str(file_path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
+    response = None
+    failures = 0
+    while response is None:
+        try:
+            _, response = request.next_chunk()
+            failures = 0
+        except Exception as error:
+            status = getattr(getattr(error, "resp", None), "status", None)
+            if failures >= 3 or (status is not None and status not in (429, 500, 502, 503, 504)):
+                raise
+            time.sleep(2 ** failures)
+            failures += 1
+    return response["id"]
 
 
 def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
@@ -243,30 +219,6 @@ def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
         videoId=video_id,
         media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
     ).execute()
-
-
-def mark_completed(supabase, video_id: str, youtube_id: str) -> None:
-    completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    full_update = {
-        "status": "completed",
-        "youtube_id": youtube_id,
-        "youtube_video_id": youtube_id,
-        "youtube_url": f"https://www.youtube.com/watch?v={youtube_id}",
-        "completed_at": completed_at,
-        "error_message": None,
-    }
-    try:
-        result = supabase.table("videos").update(full_update).eq("id", video_id).execute()
-        if not getattr(result, "error", None): return
-        print(f"[status] full completion update failed: {result.error}; retrying core fields")
-    except Exception as error:
-        print(f"[status] full completion update failed: {error}; retrying core fields")
-    fallback = supabase.table("videos").update({
-        "status": "completed",
-        "youtube_url": f"https://www.youtube.com/watch?v={youtube_id}",
-    }).eq("id", video_id).execute()
-    if getattr(fallback, "error", None):
-        raise RuntimeError(f"Could not save completed video status: {fallback.error}")
 
 
 def decode(value: Any) -> dict[str, Any]:
@@ -294,22 +246,41 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     if not isinstance(scenes, list) or not scenes:
         raise ValueError("This video has no scenes; submit it from Scene Editor.")
     first_metadata = decode(scenes[0].get("_studio")) if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
-    merged = {**first_metadata, **metadata, **script, **row}
+    merged = {**first_metadata, **metadata, **script, **{k: v for k, v in row.items() if v is not None and v != ""}}
     ratio = merged.get("aspect_ratio") or merged.get("format") or "16:9"
     ratio = "9:16" if ratio == "9:16" else "16:9"
     result = []
+    import re
     for i, raw in enumerate(scenes):
         item = raw if isinstance(raw, dict) else {"narration": str(raw)}
-        narration = str(item.get("narration", "")).strip()
+        narration = str(item.get("narration") or item.get("voiceover") or item.get("text") or "").strip()
         if not narration: raise ValueError(f"Scene {i + 1} is missing narration.")
-        result.append({"scene_number": i + 1, "narration": narration,
-                       "search_queries": item.get("search_queries", []) or [],
-                       "format": ratio})
+        queries = item.get("search_queries", [])
+        if isinstance(queries, str):
+            queries = queries.split(",")
+        queries = [str(q).strip() for q in queries if str(q).strip()] if isinstance(queries, list) else []
+        chunks, current = [], []
+        for sentence in re.split(r"(?<=[.!?])\s+", narration):
+            words = sentence.split()
+            while len(words) > 40:
+                if current:
+                    chunks.append(" ".join(current)); current = []
+                chunks.append(" ".join(words[:35])); words = words[35:]
+            if len(current) + len(words) > 40 and current:
+                chunks.append(" ".join(current)); current = []
+            current.extend(words)
+        if current:
+            chunks.append(" ".join(current))
+        for chunk in chunks:
+            result.append({"scene_number": len(result) + 1, "narration": chunk,
+                           "search_queries": queries, "format": ratio})
     return result, ratio, merged
 
 
 def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
     """Update existing columns and embed optional fields in available JSON."""
+    if "progress_note" in changes:
+        changes["worker_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
     known = set(row.keys())
     payload = {k: v for k, v in changes.items() if k in known}
     extras = {k: v for k, v in changes.items() if k not in known}
@@ -327,8 +298,16 @@ def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
         elif isinstance(scenes, dict):
             payload["scenes"] = {**scenes, **extras}
     if not payload: raise RuntimeError("videos table has no supported status column.")
-    answer = client.table("videos").update(payload).eq("id", row["id"]).execute()
-    if answer.data is None: raise RuntimeError("Could not persist video status.")
+    for attempt in range(3):
+        try:
+            answer = client.table("videos").update(payload).eq("id", row["id"]).execute()
+            if not answer.data:
+                raise RuntimeError("Could not persist video status.")
+            break
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
     row.update(payload)
 
 
@@ -378,6 +357,7 @@ def upload_mp4(client, path: Path, video_id: str) -> str:
         else: raise
     filename = f"{video_id}.mp4"
     preview = storage_preview(path)
+    validate_audio(preview, expected=ffprobe_duration(path))
     client.storage.from_(bucket).upload(filename, preview.read_bytes(),
         file_options={"content-type": "video/mp4", "upsert": "true"})
     return client.storage.from_(bucket).get_public_url(filename)
@@ -404,17 +384,26 @@ def process(video: dict[str, Any], supabase) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     scenes, ratio, details = video_details(video)
     rendered: list[Path] = []
+    used_footage: set[str] = set()
+    import math
     for scene in scenes:
         save_fields(supabase, video, progress_note=f"Rendering scene {scene['scene_number']} of {len(scenes)}")
         audio, srt = make_audio(scene, directory)
-        raw = fetch_broll(scene, directory)
+        seconds = ffprobe_duration(audio)
+        count = max(1, math.ceil(seconds / SHOT_SECONDS))
+        raw = []
+        for shot in range(count):
+            # Rotate relevant search phrases across shots, avoiding repeated clip IDs.
+            queries = scene["search_queries"]
+            shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
+            raw.append(fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, shot))
         rendered.append(render_scene(scene, raw, audio, srt, directory))
     save_fields(supabase, video, progress_note="Joining scenes")
     final = stitch(rendered, directory)
     # Render the thumbnail from the same Pixabay B-roll rather than paying for another image API.
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     thumbnail_path = directory / "thumbnail.jpg"
-    create_thumbnail(directory / "raw_01.mp4", headline, thumbnail_path)
+    create_thumbnail(directory / "raw_01_00.mp4", headline, thumbnail_path)
     thumbnail_url, thumbnail_error = "", ""
     try:
         thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
@@ -430,86 +419,158 @@ def process(video: dict[str, Any], supabase) -> None:
         storage_error = f"MP4 preview storage: {str(error)[:250]}"
         print(f"[storage] {storage_error}", flush=True)
 
-    youtube_url, youtube_error, thumb_publish_error = "", "", ""
+    if not storage_url:
+        raise RuntimeError("MP4 could not be saved: " + storage_error)
+    warnings = [x for x in (thumbnail_error, storage_error) if x]
+    save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
+                thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v4",
+                publish_status="pending", publish_attempts=0, render_attempts=0,
+                progress_note="MP4 ready. " + " ".join(warnings), error_message=None)
     if os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
-        try:
-            youtube_id = upload_youtube(details, final)
-            youtube_url = f"https://www.youtube.com/watch?v={youtube_id}"
-            try:
-                set_youtube_thumbnail(youtube_id, thumbnail_path)
-            except Exception as error:
-                thumb_publish_error = f"YouTube thumbnail: {str(error)[:180]}"
-                print(f"[thumbnail] {thumb_publish_error}", flush=True)
-        except Exception as error:
-            youtube_error = f"YouTube upload: {str(error)[:250]}"
-            print(f"[youtube] {youtube_error}", flush=True)
-
-    warnings = [text for text in (thumbnail_error, storage_error, youtube_error, thumb_publish_error) if text]
-    if not storage_url and not youtube_url:
-        raise RuntimeError("Rendered master exists, but neither Supabase preview nor YouTube saved the video. " +
-                           " ".join(warnings) + " If the repository is private, download the short-lived GitHub artifact; otherwise retry after fixing publishing.")
-    note = "MP4 ready." if storage_url else "Full-size MP4 uploaded only to YouTube."
-    if youtube_url:
-        note += " YouTube upload saved privately, with custom thumbnail where permitted."
-    elif not os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
-        note += " YouTube publishing not configured."
-    if warnings:
-        note += " " + " ".join(warnings)
-    save_fields(supabase, video, status="completed", video_url=storage_url or None,
-                storage_url=storage_url or None, youtube_url=youtube_url or None,
-                thumbnail_url=thumbnail_url or None,
-                completed_at=datetime.now(timezone.utc).isoformat(),
-                progress_note=note[:1000], error_message=None)
-    # Retain local master until workflow ends. Artifact backup is private-repository-only.
-    print(f"[completed] {video_id} {storage_url}", flush=True)
+        publish_saved(video, supabase, master=final, thumbnail=thumbnail_path)
+    else:
+        save_fields(supabase, video, publish_status="not_configured",
+                    progress_note="MP4 ready. YouTube is not connected.")
+    print(f"[completed] {video_id}", flush=True)
 
 
-def main() -> None:
+def safe_publish_error(error: Exception) -> tuple[str, str]:
+    text = str(error)
+    if "invalid_grant" in text or "expired or revoked" in text:
+        return "auth_required", "YouTube authorization expired or was revoked. Reconnect YouTube and update YOUTUBE_TOKEN_JSON in GitHub repository secrets, then retry upload."
+    if "quotaExceeded" in text or "uploadLimitExceeded" in text:
+        return "retry", "YouTube upload quota reached; the saved MP4 will be retried later."
+    if "insufficientPermissions" in text:
+        return "auth_required", "YouTube upload permission is missing. Reconnect with the youtube.upload scope."
+    return "retry", "YouTube upload temporarily unavailable (" + type(error).__name__ + "). The MP4 remains available."
+
+
+def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, thumbnail: Path | None = None) -> None:
+    details = stored_metadata(video)
+    if details.get("youtube_url") or details.get("youtube_id"):
+        return
+    directory = ROOT / str(video["id"])
+    directory.mkdir(parents=True, exist_ok=True)
+    attempts = int(details.get("publish_attempts") or 0) + 1
+    save_fields(supabase, video, publish_status="uploading", publish_attempts=attempts,
+                publish_requested=False, progress_note="MP4 ready. Uploading to YouTube.")
+    try:
+        if master is None:
+            # Fetch only this job's trusted storage object, never a row-supplied URL.
+            master = directory / "publish_preview.mp4"
+            content = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(str(video["id"]) + ".mp4")
+            master.write_bytes(content)
+        validate_audio(master)
+        youtube_id = upload_youtube(details, master)
+        # Save the ID immediately so a thumbnail or later status failure cannot duplicate uploads.
+        save_fields(supabase, video, youtube_id=youtube_id,
+                    youtube_url="https://www.youtube.com/watch?v=" + youtube_id,
+                    publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
+                    publish_error=None, progress_note="MP4 ready. Uploaded to YouTube privately.")
+    except Exception as error:
+        state, message = safe_publish_error(error)
+        save_fields(supabase, video, publish_status=state, publish_error=message,
+                    publish_retry_at=datetime.fromtimestamp(time.time() + min(86400, 900 * 2 ** min(attempts, 6)), timezone.utc).isoformat(),
+                    progress_note="MP4 ready. " + message)
+        print("[youtube]", message, flush=True)
+        return
+    try:
+        if thumbnail is None:
+            thumbnail = directory / "thumbnail.jpg"
+            thumbnail.write_bytes(supabase.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(str(video["id"]) + ".jpg"))
+        set_youtube_thumbnail(youtube_id, thumbnail)
+        save_fields(supabase, video, thumbnail_publish_status="uploaded")
+    except Exception as error:
+        save_fields(supabase, video, thumbnail_publish_status="failed",
+                    progress_note="MP4 ready. Uploaded to YouTube privately; custom thumbnail could not be applied (" + type(error).__name__ + ").")
+
+
+def publish_due(client, limit: int = 3) -> None:
+    if not os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
+        return
+    rows = client.table("videos").select("*").eq("status", "completed").order("created_at", desc=True).limit(100).execute().data or []
+    done = 0
+    for row in rows:
+        data = stored_metadata(row)
+        if data.get("youtube_url") or data.get("youtube_id") or not (data.get("video_url") or data.get("storage_url")):
+            continue
+        explicit = bool(data.get("publish_requested"))
+        if not explicit and (data.get("publish_status") == "auth_required" or int(data.get("publish_attempts") or 0) >= 5):
+            continue
+        due = data.get("publish_retry_at")
+        if due and not explicit and datetime.fromisoformat(due.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+            continue
+        publish_saved(row, client)
+        done += 1
+        if done >= limit:
+            break
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--drain", action="store_true")
+    parser.add_argument("--publish-only", action="store_true")
+    parser.add_argument("--max-jobs", type=int, default=3)
+    args = parser.parse_args(argv)
     url = os.getenv("SUPABASE_URL") or require_env("NEXT_PUBLIC_SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or require_env("SUPABASE_KEY")
     supabase = create_client(url, key)
     ROOT.mkdir(parents=True, exist_ok=True)
+    publish_due(supabase, args.max_jobs)
+    if args.publish_only:
+        return
+    processed, failures = 0, 0
     while True:
         result = supabase.table("videos").select("*").eq("status", "pending").order("created_at").limit(1).execute()
         video = None
         for candidate in result.data or []:
             changed = supabase.table("videos").update({"status": "rendering"}).eq("id", candidate["id"]).eq("status", "pending").execute()
             if changed.data:
-                video = {**candidate, "status": "rendering"}
+                video = changed.data[0]
+                save_fields(supabase, video, render_started_at=datetime.now(timezone.utc).isoformat(), progress_note="Starting narration and footage preparation")
                 break
         if not video:
-            # Recover a genuinely abandoned render, never an actively running one.
-            stale = supabase.table("videos").select("*").eq("status", "rendering").order("created_at").limit(5).execute()
+            # All production workflows share one concurrency group. A stale heartbeat
+            # recovers a killed runner, rather than judging a newly-started old draft by creation time.
+            stale = supabase.table("videos").select("*").eq("status", "rendering").order("created_at").limit(20).execute()
             for candidate in stale.data or []:
+                data = stored_metadata(candidate)
                 try:
-                    started = datetime.fromisoformat(str(candidate["created_at"]).replace("Z", "+00:00"))
-                    if started.tzinfo is None: started = started.replace(tzinfo=timezone.utc)
-                    age_seconds = (datetime.now(timezone.utc) - started).total_seconds()
-                    if age_seconds > 7200:
+                    started = datetime.fromisoformat(str(data.get("worker_heartbeat_at") or data.get("render_started_at") or candidate["created_at"]).replace("Z", "+00:00"))
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - started).total_seconds() > 7200:
+                        if int(data.get("render_attempts") or 0) >= 3:
+                            save_fields(supabase, candidate, status="failed", error_message="Render interrupted repeatedly. Retry after checking the worker logs.")
+                            continue
                         video = candidate
-                        print(f"[recovery] retrying abandoned job {candidate['id']}", flush=True)
                         break
                 except (KeyError, TypeError, ValueError):
                     continue
         if video:
+            attempts = int(stored_metadata(video).get("render_attempts") or 0) + 1
+            save_fields(supabase, video, render_attempts=attempts)
             try:
                 process(video, supabase)
             except Exception as error:
-                print(f"[failed] {video.get('id')}: {error}", flush=True)
-                try:
-                    artifact = ROOT / str(video["id"]) / "final_video.mp4"
-                    run_url = "https://github.com/" + os.getenv("GITHUB_REPOSITORY", "lenchingozi2-web/yt-automation-agent") + "/actions/runs/" + os.getenv("GITHUB_RUN_ID", "")
-                    note = ("MP4 preserved as workflow artifact: " + run_url) if artifact.exists() else "Rendering failed"
-                    save_fields(supabase, video, status="failed",
-                                error_message=str(error)[:1000], progress_note=note)
-                except Exception as status_error:
-                    print(f"[failed] cannot persist error: {status_error}", flush=True)
-        elif args.once: return
-        else: time.sleep(POLL_SECONDS)
-        if args.once: return
+                failures += 1
+                print(f"[failed] {video.get('id')}: {type(error).__name__}: {str(error)[:300]}", flush=True)
+                # Retry transient failures on the next scheduled run, with a hard limit.
+                save_fields(supabase, video, status="pending" if attempts < 3 else "failed",
+                            error_message=str(error)[:700],
+                            progress_note="Automatic render retry scheduled" if attempts < 3 else "Rendering failed; open the scenes and retry")
+                break
+            processed += 1
+        elif args.once or args.drain:
+            break
+        else:
+            time.sleep(POLL_SECONDS)
+        if args.once or (args.drain and processed >= args.max_jobs):
+            break
+    if failures:
+        raise SystemExit(1)  # CI must not report a failed render as green.
 
 
 if __name__ == "__main__":

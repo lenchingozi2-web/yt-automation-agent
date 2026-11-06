@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
   repository_dispatch:
     types: [render_video]
+  push:
+    branches: [main]
+    paths: [worker.py, studio_audio.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '*/5 * * * *'
 permissions:
@@ -32,30 +35,29 @@ jobs:
 
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
-          work = True  # Fail open: let the renderer report missing credentials or API errors.
+          work = True
           if url and key:
-              request = Request(
-                  url + "/rest/v1/videos?select=status,created_at&status=in.(pending,rendering)&order=created_at.asc&limit=100",
-                  headers={"apikey": key, "Authorization": "Bearer " + key},
-              )
+              request = Request(url + "/rest/v1/videos?select=*&status=in.(pending,rendering,completed)&order=created_at.desc&limit=100",
+                                headers={"apikey": key, "Authorization": "Bearer " + key})
               try:
                   with urlopen(request, timeout=15) as response:
                       rows = json.load(response)
-                  now = datetime.now(timezone.utc)
-                  work = False
-                  for row in rows:
-                      if row.get("status") == "pending":
-                          work = True
-                          break
-                      if row.get("status") == "rendering":
-                          created = datetime.fromisoformat(str(row.get("created_at", "")).replace("Z", "+00:00"))
-                          if created.tzinfo is None:
-                              created = created.replace(tzinfo=timezone.utc)
-                          if (now - created).total_seconds() > 7200:
-                              work = True
-                              break
+                  def needs_work(row):
+                      if row.get("status") in ("pending", "rendering"):
+                          return True
+                      scenes = row.get("scenes") or []
+                      meta = scenes[0].get("_studio", {}) if isinstance(scenes, list) and scenes else {}
+                      if meta.get("youtube_url") or row.get("youtube_url"):
+                          return False
+                      if meta.get("publish_requested"):
+                          return True
+                      if not meta.get("video_url") or meta.get("publish_status") == "auth_required" or int(meta.get("publish_attempts") or 0) >= 5:
+                          return False
+                      due = meta.get("publish_retry_at")
+                      return not due or datetime.fromisoformat(due.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+                  work = any(needs_work(row) for row in rows)
               except Exception as error:
-                  print("Queue probe unavailable; running worker for safe recovery:", type(error).__name__)
+                  print("Queue probe unavailable; running worker:", type(error).__name__)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("work=" + ("true" if work else "false") + "\n")
           print("Rendering required:", work)
@@ -70,7 +72,7 @@ jobs:
       - name: Install worker dependencies
         if: steps.queue.outputs.work == 'true'
         run: pip install -r requirements.txt
-      - name: Process one queued video
+      - name: Drain queued videos and retry pending uploads
         if: steps.queue.outputs.work == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -80,9 +82,9 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python worker.py --once
+        run: python worker.py --drain --max-jobs 3
       - name: Preserve MP4 only when repository is private
-        if: github.event.repository.private == true && steps.queue.outputs.work == 'true'
+        if: always() && github.event.repository.private == true && steps.queue.outputs.work == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: studio-mp4-backup

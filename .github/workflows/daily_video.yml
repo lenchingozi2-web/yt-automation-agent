@@ -1,73 +1,54 @@
 name: LenxiQ Automated YouTube Pipeline
-
 on:
   workflow_dispatch:
     inputs:
       video_topic:
-        description: 'Leave as AUTO for LenxiQ AI topic generation, or type a custom topic'
-        required: true
-        default: 'AUTO'
+        description: Leave AUTO for a fresh LenxiQ topic
+        type: string
+        default: AUTO
       channel_niche:
-        description: 'LenxiQ Brand Pillars (used when topic is AUTO)'
-        required: true
-        default: 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense'
+        description: Brand pillars for automatic topics
+        type: string
+        default: 'LenxiQ: AI in healthcare, learning, building products and human intelligence'
       is_shorts:
-        description: 'Render as 9:16 YouTube Short? (true/false)'
-        required: true
-        default: 'true'
+        description: Portrait format
+        type: boolean
+        default: true
   schedule:
-    - cron: '0 8 * * *'
-
+    - cron: '17 8,10,12 * * *'
+  push:
+    branches: [main]
+    paths: [studio_automation.py]
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: studio-render-worker
+  cancel-in-progress: false
 jobs:
-  render-and-publish:
+  generate-render-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Install FFmpeg and Fonts
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
-
-      - name: Generate and Render Video
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: pip install -r requirements.txt
+      - name: Generate into Studio and drain the shared queue
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          VIDEO_TOPIC: ${{ github.event.inputs.video_topic || 'AUTO' }}
-          CHANNEL_NICHE: "${{ github.event.inputs.channel_niche || 'LenxiQ Brand: AI impact in Medicine/Health, AI in Learning/Education, Building AI Products & Agents, and Intelligence & Common Sense' }}"
-          IS_SHORTS: ${{ github.event.inputs.is_shorts || 'true' }}
-        run: python agent_core.py
-
-      - name: Save Used Topic History to Repo
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add used_topics.txt
-          git diff --staged --quiet || git commit -m "chore: log generated LenxiQ video topic"
-          git push
-
-      - name: Upload to YouTube (If YOUTUBE_TOKEN_JSON is set)
-        env:
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-        run: python upload_youtube.py
-
-      - name: Save Rendered Video as Downloadable Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lenxiq-rendered-video
-          path: |
-            output_run/final_video.mp4
-            output_run/script.json
-          retention-days: 7
+          VIDEO_TOPIC: ${{ inputs.video_topic || 'AUTO' }}
+          CHANNEL_NICHE: ${{ inputs.channel_niche || 'LenxiQ: AI in healthcare, learning, building products and human intelligence' }}
+          IS_SHORTS: ${{ github.event_name == 'workflow_dispatch' && inputs.is_shorts == false && 'false' || 'true' }}
+          STUDIO_OWNER_USER_ID: ${{ vars.STUDIO_OWNER_USER_ID }}
+          STUDIO_DAILY_LIMIT: '3'
+        run: python agent_core.py
