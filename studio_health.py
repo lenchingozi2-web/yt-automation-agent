@@ -66,6 +66,13 @@ def main() -> int:
     from collections import Counter
     print("QUEUE COUNTS:", dict(Counter(r.get("status") for r in rows)), flush=True)
     print("UPLOAD COUNTS:", dict(Counter(metadata(r).get("publish_status", "legacy") for r in rows)), flush=True)
+    import re
+    for row in rows:
+        if row.get("status") == "rendering":
+            state = metadata(row)
+            note = str(state.get("progress_note", ""))
+            stage = note if re.fullmatch(r"Rendering scene \d+ of \d+|Joining scenes|Saving MP4 preview|Starting narration and footage preparation", note) else "Processing"
+            print("ACTIVE RENDER:", stage, "heartbeat:", state.get("worker_heartbeat_at", "unknown"), flush=True)
     print("V4 RENDERS:", sum(metadata(r).get("render_version") == "studio-v4" for r in rows), flush=True)
     print("PASS: Read-only Studio database integration probe.")
     return 0
