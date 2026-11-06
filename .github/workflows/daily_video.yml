@@ -21,8 +21,9 @@ on:
     paths: [studio_automation.py, .github/workflows/daily_video.yml]
 permissions:
   contents: read
+  actions: write
 concurrency:
-  group: studio-render-worker
+  group: studio-daily-producer
   cancel-in-progress: false
 jobs:
   generate-render-publish:
@@ -36,7 +37,7 @@ jobs:
           cache: pip
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
       - run: pip install -r requirements.txt
-      - name: Generate into Studio and drain the shared queue
+      - name: Generate into the shared Studio queue
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
@@ -51,4 +52,9 @@ jobs:
           IS_SHORTS: ${{ github.event_name == 'workflow_dispatch' && inputs.is_shorts == false && 'false' || 'true' }}
           STUDIO_OWNER_USER_ID: ${{ vars.STUDIO_OWNER_USER_ID }}
           STUDIO_DAILY_LIMIT: '3'
-        run: python agent_core.py
+        run: python studio_automation.py
+      - name: Start the render worker immediately
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run studio_worker.yml --ref main

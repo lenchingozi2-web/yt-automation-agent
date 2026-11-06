@@ -23,14 +23,49 @@ def parse_json(text: str) -> dict:
     return data
 
 
+def provider_error(error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        try:
+            details = error.response.json().get("error", {})
+            kind = details.get("code") or details.get("type") or details.get("status") if isinstance(details, dict) else ""
+        except Exception:
+            kind = ""
+        return f"HTTP {error.response.status_code} {kind}"
+    return type(error).__name__
+
+
 def generate_json(instruction: str) -> dict:
     errors = []
-    with httpx.Client(timeout=90) as client:
+    with httpx.Client(timeout=45) as client:
+        key = os.getenv("GROQ_API_KEY", "").strip()
+        if key:
+            # Never choose the first catalog entry: it may be a speech recognizer.
+            preferred = list(dict.fromkeys([os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-120b"]))
+            # Confirm account access when the catalog is reachable. Never route
+            # scripts to an audio or moderation model, including an invalid override.
+            preferred = [n for n in preferred if n.startswith("openai/gpt-oss-") and "safeguard" not in n]
+            try:
+                catalog = client.get("https://api.groq.com/openai/v1/models", headers={"Authorization": "Bearer " + key}, timeout=10)
+                catalog.raise_for_status()
+                active = {m["id"] for m in catalog.json().get("data", [])}
+                preferred = [n for n in preferred if n in active]
+            except Exception:
+                pass
+            for name in preferred:
+                try:
+                    reply = client.post("https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": "Bearer " + key}, json={"model": name,
+                        "messages": [{"role": "user", "content": instruction}],
+                        "response_format": {"type": "json_object"}, "max_tokens": 8192})
+                    reply.raise_for_status()
+                    return parse_json(reply.json()["choices"][0]["message"]["content"])
+                except Exception as error:
+                    errors.append("Groq " + name + " " + provider_error(error))
         key = os.getenv("GEMINI_API_KEY", "").strip()
         if key:
             try:
                 response = client.get("https://generativelanguage.googleapis.com/v1beta/models",
-                    headers={"x-goog-api-key": key}, params={"pageSize": 1000})
+                    headers={"x-goog-api-key": key}, params={"pageSize": 1000}, timeout=10)
                 response.raise_for_status()
                 names = [m["name"] for m in response.json().get("models", [])
                          if "generateContent" in m.get("supportedGenerationMethods", [])
@@ -49,31 +84,7 @@ def generate_json(instruction: str) -> dict:
                     parts = reply.json()["candidates"][0]["content"]["parts"]
                     return parse_json("".join(p.get("text", "") for p in parts if not p.get("thought")))
                 except Exception as error:
-                    errors.append("Gemini " + type(error).__name__)
-        key = os.getenv("GROQ_API_KEY", "").strip()
-        if key:
-            # Never choose the first catalog entry: it may be a speech recognizer.
-            preferred = list(dict.fromkeys([os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-20b"), "openai/gpt-oss-120b"]))
-            # Confirm account access when the catalog is reachable. Never route
-            # scripts to an audio or moderation model, including an invalid override.
-            preferred = [n for n in preferred if n.startswith("openai/gpt-oss-") and "safeguard" not in n]
-            try:
-                catalog = client.get("https://api.groq.com/openai/v1/models", headers={"Authorization": "Bearer " + key})
-                catalog.raise_for_status()
-                active = {m["id"] for m in catalog.json().get("data", [])}
-                preferred = [n for n in preferred if n in active]
-            except Exception:
-                pass
-            for name in preferred:
-                try:
-                    reply = client.post("https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Authorization": "Bearer " + key}, json={"model": name,
-                        "messages": [{"role": "user", "content": instruction}],
-                        "response_format": {"type": "json_object"}, "max_tokens": 8192})
-                    reply.raise_for_status()
-                    return parse_json(reply.json()["choices"][0]["message"]["content"])
-                except Exception as error:
-                    errors.append("Groq " + type(error).__name__)
+                    errors.append("Gemini " + name + " " + provider_error(error))
     raise RuntimeError("Script generation unavailable: " + ", ".join(errors) + ". Check model access and quota.")
 
 
