@@ -41,7 +41,7 @@ def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
     youtube_id = str(data.get("youtube_id") or data.get("youtube_video_id") or "")
     if not (youtube_url.startswith("https://www.youtube.com/watch?v=") or youtube_id):
         return False, False
-    timestamp = data.get("completed_at") or row.get("created_at")
+    timestamp = data.get("published_at") or data.get("completed_at") or row.get("created_at")
     if not isinstance(timestamp, str):
         return False, False
     try:

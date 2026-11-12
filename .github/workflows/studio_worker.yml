@@ -5,7 +5,7 @@ on:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_publish.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '*/5 * * * *'
 permissions:
@@ -26,12 +26,14 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
         run: |
           python3 - <<'PY'
           import json
           import os
           from datetime import datetime, timezone
           from urllib.request import Request, urlopen
+          from studio_publish import credential_version, publication_due
 
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
@@ -42,20 +44,10 @@ jobs:
               try:
                   with urlopen(request, timeout=15) as response:
                       rows = json.load(response)
-                  def needs_work(row):
-                      if row.get("status") in ("pending", "rendering"):
-                          return True
-                      scenes = row.get("scenes") or []
-                      meta = scenes[0].get("_studio", {}) if isinstance(scenes, list) and scenes else {}
-                      if meta.get("youtube_url") or row.get("youtube_url"):
-                          return False
-                      if meta.get("publish_requested"):
-                          return True
-                      if not meta.get("video_url") or meta.get("publish_status") == "auth_required" or int(meta.get("publish_attempts") or 0) >= 5:
-                          return False
-                      due = meta.get("publish_retry_at")
-                      return not due or datetime.fromisoformat(due.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
-                  work = any(needs_work(row) for row in rows)
+                  version = credential_version()
+                  now = datetime.now(timezone.utc)
+                  work = any(row.get("status") in ("pending", "rendering") or publication_due(row, version, now)
+                             for row in rows)
               except Exception as error:
                   print("Queue probe unavailable; running worker:", type(error).__name__)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

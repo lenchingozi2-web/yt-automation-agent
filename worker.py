@@ -26,6 +26,7 @@ from supabase import create_client
 from studio_media import create_thumbnail
 from studio_audio import make_audio, validate_audio
 from studio_maintenance import metadata as stored_metadata
+from studio_publish import credential_version, has_approval, publication_due
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -211,14 +212,14 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
 
 def youtube_credentials() -> Credentials:
     token_json = os.getenv("YOUTUBE_TOKEN_JSON", "").strip()
-    if token_json:
-        credentials = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-        if credentials.refresh_token and (not credentials.valid or credentials.expiry is None or credentials.expired):
-            credentials.refresh(GoogleAuthRequest())
-        if not credentials.valid:
-            raise RuntimeError("invalid_grant: YouTube authorization must be renewed")
-        return credentials
-    raise RuntimeError("YouTube is not connected. Reconnect and update the YOUTUBE_TOKEN_JSON repository secret.")
+    if not credential_version():
+        raise RuntimeError("invalid_youtube_credentials")
+    credentials = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+    if not credentials.valid or credentials.expiry is None:
+        credentials.refresh(GoogleAuthRequest())
+    if not credentials.valid:
+        raise RuntimeError("invalid_grant: YouTube authorization must be renewed")
+    return credentials
 
 
 def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
@@ -463,20 +464,18 @@ def process(video: dict[str, Any], supabase) -> None:
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
                 completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v5",
-                publish_status="pending", publish_attempts=0, render_attempts=0,
-                progress_note="MP4 ready. " + " ".join(warnings), error_message=None)
-    if os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
-        publish_saved(video, supabase, master=final, thumbnail=thumbnail_path)
-    else:
-        save_fields(supabase, video, publish_status="not_configured",
-                    progress_note="MP4 ready. YouTube is not connected.")
+                publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
+                publish_requested=False, publish_approved_at=None, publish_approved_by=None,
+                progress_note="MP4 ready for review. " + " ".join(warnings), error_message=None)
     print(f"[completed] {video_id}", flush=True)
 
 
 def safe_publish_error(error: Exception) -> tuple[str, str]:
     text = str(error)
+    if "invalid_youtube_credentials" in text or "invalid_client" in text or "unauthorized_client" in text:
+        return "auth_required", "YouTube credentials are incomplete or invalid. Update YOUTUBE_TOKEN_JSON in GitHub Actions."
     if "invalid_grant" in text or "expired or revoked" in text:
-        return "auth_required", "YouTube authorization expired or was revoked. Reconnect YouTube and update YOUTUBE_TOKEN_JSON in GitHub repository secrets, then retry upload."
+        return "auth_required", "YouTube authorization expired or was revoked. Reconnect YouTube and update YOUTUBE_TOKEN_JSON in GitHub Actions."
     if "quotaExceeded" in text or "uploadLimitExceeded" in text:
         return "retry", "YouTube upload quota reached; the saved MP4 will be retried later."
     if "insufficientPermissions" in text:
@@ -486,13 +485,17 @@ def safe_publish_error(error: Exception) -> tuple[str, str]:
 
 def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, thumbnail: Path | None = None) -> None:
     details = stored_metadata(video)
-    if details.get("youtube_url") or details.get("youtube_id"):
+    if (not has_approval(details) or details.get("youtube_url")
+            or details.get("youtube_id") or details.get("youtube_video_id")):
         return
     directory = ROOT / str(video["id"])
     directory.mkdir(parents=True, exist_ok=True)
-    attempts = int(details.get("publish_attempts") or 0) + 1
+    version = credential_version()
+    new_auth = details.get("publish_status") == "auth_required" and details.get("publish_auth_version") != version
+    attempts = 1 if new_auth else int(details.get("publish_attempts") or 0) + 1
     save_fields(supabase, video, publish_status="uploading", publish_attempts=attempts,
-                publish_requested=False, progress_note="MP4 ready. Uploading to YouTube.")
+                publish_requested=False, publish_auth_version=version,
+                publish_error=None, progress_note="MP4 ready. Uploading to YouTube.")
     try:
         if master is None:
             # Fetch only this job's trusted storage object, never a row-supplied URL.
@@ -501,11 +504,6 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
             master.write_bytes(content)
         validate_audio(master)
         youtube_id = upload_youtube(details, master)
-        # Save the ID immediately so a thumbnail or later status failure cannot duplicate uploads.
-        save_fields(supabase, video, youtube_id=youtube_id,
-                    youtube_url="https://www.youtube.com/watch?v=" + youtube_id,
-                    publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
-                    publish_error=None, progress_note="MP4 ready. Uploaded to YouTube privately.")
     except Exception as error:
         state, message = safe_publish_error(error)
         save_fields(supabase, video, publish_status=state, publish_error=message,
@@ -513,6 +511,12 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
                     progress_note="MP4 ready. " + message)
         print("[youtube]", message, flush=True)
         return
+    # A failed database write after YouTube accepts a video must never trigger a duplicate upload.
+    save_fields(supabase, video, youtube_id=youtube_id,
+                youtube_url="https://www.youtube.com/watch?v=" + youtube_id,
+                publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
+                publish_error=None, progress_note="MP4 ready. Uploaded to YouTube privately.")
+    print("[youtube] Private upload confirmed:", video["id"], flush=True)
     try:
         if thumbnail is None:
             thumbnail = directory / "thumbnail.jpg"
@@ -525,19 +529,19 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
 
 
 def publish_due(client, limit: int = 3) -> None:
-    if not os.getenv("YOUTUBE_TOKEN_JSON", "").strip():
+    version = credential_version()
+    if not version:
         return
     rows = client.table("videos").select("*").eq("status", "completed").order("created_at", desc=True).limit(100).execute().data or []
+    rows.sort(key=lambda row: not stored_metadata(row).get("publish_requested"))
+    now = datetime.now(timezone.utc)
     done = 0
     for row in rows:
-        data = stored_metadata(row)
-        if data.get("youtube_url") or data.get("youtube_id") or not (data.get("video_url") or data.get("storage_url")):
+        if not publication_due(row, version, now):
             continue
-        explicit = bool(data.get("publish_requested"))
-        if not explicit and (data.get("publish_status") == "auth_required" or int(data.get("publish_attempts") or 0) >= 5):
-            continue
-        due = data.get("publish_retry_at")
-        if due and not explicit and datetime.fromisoformat(due.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+        if stored_metadata(row).get("publish_status") == "uploading":
+            message = "The upload was interrupted. Check YouTube Studio for a private copy before retrying."
+            save_fields(client, row, publish_status="upload_uncertain", publish_error=message, progress_note=message)
             continue
         publish_saved(row, client)
         done += 1
@@ -551,12 +555,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--publish-only", action="store_true")
     parser.add_argument("--max-jobs", type=int, default=3)
+    parser.add_argument("--max-uploads", type=int, default=8)
     args = parser.parse_args(argv)
     url = os.getenv("SUPABASE_URL") or require_env("NEXT_PUBLIC_SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or require_env("SUPABASE_KEY")
     supabase = create_client(url, key)
     ROOT.mkdir(parents=True, exist_ok=True)
-    publish_due(supabase, args.max_jobs)
+    publish_due(supabase, max(1, min(12, args.max_uploads)))
     if args.publish_only:
         return
     processed, failures = 0, 0
@@ -595,7 +600,9 @@ def main(argv: list[str] | None = None) -> None:
             except Exception as error:
                 failures += 1
                 print(f"[failed] {video.get('id')}: {type(error).__name__}: {str(error)[:300]}", flush=True)
-                # Retry transient failures on the next scheduled run, with a hard limit.
+                # Once the MP4 is saved, upload or thumbnail failures cannot requeue the render.
+                if video.get("status") == "completed":
+                    break
                 save_fields(supabase, video, status="pending" if attempts < 3 else "failed",
                             error_message=str(error)[:700],
                             progress_note="Automatic render retry scheduled" if attempts < 3 else "Rendering failed; open the scenes and retry")

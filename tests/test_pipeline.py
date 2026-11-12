@@ -13,6 +13,7 @@ from unittest.mock import patch
 from studio_audio import make_audio, validate_audio, write_srt
 from studio_automation import generate_json, validate_script
 from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage
+from studio_publish import publication_due
 
 
 def ffmpeg(*args):
@@ -142,5 +143,49 @@ class PipelineRegression(unittest.TestCase):
         self.assertEqual(row['scenes'][0]['_studio']['publish_status'],'auth_required')
         self.assertEqual(row['scenes'][0]['_studio']['aspect_ratio'],'9:16')
         self.assertIn('worker_heartbeat_at',row['scenes'][0]['_studio'])
+
+    def test_saved_upload_retries_once_after_authorization_changes(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 12, tzinfo=timezone.utc)
+        meta = {"publish_status": "auth_required", "publish_auth_version": "previous",
+                "publish_attempts": 5, "video_url": "https://storage.example/video.mp4"}
+        row = {"status": "completed", "scenes": [{"_studio": meta}]}
+        self.assertFalse(publication_due(row, "", now))
+        self.assertFalse(publication_due(row, "previous", now))
+        self.assertFalse(publication_due(row, "replacement", now))
+        meta.update(publish_approved_at=now.isoformat(), publish_approved_by="owner")
+        self.assertFalse(publication_due(row, "previous", now))
+        self.assertTrue(publication_due(row, "replacement", now))
+        meta["youtube_video_id"] = "existing-upload"
+        self.assertFalse(publication_due(row, "replacement", now))
+
+    def test_interrupted_upload_is_flagged_without_automatic_reupload(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 12, 10, tzinfo=timezone.utc)
+        meta = {"publish_status": "uploading", "worker_heartbeat_at": "2026-11-12T09:55:00Z",
+                "publish_approved_at": now.isoformat(), "publish_approved_by": "owner",
+                "video_url": "https://storage.example/video.mp4"}
+        row = {"status": "completed", "scenes": [{"_studio": meta}]}
+        self.assertFalse(publication_due(row, "credential", now))
+        meta["worker_heartbeat_at"] = "2026-11-12T07:00:00Z"
+        self.assertTrue(publication_due(row, "credential", now))
+        meta["publish_status"] = "upload_uncertain"
+        self.assertFalse(publication_due(row, "credential", now))
+        meta["publish_requested"] = True
+        self.assertTrue(publication_due(row, "credential", now))
+
+    def test_saved_render_waits_for_user_approval_even_with_working_credentials(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 11, 12, tzinfo=timezone.utc)
+        meta = {"publish_status": "awaiting_review", "video_url": "https://storage.example/video.mp4"}
+        row = {"status": "completed", "scenes": [{"_studio": meta}]}
+        self.assertFalse(publication_due(row, "credential", now))
+        meta["publish_requested"] = True
+        self.assertFalse(publication_due(row, "credential", now))
+        meta.update(publish_approved_at=now.isoformat(), publish_approved_by="owner")
+        self.assertTrue(publication_due(row, "credential", now))
 
 if __name__=='__main__': unittest.main()
