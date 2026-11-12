@@ -2,12 +2,13 @@ import copy
 import json
 import os
 import unittest
+from datetime import date
 from unittest.mock import Mock, patch
 
 import httpx
 from google.genai.errors import ClientError
 
-from research_fetcher import Source, ask, search, validate_batch, write_briefing
+from research_fetcher import Source, ask, related_search, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -42,6 +43,14 @@ class ResearchBriefingTest(unittest.TestCase):
 
         with httpx.Client(transport=httpx.MockTransport(respond)) as client:
             self.assertEqual(search(client, "malaria", 1, newest=True)[0].publisher, "Example Journal")
+
+    @patch("research_fetcher.search_safely")
+    def test_related_search_can_match_either_concept_but_excludes_lead_journal(self, fetch):
+        primary, support = next(iter(self.groups.values()))
+        same_journal = Source("99", "Same journal", primary.publisher, primary.published, primary.abstract)
+        fetch.return_value = [primary, same_journal, support]
+        self.assertEqual(related_search(None, primary, ["botulism", "foodborne illness"], date(2026, 11, 12)), [support])
+        self.assertIn('TITLE_ABS:"botulism" OR TITLE_ABS:"foodborne illness"', fetch.call_args.args[1])
 
     @patch.dict(os.environ, {"GROQ_API_KEY": "test", "GEMINI_RESEARCH_MODEL": ""})
     @patch("research_fetcher.httpx.post")
