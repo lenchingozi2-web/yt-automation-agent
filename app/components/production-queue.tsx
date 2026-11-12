@@ -157,7 +157,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
         <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
       </details>}
       {youtubeEdit && <section className="revision-panel" aria-label="YouTube upload details">
-        <p className="review-note">Studio uploads start private. Manage visibility in YouTube Studio.</p>
+        <p className="review-note">After your video-review approval, new uploads request Public visibility. Check YouTube Studio to confirm; older uploads may remain private.</p>
         {thumbnailFailed && <div className="grid gap-2">
           <p className="review-note">{video.progress_note || "YouTube did not accept the custom thumbnail."}</p>
           {video.progress_note?.includes("HTTP 403") && <p className="review-note">

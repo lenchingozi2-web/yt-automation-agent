@@ -21,9 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python3 -m py_compile worker.py studio_audio.py studio_automation.py studio_media.py studio_maintenance.py
+      - run: python3 -m py_compile worker.py studio_audio.py studio_automation.py studio_media.py studio_thumbnail_art.py studio_maintenance.py
       - run: python3 -m pip install -r requirements.txt
       - run: PYTHONPATH=. python3 tests/test_studio_media.py
+      - run: PYTHONPATH=. python3 tests/test_studio_thumbnail_art.py
       - run: PYTHONPATH=. python3 tests/test_retention.py
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
       - run: python3 -m unittest discover -s tests -p "test_pipeline.py" -v

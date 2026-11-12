@@ -342,7 +342,7 @@ def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
     request = youtube.videos().insert(part="snippet,status", body={"snippet": {
         "title": str(video["title"])[:100], "description": str(video.get("description", "")),
         "tags": video.get("tags", []), "categoryId": "27"}, "status": {
-        "privacyStatus": "private", "selfDeclaredMadeForKids": False}},
+        "privacyStatus": "public", "selfDeclaredMadeForKids": False}},
         media_body=MediaFileUpload(str(file_path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
     response = None
     failures = 0
@@ -395,12 +395,12 @@ def apply_uploaded_thumbnail(video, client, youtube_id, thumbnail=None) -> bool:
             detail = f"HTTP {error.resp.status}"
             if isinstance(reason, str) and re.fullmatch(r"[a-zA-Z0-9_]{1,50}", reason):
                 detail += " " + reason
-        note = "Video uploaded privately. YouTube thumbnail could not be applied (" + detail + ")."
+        note = "Video uploaded. YouTube thumbnail could not be applied (" + detail + ")."
         save_fields(client, video, thumbnail_publish_status="failed", progress_note=note)
         print("[youtube]", note, flush=True)
         return False
     save_fields(client, video, thumbnail_publish_status="uploaded",
-                progress_note="MP4 ready. Uploaded to YouTube privately with its thumbnail.")
+                progress_note="YouTube upload and custom thumbnail accepted. Confirm public visibility in YouTube Studio.")
     print("[youtube] Custom thumbnail confirmed:", video["id"], flush=True)
     return True
 
@@ -596,7 +596,7 @@ def upload_thumbnail(client, path: Path, video_id: str) -> str:
     data = path.read_bytes()
     retry_io(lambda: client.storage.from_(bucket).upload(name, data,
         file_options={"content-type": "image/jpeg", "upsert": "true"}), "save thumbnail")
-    return client.storage.from_(bucket).get_public_url(name)
+    return client.storage.from_(bucket).get_public_url(name) + "?v=" + str(int(time.time()))
 
 
 def process(video: dict[str, Any], supabase) -> None:
@@ -777,8 +777,8 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
     save_fields(supabase, video, youtube_id=youtube_id,
                 youtube_url="https://www.youtube.com/watch?v=" + youtube_id,
                 publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
-                publish_error=None, progress_note="MP4 ready. Uploaded to YouTube privately.")
-    print("[youtube] Private upload confirmed:", video["id"], flush=True)
+                publish_error=None, progress_note="MP4 ready. Uploaded to YouTube (public visibility requested).")
+    print("[youtube] Upload confirmed (public visibility requested):", video["id"], flush=True)
     apply_uploaded_thumbnail(video, supabase, youtube_id, thumbnail)
 
 
@@ -794,7 +794,7 @@ def publish_due(client, limit: int = 3) -> None:
         if not publication_due(row, version, now):
             continue
         if stored_metadata(row).get("publish_status") == "uploading":
-            message = "The upload was interrupted. Check YouTube Studio for a private copy before retrying."
+            message = "The upload was interrupted. Check YouTube Studio for an existing copy before retrying."
             save_fields(client, row, publish_status="upload_uncertain", publish_error=message, progress_note=message)
             continue
         publish_saved(row, client)
