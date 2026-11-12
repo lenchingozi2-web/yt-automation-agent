@@ -56,7 +56,14 @@ jobs:
           PY
       - name: Install FFmpeg and fonts
         if: steps.queue.outputs.work == 'true'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+        run: |
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null &&
+             ffmpeg -hide_banner -filters | awk '$2 == "subtitles" { found=1 } END { exit !found }' &&
+             [ "$(fc-match -f '%{family}' 'DejaVu Sans' 2>/dev/null)" = "DejaVu Sans" ]; then
+            echo "FFmpeg, subtitles, and DejaVu Sans are already available."
+          else
+            sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
