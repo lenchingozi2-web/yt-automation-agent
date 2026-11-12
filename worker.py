@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import create_thumbnail
@@ -360,10 +361,47 @@ def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
 def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
     """Apply the custom JPEG to the uploaded YouTube video if the channel permits it."""
     youtube = build("youtube", "v3", credentials=youtube_credentials())
-    youtube.thumbnails().set(
-        videoId=video_id,
-        media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
-    ).execute()
+    for delay in (0, 3, 8):
+        if delay:
+            time.sleep(delay)
+        try:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
+            ).execute()
+            return
+        except HttpError as error:
+            if delay == 8 or error.resp.status not in (404, 429, 500, 502, 503, 504):
+                raise
+
+
+def apply_uploaded_thumbnail(video, client, youtube_id, thumbnail=None) -> bool:
+    try:
+        if thumbnail is None:
+            directory = ROOT / str(video["id"])
+            directory.mkdir(parents=True, exist_ok=True)
+            thumbnail = directory / "thumbnail.jpg"
+            thumbnail.write_bytes(client.storage.from_(
+                os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(str(video["id"]) + ".jpg"))
+        set_youtube_thumbnail(youtube_id, thumbnail)
+    except Exception as error:
+        detail = type(error).__name__
+        if isinstance(error, HttpError):
+            try:
+                reason = json.loads(error.content)["error"]["errors"][0]["reason"]
+            except (ValueError, KeyError, IndexError, TypeError):
+                reason = ""
+            detail = f"HTTP {error.resp.status}"
+            if isinstance(reason, str) and re.fullmatch(r"[a-zA-Z0-9_]{1,50}", reason):
+                detail += " " + reason
+        note = "Video uploaded privately. YouTube thumbnail could not be applied (" + detail + ")."
+        save_fields(client, video, thumbnail_publish_status="failed", progress_note=note)
+        print("[youtube]", note, flush=True)
+        return False
+    save_fields(client, video, thumbnail_publish_status="uploaded",
+                progress_note="MP4 ready. Uploaded to YouTube privately with its thumbnail.")
+    print("[youtube] Custom thumbnail confirmed:", video["id"], flush=True)
+    return True
 
 
 def decode(value: Any) -> dict[str, Any]:
@@ -707,15 +745,7 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
                 publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
                 publish_error=None, progress_note="MP4 ready. Uploaded to YouTube privately.")
     print("[youtube] Private upload confirmed:", video["id"], flush=True)
-    try:
-        if thumbnail is None:
-            thumbnail = directory / "thumbnail.jpg"
-            thumbnail.write_bytes(supabase.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(str(video["id"]) + ".jpg"))
-        set_youtube_thumbnail(youtube_id, thumbnail)
-        save_fields(supabase, video, thumbnail_publish_status="uploaded")
-    except Exception as error:
-        save_fields(supabase, video, thumbnail_publish_status="failed",
-                    progress_note="MP4 ready. Uploaded to YouTube privately; custom thumbnail could not be applied (" + type(error).__name__ + ").")
+    apply_uploaded_thumbnail(video, supabase, youtube_id, thumbnail)
 
 
 def publish_due(client, limit: int = 3) -> None:
@@ -771,6 +801,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--publish-only", action="store_true")
+    parser.add_argument("--thumbnail-only", metavar="STUDIO_VIDEO_ID")
     parser.add_argument("--max-jobs", type=int, default=3)
     parser.add_argument("--max-uploads", type=int, default=8)
     args = parser.parse_args(argv)
@@ -778,6 +809,17 @@ def main(argv: list[str] | None = None) -> None:
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or require_env("SUPABASE_KEY")
     supabase = create_client(url, key)
     ROOT.mkdir(parents=True, exist_ok=True)
+    if args.thumbnail_only:
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.thumbnail_only, re.I):
+            parser.error("Select a valid Studio video ID")
+        rows = supabase.table("videos").select("*").eq("id", args.thumbnail_only).eq("status", "completed").limit(1).execute().data or []
+        details = stored_metadata(rows[0]) if rows else {}
+        youtube_id = details.get("youtube_id") or details.get("youtube_video_id")
+        if not has_approval(details) or details.get("publish_status") != "uploaded" or not isinstance(youtube_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", youtube_id):
+            parser.error("Select a Studio video with a confirmed, approved YouTube upload")
+        if not apply_uploaded_thumbnail(rows[0], supabase, youtube_id):
+            raise SystemExit(1)
+        return
     publish_due(supabase, max(1, min(12, args.max_uploads)))
     if args.publish_only:
         return

@@ -7,9 +7,11 @@ from pathlib import Path
 import struct
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from googleapiclient.errors import HttpError
 from studio_audio import make_audio, phrase_cues, validate_audio, write_srt
 from studio_automation import generate_researched_draft
 from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage, run
@@ -17,6 +19,22 @@ from studio_publish import publication_due
 from studio_revision import stitch_revision
 
 from studio_retry import retry_io
+
+
+class ThumbnailRetryRegression(unittest.TestCase):
+    @patch("worker.save_fields")
+    @patch("worker.set_youtube_thumbnail")
+    def test_reports_thumbnail_error_separately_from_the_video_upload(self, set_thumbnail, save):
+        from worker import apply_uploaded_thumbnail
+        set_thumbnail.side_effect = HttpError(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            b'{"error":{"message":"Forbidden","errors":[{"reason":"forbidden"}]}}',
+        )
+        row = {"id": "already-uploaded"}
+        self.assertFalse(apply_uploaded_thumbnail(row, object(), "AbCdEf12345", Path("cover.jpg")))
+        self.assertEqual(save.call_args.kwargs["thumbnail_publish_status"], "failed")
+        self.assertIn("HTTP 403 forbidden", save.call_args.kwargs["progress_note"])
+        self.assertNotIn("publish_status", save.call_args.kwargs)
 
 
 def ffmpeg(*args):
