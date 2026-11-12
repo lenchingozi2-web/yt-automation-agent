@@ -2,8 +2,8 @@ export type Scene = { scene_number: number; narration: string; search_queries: s
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[] };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
 export type RevisionMode = "audio" | "visual" | "rewrite";
-export type VideoRevision = { parent_id: string; scene_number: number; mode: RevisionMode; original_media: boolean };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
+export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
 export function toSafeMessage(input: unknown, fallback = "Action completed."): string {
   const seen = new WeakSet<object>();
   function read(value: unknown, depth: number): string {
@@ -110,7 +110,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
   const revision = objectOf(meta.revision);
   const revisionDetails: VideoRevision | undefined = typeof revision.parent_id === "string" && Number.isInteger(revision.scene_number) &&
     (revision.mode === "audio" || revision.mode === "visual" || revision.mode === "rewrite") ? {
-      parent_id: revision.parent_id, scene_number: Number(revision.scene_number), mode: revision.mode,
+      parent_id: revision.parent_id, root_id: typeof revision.root_id === "string" ? revision.root_id : undefined, scene_number: Number(revision.scene_number), mode: revision.mode,
       original_media: revision.original_media === true,
     } : undefined;
   const timeline = meta.scene_times || meta.scene_timeline;
@@ -122,6 +122,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     video_url: meta.preview_expired_at ? "" : stringOf(meta.video_url || meta.storage_url),
     youtube_url: stringOf(meta.youtube_url) || (youtubeId ? "https://www.youtube.com/watch?v=" + encodeURIComponent(youtubeId) : ""),
     youtube_id: youtubeId, created_at: stringOf(meta.created_at),
+    render_started_at: stringOf(meta.render_started_at), completed_at: stringOf(meta.completed_at),
     thumbnail_url: stringOf(meta.thumbnail_url), preview_expired_at: stringOf(meta.preview_expired_at),
     error_message: stringOf(meta.error_message || meta.error),
     progress_note: stringOf(meta.progress_note || meta.progress || meta.note),
@@ -130,4 +131,32 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     thumbnail_publish_status: stringOf(meta.thumbnail_publish_status),
     actual_duration_seconds: Number(meta.actual_duration_seconds) || undefined,
     render_version: stringOf(meta.render_version), automation: stringOf(meta.automation) };
+}
+
+
+export function groupProductions(videos: StudioVideo[]) {
+  const byId = new Map(videos.map((video) => [video.id, video]));
+  const productions = new Map<string, StudioVideo[]>();
+  const timestamp = (video: StudioVideo) => Date.parse(video.created_at ?? "") || 0;
+  const newestFirst = [...byId.values()].sort((a, b) => timestamp(b) - timestamp(a));
+  for (const video of newestFirst) {
+    let source = video;
+    const visited = new Set([video.id]);
+    while (source.revision && !source.revision.root_id) {
+      const parent = byId.get(source.revision.parent_id);
+      if (!parent || visited.has(parent.id)) break;
+      visited.add(parent.id);
+      source = parent;
+    }
+    const id = source.revision?.root_id || source.revision?.parent_id || source.id;
+    const versions = productions.get(id);
+    if (versions) versions.push(video);
+    else productions.set(id, [video]);
+  }
+  return [...productions].map(([id, versions]) => ({
+    id,
+    versions,
+    latest: versions[0],
+    playable: versions.find((version) => version.status === "completed" && version.video_url),
+  }));
 }

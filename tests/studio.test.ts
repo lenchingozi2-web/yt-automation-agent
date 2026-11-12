@@ -56,6 +56,25 @@ test("revision metadata and logical scene times survive API normalization", () =
   assert.equal(video.publish_approved_at, "");
 });
 
+test("revisions share one production card and the newest playable version becomes the preview", async () => {
+  const { groupProductions } = await import("../src/lib/studio.ts");
+  const root = normalizeVideo({ id: "original", title: "Shared title", status: "completed", video_url: "/original.mp4", created_at: "2026-11-12T12:00:00Z" });
+  const revision = normalizeVideo({ id: "second", title: root.title, status: "completed", video_url: "/second.mp4",
+    revision: { parent_id: root.id, scene_number: 3, mode: "audio", original_media: true }, created_at: "2026-11-12T13:00:00Z" });
+  const pending = normalizeVideo({ id: "third", title: root.title, status: "pending",
+    revision: { parent_id: revision.id, scene_number: 5, mode: "visual", original_media: true }, created_at: "2026-11-12T14:00:00Z" });
+  const independent = { ...root, id: "unrelated" };
+  const grouped = groupProductions([root, revision, pending, independent]);
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0].id, root.id);
+  assert.equal(grouped[0].latest.id, pending.id);
+  assert.equal(grouped[0].playable?.id, revision.id);
+  assert.deepEqual(grouped[0].versions.map(({ id }) => id), ["third", "second", "original"]);
+  const completed = { ...pending, status: "completed", video_url: "/third.mp4" };
+  assert.equal(groupProductions([root, revision, completed])[0].playable?.id, completed.id);
+  assert.equal(groupProductions([{ ...pending, revision: { ...pending.revision!, root_id: root.id } }, root])[0].id, root.id);
+});
+
 test("researched drafting revises an unsupported claim and keeps cited source records", async (context) => {
   const { researchedDraft } = await import("../src/lib/studio-research.ts");
   const original = process.env.GEMINI_API_KEY;

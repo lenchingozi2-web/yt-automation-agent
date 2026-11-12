@@ -160,6 +160,14 @@ h3 { font-weight: 620; }
 .status-success { color: var(--green); background: #20342c; border-color: #426752; }
 .status-error { color: var(--red); background: #3a2924; border-color: #714c42; }
 .video-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: end; gap: 6px; max-width: 310px; }
+.queue-versions { grid-column: 2 / -1; font-size: .8rem; color: var(--muted); }
+.queue-versions summary { cursor: pointer; color: var(--accent); }
+.queue-versions ul { list-style: none; padding: 0; margin: 5px 0 0; }
+.queue-versions li { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); }
+.queue-versions li > span { flex: 1; }
+.queue-versions small { display: block; }
+.queue-versions .text-button { min-height: 34px; font-size: .78rem; }
+
 .video-actions .button, .video-actions .text-button { min-height: 38px; font-size: .78rem; }
 .queue-warning { padding: 0 20px 14px; color: var(--red); font-size: .85rem; }
 .queue-empty { display: grid; justify-items: center; gap: 7px; padding: 33px 15px; text-align: center; color: var(--muted); border-top: 1px solid var(--line); }
@@ -252,7 +260,7 @@ h3 { font-weight: 620; }
 @media (max-width: 420px) {
   .install-button { font-size: .76rem; padding-inline: 5px; }
   .queue-row { grid-template-columns: 77px minmax(0, 1fr); gap: 8px 10px; }
-  .video-actions { grid-column: 1 / -1; }
+  .video-actions, .queue-versions { grid-column: 1 / -1; }
   .format-switch button { padding-inline: 8px; }
   .composer-footer > .button { width: 100%; }
   .queue-top .button { padding-inline: 8px; }

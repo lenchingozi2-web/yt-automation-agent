@@ -1,18 +1,29 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
-import type { RevisionMode, StudioVideo } from "@/src/lib/studio";
+import { groupProductions, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
 const FILTERS = ["All", "In progress", "Ready", "Needs attention"] as const;
 type Filter = typeof FILTERS[number];
 const PAGE_SIZE = 8;
 const dateFormat = new Intl.DateTimeFormat("en-NG", { day: "numeric", month: "short", timeZone: "Africa/Lagos" });
+const timeFormat = new Intl.DateTimeFormat("en-NG", { hour: "numeric", minute: "2-digit", timeZone: "Africa/Lagos" });
+
+function clock(value?: string) {
+  return value && Number.isFinite(Date.parse(value)) ? timeFormat.format(new Date(value)) + " WAT" : "";
+}
+
+function renderTime(video: StudioVideo) {
+  const seconds = Math.round((Date.parse(video.completed_at ?? "") - Date.parse(video.render_started_at ?? "")) / 1000);
+  if (!Number.isFinite(seconds) || seconds < 1) return "";
+  return seconds < 60 ? seconds + " sec" : Math.floor(seconds / 60) + " min " + seconds % 60 + " sec";
+}
 
 function videoState(video: StudioVideo) {
-  if (video.status === "failed") return { label: "Render failed", tone: "error", filter: "Needs attention" };
-  if (video.status === "rendering") return { label: "Rendering", tone: "active", filter: "In progress" };
-  if (video.status === "pending") return { label: "Queued", tone: "muted", filter: "In progress" };
+  if (video.status === "failed") return { label: video.revision ? "Revision failed" : "Render failed", tone: "error", filter: "Needs attention" };
+  if (video.status === "rendering") return { label: video.revision ? "Rendering revision" : "Rendering", tone: "active", filter: "In progress" };
+  if (video.status === "pending") return { label: video.revision ? "Revision queued" : "Queued", tone: "muted", filter: "In progress" };
   if (video.youtube_url) return { label: "Uploaded privately", tone: "success", filter: "Ready" };
   if (video.video_url && !video.publish_approved_at) return { label: "Ready for review", tone: "success", filter: "Ready" };
   if (video.publish_status === "uploading") return { label: "Uploading to YouTube", tone: "active", filter: "In progress" };
@@ -103,16 +114,17 @@ function RevisionForm({ video, busy, submit }: {
   </form>;
 }
 
-function Preview({ video, close, approve, revise, busy, feedback }: {
+function Preview({ video, close, approve, revise, busy, feedback, latest, editable }: {
   video: StudioVideo; close: () => void; approve: () => Promise<boolean>;
   revise: (input: RevisionInput) => Promise<boolean>; busy: boolean; feedback: Feedback | null;
+  latest: boolean; editable: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   const [watched, setWatched] = useState(false);
   const [editing, setEditing] = useState(!video.video_url);
   const [attempted, setAttempted] = useState(false);
   const player = useRef<HTMLVideoElement>(null);
-  const canApprove = !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
+  const canApprove = latest && !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
     ["auth_required", "retry", "upload_uncertain", "not_configured"].includes(video.publish_status ?? ""));
   async function send() {
     setAttempted(true);
@@ -148,6 +160,7 @@ function Preview({ video, close, approve, revise, busy, feedback }: {
       </div>}
     </div>
     <footer className="dialog-footer preview-footer">
+      {!latest && <p className="review-note">Earlier version</p>}
       {!editing && attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
       {canApprove && !editing && <p className="review-note">
         {video.publish_status === "upload_uncertain" ? "Check YouTube Studio for an existing copy before approving another upload."
@@ -156,7 +169,7 @@ function Preview({ video, close, approve, revise, busy, feedback }: {
       <div className="preview-actions">
         {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
         {video.youtube_url && <a className="button button-secondary" href={video.youtube_url} target="_blank" rel="noreferrer">Open YouTube <ArrowUpRight size={17} /></a>}
-        {!!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
+        {editable && !!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
           setEditing(!editing); setAttempted(false); if (!editing) player.current?.pause();
         }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
         {canApprove && !editing && <button className="button button-primary" disabled={!watched || failed || busy} onClick={() => void send()}>
@@ -178,9 +191,10 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
   const [shown, setShown] = useState(PAGE_SIZE);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const query = useDeferredValue(search.trim().toLowerCase());
-  const records = useMemo(() => videos.map((video) => ({ video, state: videoState(video) })), [videos]);
-  const filtered = records.filter(({ video, state }) => (filter === "All" || state.filter === filter) && (!query || video.title.toLowerCase().includes(query)));
-  const preview = videos.find((video) => video.id === previewId && ["completed", "failed"].includes(video.status));
+  const records = useMemo(() => groupProductions(videos).map((production) => ({ ...production, state: videoState(production.latest) })), [videos]);
+  const filtered = records.filter(({ latest, state }) => (filter === "All" || state.filter === filter) && (!query || latest.title.toLowerCase().includes(query)));
+  const previewGroup = records.find(({ versions }) => versions.some((version) => version.id === previewId));
+  const preview = previewGroup?.versions.find((version) => version.id === previewId && version.status === "completed" && version.video_url);
   const dateOf = (date?: string) => date && Number.isFinite(Date.parse(date)) ? dateFormat.format(new Date(date)) : "";
 
   return <section className="panel queue" id="queue" aria-labelledby="queue-title">
@@ -212,34 +226,49 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
           : error ? <button className="text-button" disabled={refreshing} onClick={refresh}>Try again</button>
             : <a className="text-button" href="#compose">Create a video</a>}
       </div>
-      : <ul className="queue-list">{filtered.slice(0, shown).map(({ video, state }) => {
-        const problem = video.status === "failed" ? video.error_message : video.publish_approved_at ? video.publish_error : "";
-        const progress = video.status === "rendering" || video.thumbnail_publish_status === "failed" ? video.progress_note : "";
-        return <li className="queue-row" key={video.id}>
-          <Thumbnail video={video} />
+      : <ul className="queue-list">{filtered.slice(0, shown).map(({ id, latest, playable, versions, state }) => {
+        const problem = latest.status === "failed" ? latest.error_message : latest.publish_approved_at ? latest.publish_error : "";
+        const progress = latest.status === "rendering" || latest.thumbnail_publish_status === "failed" ? latest.progress_note : "";
+        const waiting = latest.status === "pending" ? clock(latest.created_at) : "";
+        const renderedIn = latest.revision && latest.status === "completed" ? renderTime(latest) : "";
+        return <li className="queue-row" key={id}>
+          <Thumbnail video={playable || latest} />
           <div className="video-info">
-            <div className="video-meta"><span className={"status status-" + state.tone}>{state.label}</span><span>{video.format}</span>{dateOf(video.created_at) && <span>{dateOf(video.created_at)}</span>}</div>
-            <h3>{video.title}</h3>
-            {video.revision && <p>Revision · Scene {video.revision.scene_number}</p>}
-            {problem ? <p className="video-problem">{problem}</p> : progress ? <p role="status">{progress}</p> : video.description ? <p className="video-description">{video.description}</p> : null}
-            {video.preview_expired_at && !video.video_url && <p>MP4 preview expired. The YouTube copy is available.</p>}
+            <div className="video-meta"><span className={"status status-" + state.tone}>{state.label}</span><span>{latest.format}</span>{dateOf(latest.created_at) && <span>{dateOf(latest.created_at)}</span>}</div>
+            <h3>{latest.title}</h3>
+            {latest.revision && <p>Scene {latest.revision.scene_number} revision{renderedIn && " · Rendered in " + renderedIn}</p>}
+            {problem ? <p className="video-problem">{problem}</p> : progress ? <p role="status">{progress}</p>
+              : latest.status === "pending" ? <p role="status">Waiting for the render worker{waiting && " since " + waiting}.</p>
+              : latest.description ? <p className="video-description">{latest.description}</p> : null}
+            {latest.preview_expired_at && !playable && <p>MP4 preview expired. The YouTube copy is available.</p>}
           </div>
           <div className="video-actions">
-            {video.video_url && video.status === "completed" && <button className="button button-secondary" onClick={() => setPreviewId(video.id)}>
-              <Play size={15} /> {video.youtube_url || video.publish_approved_at ? "Preview" : "Review video"}
+            {playable && <button className="button button-secondary" onClick={() => setPreviewId(playable.id)}>
+              <Play size={15} /> {playable.id !== latest.id ? "Preview previous version"
+                : playable.youtube_url || playable.publish_approved_at ? "Preview" : latest.revision ? "Review revision" : "Review video"}
             </button>}
-            {video.youtube_url && <a className="button button-secondary" href={video.youtube_url} target="_blank" rel="noreferrer">YouTube <ArrowUpRight size={16} /></a>}
-            {video.status === "failed" && <button className="button button-secondary" disabled={!!busy} onClick={() => void retry(video)}>
-              {busy === video.id && <LoaderCircle className="spinner" size={16} />} Retry render
+            {latest.youtube_url && <a className="button button-secondary" href={latest.youtube_url} target="_blank" rel="noreferrer">YouTube <ArrowUpRight size={16} /></a>}
+            {latest.status === "failed" && <button className="button button-secondary" disabled={!!busy} onClick={() => void retry(latest)}>
+              {busy === latest.id && <LoaderCircle className="spinner" size={16} />} Retry {latest.revision ? "revision" : "render"}
             </button>}
-            {video.scenes.length > 0 && !video.video_url && ["completed", "failed"].includes(video.status) &&
-              <button className="text-button" onClick={() => setPreviewId(video.id)}>Regenerate or edit</button>}
-            {video.status === "completed" && <button className="text-button" onClick={() => reuse(video)}>Reuse script</button>}
+            {latest.status === "completed" && <button className="text-button" onClick={() => reuse(latest)}>Reuse script</button>}
           </div>
+          {versions.length > 1 && <details className="queue-versions">
+            <summary>Versions ({versions.length})</summary>
+            <ul>{versions.map((version) => <li key={version.id}>
+              <span>{version.revision ? "Scene " + version.revision.scene_number + " revision" : "Original"}
+                {version.id === latest.id && " · Latest"} <small>{videoState(version).label}</small>
+              </span>
+              {version.status === "completed" && version.video_url && <button type="button" className="text-button" onClick={() => setPreviewId(version.id)}>Preview</button>}
+              {version.youtube_url && <a className="text-button" href={version.youtube_url} target="_blank" rel="noreferrer">YouTube</a>}
+            </li>)}</ul>
+          </details>}
         </li>;
       })}</ul>}
     {filtered.length > shown && <div className="queue-more"><button className="button button-secondary" onClick={() => setShown((count) => count + PAGE_SIZE)}>Show more videos</button></div>}
-    {preview && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
+    {preview && previewGroup && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
+      latest={preview.id === previewGroup.latest.id}
+      editable={preview.id === previewGroup.latest.id || (previewGroup.latest.status === "failed" && preview.id === previewGroup.playable?.id)}
       approve={() => retry(preview, true)} revise={(input) => revise(preview, input)} busy={busy !== null} feedback={feedback} />}
   </section>;
 }

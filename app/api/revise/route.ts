@@ -54,11 +54,20 @@ export async function POST(request: Request) {
       draft.sources = all;
       draft.scenes[sceneNumber - 1] = { ...result.scene, source_ids: result.scene.source_ids?.map((id) => ids.get(id)!) };
     }
+    let source = video;
+    const visited = new Set([id]);
+    while (source.revision && !source.revision.root_id && !visited.has(source.revision.parent_id)) {
+      visited.add(source.revision.parent_id);
+      const parent = await findVideo(client, source.revision.parent_id);
+      if (!parent || (parent.user_id && parent.user_id !== userId)) break;
+      source = normalizeVideo(parent);
+    }
+    const rootId = source.revision?.root_id || source.revision?.parent_id || source.id;
     const saved = await safeInsertVideo(client, draft, userId, requestId, {
-      parent_id: id, scene_number: sceneNumber, mode, original_media: originalMedia,
+      parent_id: id, root_id: rootId, scene_number: sceneNumber, mode, original_media: originalMedia,
     });
     const dispatch = await dispatchStudioWorker();
-    return NextResponse.json({ ok: true, video: normalizeVideo(saved), message: "Scene " + sceneNumber + " revision queued for review.", note: dispatch.note });
+    return NextResponse.json({ ok: true, video: normalizeVideo(saved), message: "Scene " + sceneNumber + " revision queued under the original video.", note: dispatch.note });
   } catch (error) {
     if (statusFor(error) >= 500) console.error("Studio revision failed", error);
     return NextResponse.json(errorResponse(error), { status: statusFor(error), headers: { "Cache-Control": "no-store" } });
