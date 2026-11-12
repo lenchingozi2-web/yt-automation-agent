@@ -47,6 +47,8 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          STUDIO_PREFER_GROQ: "1"
+          STUDIO_SCRIPT_TRACE: "1"
           VIDEO_TOPIC: ${{ inputs.video_topic || 'AUTO' }}
           CHANNEL_NICHE: "${{ inputs.channel_niche || 'LenxiQ: AI in healthcare, learning, building products and human intelligence' }}"
           IS_SHORTS: ${{ github.event_name == 'workflow_dispatch' && inputs.is_shorts == false && 'false' || 'true' }}

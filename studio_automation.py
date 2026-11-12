@@ -18,12 +18,14 @@ BRAND = ("LenxiQ: practical AI in medicine and healthcare; learning and educatio
 def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list[str]) -> dict:
     command = Path(__file__).resolve().parent / "src/lib/studio-daily.ts"
     result = subprocess.run(
-        ["node", "--experimental-strip-types", "--disable-warning=ExperimentalWarning", str(command)],
+        ["node", "--experimental-strip-types", "--no-warnings", str(command)],
         input=json.dumps({"brief": brief, "seconds": seconds, "ratio": ratio, "recent": recent}),
         capture_output=True, text=True, timeout=220,
     )
     if result.returncode:
-        raise RuntimeError(result.stderr.strip()[:400] or "Studio’s researched script failed.")
+        raise RuntimeError(result.stderr.strip()[-1400:] or "Studio’s researched script failed.")
+    if result.stderr.strip():
+        print(result.stderr.strip(), flush=True)
     return json.loads(result.stdout)
 
 

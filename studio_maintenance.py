@@ -93,7 +93,7 @@ def main() -> None:
     response = client.table("videos").select("*").eq("status", "completed").lt("created_at", cutoff).order("created_at").limit(1000).execute()
     active = client.table("videos").select("scenes").in_("status", ["pending", "rendering"]).execute().data or []
     pinned = {revision.get("parent_id") for row in active
-              if (revision := metadata(row).get("revision")) and revision.get("original_media")}
+              if isinstance(revision := metadata(row).get("revision"), dict) and revision.get("original_media")}
     eligible = 0
     for row in response.data or []:
         if row.get("id") in pinned:

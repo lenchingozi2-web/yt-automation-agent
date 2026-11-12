@@ -45,3 +45,50 @@ test("revision metadata and logical scene times survive API normalization", () =
   assert.deepEqual(normalizeVideo(video).scene_times, [{ scene_number: 1, start: 0 }, { scene_number: 2, start: 16 }]);
   assert.equal(video.publish_approved_at, "");
 });
+
+test("researched drafting revises an unsupported claim and keeps cited source records", async (context) => {
+  const { researchedDraft } = await import("../src/lib/studio-research.ts");
+  const original = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "fixture";
+  context.after(() => {
+    if (original === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = original;
+  });
+  const lines = [
+    "Try this after reading a short page of notes. Close the notebook and explain the main idea as if a friend has asked you a question.",
+    "If you cannot remember a detail, keep going until you reach the end of your explanation. Open the notebook and compare your explanation with the text.",
+    "Suppose you are reviewing three definitions. Write each one down from memory and mark the parts you would like to revisit when you next sit down.",
+    "You can try that with one topic today. Keep the question you struggled with and use it as your starting point the next time you study.",
+  ];
+  const generated = { title: "Try a closed-notebook recall exercise", description: "A short example of recalling a topic from memory.",
+    scenes: lines.map((narration) => ({ narration, search_queries: ["student studying", "open notebook"], source_ids: [1] })) };
+  let writes = 0;
+  let audits = 0;
+  let referenceReads = 0;
+  context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
+    if (input.includes("europepmc")) return Response.json({ resultList: { result: [] } });
+    if (input.includes("wikipedia")) {
+      referenceReads++;
+      return Response.json({ query: { pages: [{ pageid: 100 + referenceReads, title: "Testing effect",
+        extract: "Retrieval practice is the act of trying to recall information from memory. A learner can use questions about studied material to practise retrieval." }] } });
+    }
+    const instruction = JSON.parse(String(init?.body)).contents[0].parts[0].text as string;
+    let payload;
+    if (instruction.startsWith("Plan research")) payload = { angle: "Use closed-book recall", clinical: false, queries: ["retrieval practice", "testing effect"] };
+    else if (instruction.startsWith("You are an independent fact checker")) {
+      audits++;
+      assert.ok(instruction.includes("act of trying to recall"));
+      payload = { issues: audits === 1 ? ["Scene 1 includes an unsupported success rate."] : [] };
+    } else {
+      writes++;
+      if (writes === 2) assert.ok(instruction.includes("unsupported success rate"));
+      payload = generated;
+    }
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }] });
+  });
+  const draft = await researchedDraft("Choose a fresh topic under learning and healthcare", 60, "9:16", ["Past video"]);
+  assert.equal(writes, 2);
+  assert.equal(audits, 2);
+  assert.equal(referenceReads, 2);
+  assert.deepEqual(draft.sources?.map(({ id }) => id), [1]);
+});
