@@ -4,11 +4,12 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, ExternalLink, Film, LoaderCircle, RefreshCw } from "lucide-react";
 import { getSupabaseClient } from "@/src/lib/supabase";
-import { toSafeMessage } from "@/src/lib/studio";
+import { isBriefingSource, toSafeMessage } from "@/src/lib/studio";
 import type { ResearchIdea } from "@/src/lib/studio-briefing";
 import { Brand, Notice, PolicyLinks, SignIn, type Feedback } from "../components/studio-shell";
 
 type BriefingData = { ideas: ResearchIdea[]; today: string };
+const topicLabels = { health: "Health", education: "Education", intelligence: "Intelligence" };
 
 async function studioRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { data } = await getSupabaseClient()!.auth.getSession();
@@ -78,7 +79,7 @@ function Briefing() {
     </div></header>
     <main className="workspace" id="workspace">
       <section className="workspace-heading">
-        <div><h1>Daily Briefing</h1><p>Three source-checked stories to turn into videos.</p></div>
+        <div><h1>Daily Briefing</h1><p>Source-checked stories across health, education and intelligence.</p></div>
       </section>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-[var(--muted)]">{day === data?.today ? dateLabel : day ? `Latest briefing · ${dateLabel}` : ""}</p>
@@ -91,10 +92,11 @@ function Briefing() {
       {data && !data.ideas.length && <p className="panel p-5">The first briefing is being prepared. Check again after the daily research run.</p>}
       <div className="grid gap-4">
         {data?.ideas.map((idea) => <article key={idea.id} className="panel grid gap-4 p-5 sm:p-6">
+          {idea.topic_area && <p className="text-sm text-[var(--accent)]">{topicLabels[idea.topic_area]}</p>}
           <h2 className="text-xl font-semibold leading-snug">{idea.title}</h2>
           <p className="text-[var(--muted)]">{idea.hook_summary}</p>
           <ul className="flex flex-wrap gap-x-4 gap-y-2" aria-label="Sources">
-            {idea.references.filter((url) => /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/\d+\/$/.test(url)).map((url, index) => <li key={url}>
+            {idea.references.filter(isBriefingSource).map((url, index) => <li key={url}>
               <a className="inline-flex items-center gap-1.5 text-sm text-[var(--accent)] underline-offset-4 hover:underline" href={url} target="_blank" rel="noreferrer">
                 {index === 0 ? "Lead report" : `Supporting source ${index}`} <ExternalLink size={13} />
               </a>

@@ -5,10 +5,11 @@ import type { BriefingEvidence } from "@/src/lib/studio-research";
 export type ResearchIdea = BriefingEvidence & {
   id: string;
   briefing_date: string;
+  topic_area: "health" | "education" | "intelligence" | null;
   status: "pending" | "queued";
 };
 
-const columns = "id,briefing_date,title,hook_summary,references,status";
+const columns = "id,briefing_date,title,hook_summary,references,status,topic_area";
 function checkStorage(error: { code: string; message: string } | null) {
   if (!error) return;
   if (["PGRST205", "42P01", "42501"].includes(error.code)) {

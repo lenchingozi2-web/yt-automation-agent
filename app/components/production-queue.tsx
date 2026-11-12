@@ -124,7 +124,7 @@ function Preview({ video, close, approve, revise, busy, feedback, latest, editab
   const [editing, setEditing] = useState(!video.video_url);
   const [attempted, setAttempted] = useState(false);
   const player = useRef<HTMLVideoElement>(null);
-  const canApprove = latest && !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
+  const canApprove = !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
     ["auth_required", "retry", "upload_uncertain", "not_configured"].includes(video.publish_status ?? ""));
   async function send() {
     setAttempted(true);

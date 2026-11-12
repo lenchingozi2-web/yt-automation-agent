@@ -25,7 +25,8 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
   const [storageLoading, setStorageLoading] = useState(false);
   const pending = useRef<AbortController | null>(null);
   const pendingStorage = useRef<AbortController | null>(null);
-  const active = data?.videos.some((video) => video.status === "pending" || video.status === "rendering" || video.publish_status === "uploading");
+  const active = data?.videos.some((video) => video.status === "pending" || video.status === "rendering" ||
+    video.publish_status === "pending" || video.publish_status === "uploading");
 
   const refresh = useCallback(async (manual = false) => {
     if (pending.current && !manual) return;

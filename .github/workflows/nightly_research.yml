@@ -4,6 +4,11 @@ on:
     - cron: '0 3 * * *'
     - cron: '27 3 * * *'
   workflow_dispatch:
+    inputs:
+      preview_only:
+        type: boolean
+        description: Verify the topic mix without replacing the live briefing
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -30,4 +35,5 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           GEMINI_RESEARCH_MODEL: ${{ vars.GEMINI_RESEARCH_MODEL }}
           RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
+          RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py

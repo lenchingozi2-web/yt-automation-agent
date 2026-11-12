@@ -18,7 +18,7 @@ export async function studioContext(request: Request): Promise<{ client: Supabas
     global: { headers: { Authorization: "Bearer " + jwt } } });
   const { data, error } = await userClient.auth.getUser(jwt);
   if (error || !data.user) throw new StudioAuthError("Your session has expired. Please sign in again.");
-  if (!role()) return { client: userClient, userId: data.user.id };
+  if (!role()) throw new Error("Studio storage credentials are missing.");
   // A service-role key bypasses RLS: never grant it to arbitrary authenticated users.
   const allowed = (process.env.STUDIO_ALLOWED_EMAILS || process.env.STUDIO_OWNER_EMAIL || "")
     .split(/[,;]/).map(email => email.trim().toLowerCase()).filter(Boolean);

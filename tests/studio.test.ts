@@ -130,7 +130,7 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
     if (original === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = original;
   });
-  const references = ["https://pubmed.ncbi.nlm.nih.gov/901/", "https://pubmed.ncbi.nlm.nih.gov/902/"];
+  const references = ["https://pubmed.ncbi.nlm.nih.gov/901/", "https://eric.ed.gov/?id=EJ902"];
   const narration = [
     "A team writing in the Example Journal looked at a hospital's new handover process. The team wanted to see where details went missing between shifts.",
     "The case study describes how staff agreed on a simple list of items for handover. Each item was assigned a place in the conversation.",
@@ -143,9 +143,15 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
   context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
     if (input.includes("europepmc")) {
       lookups++;
-      assert.match(new URL(input).searchParams.get("query") || "", /EXT_ID:901 OR EXT_ID:902/);
-      return Response.json({ resultList: { result: ["902", "901"].map((pmid) => ({ pmid, title: `Report ${pmid}`,
+      assert.match(new URL(input).searchParams.get("query") || "", /EXT_ID:901/);
+      return Response.json({ resultList: { result: ["901"].map((pmid) => ({ pmid, title: `Report ${pmid}`,
         journalInfo: { journal: { title: "Example Journal" } }, abstractText: "Source evidence. ".repeat(18) })) } });
+    }
+    if (input.includes("api.ies.ed.gov")) {
+      lookups++;
+      assert.match(new URL(input).searchParams.get("search") || "", /id:EJ902.*peerreviewed:T/);
+      return Response.json({ response: { docs: [{ id: "EJ902", title: "ERIC study", source: "Example Education Journal",
+        description: "Education evidence. ".repeat(18), publicationdateyear: 2026 }] } });
     }
     const instruction = JSON.parse(String(init?.body)).contents[0].parts[0].text as string;
     assert.ok(!instruction.startsWith("Plan research"));
@@ -156,7 +162,7 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
   const draft = await researchedDraft("Create a video from this briefing", 60, "9:16", [], {
     title: "The missing detail between shifts", hook_summary: "Two papers about handover checks", references,
   });
-  assert.equal(lookups, 1);
+  assert.equal(lookups, 2);
   assert.match(draft.scenes[0].narration, /Example Journal/);
   assert.deepEqual(draft.sources?.map((source) => source.url), references);
   assert.ok(draft.description.endsWith(references.join("\n")));

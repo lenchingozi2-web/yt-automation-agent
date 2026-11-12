@@ -5,7 +5,7 @@ type BucketInfo = { name: string; bytes: number; count: number; available: boole
 export async function GET(request: Request) {
   try {
     const client = await studioClient(request);
-    const names = [process.env.SUPABASE_VIDEO_BUCKET || "renders", "thumbnails"];
+    const names = [process.env.SUPABASE_VIDEO_BUCKET || "renders", process.env.SUPABASE_THUMBNAIL_BUCKET || "thumbnails"];
     const buckets: BucketInfo[] = [];
     for (const name of names) {
       // Metadata listing is used for a rough current size; Supabase Billing is authoritative.
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: true, buckets, retention: {
       published_preview_days: 7, published_thumbnail_days: 90, unpublished: "Retained until safely backed up or manually removed.",
       metadata: "Retained indefinitely.", cleanup: "Scheduled daily through GitHub Actions.",
-    }, immediate_dispatch_available: !!(process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN) },
+    }, immediate_dispatch_available: !!(process.env.STUDIO_GITHUB_DISPATCH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN) },
       { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json(errorResponse(error), { status: statusFor(error) });

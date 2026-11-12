@@ -1,6 +1,11 @@
 export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[] };
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[] };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
+export const PUBMED_SOURCE = /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/$/;
+export const ERIC_SOURCE = /^https:\/\/eric\.ed\.gov\/\?id=(E[JD]\d+)$/;
+export function isBriefingSource(url: string) {
+  return PUBMED_SOURCE.test(url) || ERIC_SOURCE.test(url);
+}
 export type RevisionMode = "audio" | "visual" | "rewrite";
 export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
 export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
@@ -89,7 +94,7 @@ export function normalizeDraft(value: unknown): Draft {
     const raw = objectOf(item);
     const url = stringOf(raw.url);
     const title = stringOf(raw.title).slice(0, 240);
-    if (!title || !/^https:\/\/(?:pubmed\.ncbi\.nlm\.nih\.gov\/\d+\/?|en\.wikipedia\.org\/\?curid=\d+)$/.test(url)) return [];
+    if (!title || !(isBriefingSource(url) || /^https:\/\/(?:pubmed\.ncbi\.nlm\.nih\.gov\/\d+|en\.wikipedia\.org\/\?curid=\d+)$/.test(url))) return [];
     return [{ id: Number.isSafeInteger(raw.id) ? Number(raw.id) : undefined, url, title, publisher: stringOf(raw.publisher).slice(0, 120) }];
   }).slice(0, 120);
   return { title: stringOf(source.title, "Untitled production"), description: stringOf(source.description || nested.description),

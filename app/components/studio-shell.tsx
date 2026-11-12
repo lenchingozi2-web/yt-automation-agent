@@ -48,7 +48,6 @@ export function Modal({ children, titleId, close, className = "" }: { children: 
 }
 
 export function SignIn({ supabase }: { supabase: SupabaseClient | null }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
@@ -61,11 +60,8 @@ export function SignIn({ supabase }: { supabase: SupabaseClient | null }) {
     setBusy(true);
     setFeedback(null);
     try {
-      const result = await (mode === "signin"
-        ? supabase.auth.signInWithPassword({ email, password })
-        : supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin } }));
+      const result = await supabase.auth.signInWithPassword({ email, password });
       if (result.error) throw result.error;
-      if (mode === "signup" && !result.data.session) setFeedback({ kind: "success", message: "Check your email to confirm your account." });
     } catch (error) {
       setFeedback({ kind: "error", message: error instanceof Error ? error.message : "Unable to sign in. Try again." });
     } finally {
@@ -87,20 +83,16 @@ export function SignIn({ supabase }: { supabase: SupabaseClient | null }) {
         <div className="auth-flow"><span><Clapperboard size={16} /> Script</span><ArrowDown size={14} className="flow-arrow" /><span><Film size={16} /> Render</span><ArrowDown size={14} className="flow-arrow" /><span><Play size={16} /> Upload</span></div>
       </section>
       <section className="auth-form-panel">
-        <h2>{mode === "signin" ? "Sign in" : "Create an account"}</h2>
-        <p>{mode === "signin" ? "Access your production queue." : "Use an email address you can confirm."}</p>
+        <h2>Sign in to Studio</h2>
+        <p>Use your authorized workspace account.</p>
         <form onSubmit={authenticate}>
           <label>Email address<input name="email" type="email" autoComplete="email" placeholder="you@example.com" required /></label>
-          <label>Password<input name="password" type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} minLength={mode === "signup" ? 6 : undefined} required /></label>
+          <label>Password<input name="password" type="password" autoComplete="current-password" required /></label>
           <Notice feedback={feedback ?? (!supabase ? { kind: "error", message: "Sign-in is temporarily unavailable." } : null)} />
           <button className="button button-primary auth-submit" disabled={busy || !supabase}>
-            {mode === "signin" ? "Sign in" : "Create account"} {busy ? <LoaderCircle className="spinner" size={18} /> : <ArrowRight size={18} />}
+            Sign in {busy ? <LoaderCircle className="spinner" size={18} /> : <ArrowRight size={18} />}
           </button>
         </form>
-        <button className="text-button auth-switch" disabled={busy || !supabase} onClick={() => {
-          setMode(mode === "signin" ? "signup" : "signin");
-          setFeedback(null);
-        }}>{mode === "signin" ? "Create an account" : "Already registered? Sign in"}</button>
       </section>
     </main>
   </div>;

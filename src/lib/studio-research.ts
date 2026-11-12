@@ -1,4 +1,4 @@
-import { normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
+import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 
 type Json = Record<string, unknown>;
 type Evidence = ResearchSource & { text: string; year?: string };
@@ -159,23 +159,34 @@ function sourceList(evidence: Evidence[]): ResearchSource[] {
 }
 
 async function briefingEvidence(briefing: BriefingEvidence): Promise<Evidence[]> {
-  const ids = briefing.references.map((url) => /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/$/.exec(url)?.[1]);
-  if (ids.length < 2 || ids.length > 3 || ids.some((id) => !id) || new Set(ids).size !== ids.length) {
+  const links = briefing.references;
+  if (links.length < 2 || links.length > 3 || links.some((url) => !isBriefingSource(url)) || new Set(links).size !== links.length) {
     throw new Error("This briefing has invalid source links.");
   }
-  const params = new URLSearchParams({
-    query: "SRC:MED AND (" + ids.map((id) => "EXT_ID:" + id).join(" OR ") + ') NOT PUB_TYPE:"retracted publication"',
-    resultType: "core", format: "json", pageSize: String(ids.length),
-  });
-  const response = await fetchJson<{ resultList?: { result?: Json[] } }>("https://www.ebi.ac.uk/europepmc/webservices/rest/search?" + params);
-  return ids.map((id, index) => {
-    const record = response.resultList?.result?.find((hit) => text(hit.pmid || hit.id) === id);
+  const pubmedIds = links.flatMap((url) => PUBMED_SOURCE.exec(url)?.[1] ?? []);
+  const ericIds = links.flatMap((url) => ERIC_SOURCE.exec(url)?.[1] ?? []);
+  const [pubmed, eric] = await Promise.all([
+    pubmedIds.length ? fetchJson<{ resultList?: { result?: Json[] } }>("https://www.ebi.ac.uk/europepmc/webservices/rest/search?" + new URLSearchParams({
+      query: "SRC:MED AND (" + pubmedIds.map((id) => "EXT_ID:" + id).join(" OR ") + ') NOT PUB_TYPE:"retracted publication"',
+      resultType: "core", format: "json", pageSize: String(pubmedIds.length),
+    })) : null,
+    ericIds.length ? fetchJson<{ response?: { docs?: Json[] } }>("https://api.ies.ed.gov/eric/?" + new URLSearchParams({
+      search: "(" + ericIds.map((id) => "id:" + id).join(" OR ") + ") AND peerreviewed:T",
+      fields: "id,title,source,description,publicationdateyear", format: "json", rows: String(ericIds.length),
+    })) : null,
+  ]);
+  return links.map((url, index) => {
+    const pubmedId = PUBMED_SOURCE.exec(url)?.[1];
+    const ericId = ERIC_SOURCE.exec(url)?.[1];
+    const record = pubmedId
+      ? pubmed?.resultList?.result?.find((hit) => text(hit.pmid || hit.id) === pubmedId)
+      : eric?.response?.docs?.find((hit) => hit.id === ericId);
     const title = clean(record?.title, 220);
-    const abstract = clean(record?.abstractText, 8000);
-    const publisher = clean(record?.journalTitle || object(object(record?.journalInfo).journal).title, 120);
+    const abstract = clean(record?.abstractText || record?.description, 8000);
+    const publisher = clean(record?.journalTitle || object(object(record?.journalInfo).journal).title || record?.source, 120);
     if (!title || !publisher || abstract.length < 200) throw new Error("A briefing source could not be verified. Try again later.");
     const excerpt = abstract.length <= 2200 ? abstract : abstract.slice(0, 1100) + " […] " + abstract.slice(-1100);
-    return { id: index + 1, title, url: briefing.references[index], publisher, year: text(record?.pubYear), text: excerpt };
+    return { id: index + 1, title, url, publisher, year: String(record?.pubYear ?? record?.publicationdateyear ?? ""), text: excerpt };
   });
 }
 
@@ -221,6 +232,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     "Cite at least one supplied source ID in the factual scenes. Transitions and clearly marked hypothetical examples can use an empty array.",
     ...(briefing ? [
       "Create a video script from the selected briefing story. Stay with source ID 1 for the event. Other sources can substantiate context only where applicable.",
+      "For health topics, share only general, source-supported information. Clearly separate pilot studies, feasibility findings, and adoption in routine care.",
       "Naturally name a cited journal, institution or source in the voiceover when stating its finding. Use its actual name. Do not read URLs aloud.",
       "Use original narration and descriptions. Write a description without links. Studio will append all of the briefing’s exact URLs.",
     ] : []),

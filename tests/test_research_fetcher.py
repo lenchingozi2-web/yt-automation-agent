@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import httpx
 from google.genai.errors import ClientError
 
-from research_fetcher import Source, ask, related_search, search, validate_batch, write_briefing
+from research_fetcher import BEATS, Source, ask, eric_search, related_search, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -16,18 +16,34 @@ class ResearchBriefingTest(unittest.TestCase):
         abstract = "The case report describes a patient with symptoms observed by a hospital team during routine screening."
         self.groups = {}
         self.stories = []
-        for index in range(3):
-            lead = Source(str(index + 10), "Lead report", "Journal One", "2026-11-01", abstract)
+        for index, beat in enumerate(BEATS):
+            lead = Source(str(index + 10), "Lead report", "Journal One", "2026-11-01", abstract, beat=beat)
             context = Source(str(index + 100), "Supporting report", "Journal Two", "2026-11-02", abstract)
             self.groups[lead.url] = [lead, context]
             self.stories.append({
                 "title": f"An unexpected pattern in case {index}",
                 "hook_summary": "A routine check uncovered a pattern the care team could investigate. Later findings added context to the result.",
                 "references": [lead.url, context.url],
+                "topic_area": beat,
             })
 
     def test_validated_story_preserves_exact_urls_and_order(self):
         self.assertEqual(validate_batch(self.stories, self.groups), self.stories)
+
+    def test_rejects_a_story_reusing_an_earlier_title(self):
+        with self.assertRaisesRegex(ValueError, "repeated"):
+            validate_batch(self.stories, self.groups, [self.stories[1]["title"].upper()])
+
+    def test_reads_canonical_peer_reviewed_eric_records(self):
+        record = {"id": "EJ1234", "title": "Learning research", "source": "Example Journal",
+                  "description": "A description of a peer-reviewed study. " * 10, "publicationdateyear": 2026}
+
+        def respond(request):
+            self.assertIn("peerreviewed:T", request.url.params["search"])
+            return httpx.Response(200, json={"response": {"docs": [record]}})
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            self.assertEqual(eric_search(client, "retrieval practice", 3)[0].url, "https://eric.ed.gov/?id=EJ1234")
 
     def test_recent_search_uses_supported_sort_and_reads_core_journal_metadata(self):
         record = {
