@@ -116,6 +116,22 @@ def copy_audio_samples(parent: Path, start: int, end: int, output: Path):
          "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(output)])
 
 
+
+def fit_replacement_picture(pictures: list[Path], frames: int, directory: Path) -> list[Path]:
+    from worker import run, video_encoder
+    lengths = [int(picture_track(path)["nb_frames"]) for path in pictures]
+    difference = frames - sum(lengths)
+    if difference == 0:
+        return pictures
+    if not lengths or abs(difference) > 6 or lengths[-1] + difference < 1:
+        raise ValueError(f"The replacement footage has {sum(lengths)} frames; this edit needs {frames}.")
+    fitted = directory / "replacement_fit.mp4"
+    count = lengths[-1] + difference
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-i", str(pictures[-1]),
+         "-map", "0:v:0", "-an", "-vf", "fps=30,tpad=stop_mode=clone:stop_duration=0.2",
+         "-frames:v", str(count), "-r", "30", "-fps_mode", "cfr", *video_encoder(), str(fitted)])
+    return [*pictures[:-1], fitted]
+
 def stitch_revision(parent: Path, start: int, end: int, pictures: list[Path], voices: list[Path],
                     mode: str, directory: Path) -> Path:
     from worker import run
@@ -134,6 +150,8 @@ def stitch_revision(parent: Path, start: int, end: int, pictures: list[Path], vo
         keyframes = picture_keys(parent) if track.get("has_b_frames") == 0 else set()
         before = source_picture(parent, 0, start, keyframes, directory)
         after = source_picture(parent, end, frames, keyframes, directory)
+        if mode == "visual":
+            pictures = fit_replacement_picture(pictures, end - start, directory)
         spans = before + pictures + after
         expected_frames = sum(int(picture_track(path)["nb_frames"]) for path in spans)
         manifest = directory / "revision_picture.ffconcat"
@@ -141,7 +159,7 @@ def stitch_revision(parent: Path, start: int, end: int, pictures: list[Path], vo
         video_input = ["-f", "concat", "-safe", "0", "-i", str(manifest)]
     if mode == "visual":
         if expected_frames != frames:
-            raise ValueError("A footage-only edit must keep the source picture length.")
+            raise ValueError(f"A footage-only edit must keep the source picture length ({expected_frames} vs {frames} frames).")
         audio_input = ["-i", str(parent)]
         audio_codec = ["-c:a", "copy"]
     else:

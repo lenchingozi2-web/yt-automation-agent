@@ -116,7 +116,7 @@ class MediaRegression(unittest.TestCase):
                    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
                    '-t', '3', '-c:v', 'libx264', '-bf', '0', '-g', '30',
                    '-video_track_timescale', '90000', '-ac', '2', '-c:a', 'aac', parent)
-            ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-frames:v', 30,
+            ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-frames:v', 29,
                    '-c:v', 'libx264', '-bf', '0', '-video_track_timescale', '90000', replacement)
             revised = stitch_revision(parent, 30, 60, [replacement], [], "visual", folder)
             def frame_hashes(path):

@@ -230,13 +230,14 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
     filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
     font_size, margin_v = (64, 300) if height > width else (54, 100)
-    filters.append("[visuals]subtitles='" + escaped + "':force_style='"
+    filters.append(f"[visuals]fps=30,tpad=stop_mode=clone:stop_duration=0.2,"
+                   f"trim=end_frame={frames},setpts=N/(30*TB),subtitles='" + escaped + "':force_style='"
                    f"PlayResX={width},PlayResY={height},FontName=DejaVu Sans,FontSize={font_size},"
                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
                    f"Alignment=2,MarginV={margin_v},MarginL=80,MarginR=80'[vout]")
     bitrate_args = ["-maxrate", f"{bitrate}k", "-bufsize", f"{bitrate * 2}k"] if bitrate else []
     command += ["-i", str(pcm), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
-                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-frames:v", str(frames), "-t", f"{duration:.6f}",
+                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-frames:v", str(frames), "-r", "30", "-fps_mode", "cfr",
                 *video_encoder(), *bitrate_args, "-c:a", "aac", "-b:a", "160k", str(output)]
     run(command, timeout=max(300, int(duration * 20)))
     validate_audio(output, expected=duration)
