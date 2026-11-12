@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from studio_audio import make_audio, phrase_cues, validate_audio, write_srt
 from studio_automation import generate_researched_draft
-from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage
+from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage, run
 from studio_publish import publication_due
 from studio_revision import reuse_visual
 
@@ -126,6 +126,27 @@ class MediaRegression(unittest.TestCase):
                 start = index * 12 + .1
                 expected, other = (440, 660) if index % 2 == 0 else (660, 440)
                 self.assertGreater(energy(final, expected, start=start), energy(final, other, start=start) * 10)
+
+    def test_stitch_recovers_from_non_monotonic_picture_timestamps(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            clips = []
+            frames = (24, 37, 32)
+            for number, count in enumerate(frames):
+                clip = directory / f'clip{number}.mp4'
+                ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-frames:v', count,
+                       '-an', '-c:v', 'libx264', '-video_track_timescale', '90000', clip)
+                ffmpeg('-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+                       '-t', f'{count / 30:.6f}', '-ac', '2', clip.with_suffix('.wav'))
+                clips.append(clip)
+            def mux(command, **options):
+                if command[command.index('-c:v') + 1] == 'copy':
+                    raise RuntimeError('FFmpeg exited: Non-monotonic DTS')
+                return run(command, **options)
+            with patch('worker.run', side_effect=mux):
+                final = stitch(clips, directory)
+            validate_audio(final, expected=sum(frames) / 30)
+            self.assertGreater(energy(final, 440, start=2), energy(final, 660, start=2) * 10)
 
     def test_captions_break_at_clauses_and_pauses(self):
         marks = [(0,.3,'Here'),(.3,.5,'it'),(.5,.9,'is,'),(1,1.25,'one'),(1.26,1.6,'example.'),(2.1,2.4,'Done.')]

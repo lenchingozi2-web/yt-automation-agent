@@ -77,6 +77,7 @@ def reuse_visual(parent: Path, entry: dict, scene: dict, directory: Path, replac
     width, height = video_size(scene)
     run(["ffmpeg", "-y", "-v", "error", "-xerror", "-ss", str(entry["start"]), "-i", str(parent),
          "-i", str(pcm), "-t", f"{duration:.6f}", "-map", "0:v:0", "-map", "1:a:0",
+         "-frames:v", str(round(duration * 30)),
          "-vf", f"scale={width}:{height}:flags=lanczos,setsar=1,fps=30",
          *video_encoder(), "-c:a", "aac", "-b:a", "160k", str(output)], timeout=300)
     return output

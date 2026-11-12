@@ -183,7 +183,7 @@ def video_size(scene):
 
 def video_encoder():
     return ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
+            "-bf", "0", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
 
 
 def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
@@ -235,7 +235,7 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
                    f"Alignment=2,MarginV={margin_v},MarginL=80,MarginR=80'[vout]")
     command += ["-i", str(pcm), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
-                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-t", f"{duration:.6f}",
+                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-frames:v", str(frames), "-t", f"{duration:.6f}",
                 *video_encoder(), "-c:a", "aac", "-b:a", "160k", str(output)]
     run(command, timeout=max(300, int(duration * 20)))
     validate_audio(output, expected=duration)
@@ -258,9 +258,19 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
                 lengths.append(pcm.getnframes() / 48000)
                 master.writeframes(pcm.readframes(pcm.getnframes()))
     concat.write_text("".join(f"file '{clip.resolve()}'\nduration {length:.6f}\n" for clip, length in zip(rendered, lengths)), encoding="utf-8")
-    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-f", "concat", "-safe", "0", "-i", str(concat),
-         "-i", str(narration), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
-         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(final)], timeout=600)
+    inputs = ["ffmpeg", "-y", "-v", "error", "-xerror", "-f", "concat", "-safe", "0", "-i", str(concat),
+              "-i", str(narration), "-map", "0:v:0", "-map", "1:a:0"]
+    output = ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(final)]
+    try:
+        run([*inputs, "-c:v", "copy", *output], timeout=600)
+    except RuntimeError as error:
+        if "non-monoton" not in str(error).lower():
+            raise
+        # Mixed encoder timestamps can cross a cut. Rebuild the picture timestamps
+        # from frame order while retaining the separate, sample-accurate narration.
+        print("[stitch] rebuilding video timestamps at scene cuts", flush=True)
+        run([*inputs, "-vf", "setpts=N/(30*TB)", "-fps_mode", "passthrough",
+             *video_encoder(), *output], timeout=max(600, round(sum(lengths) * 5)))
     validate_audio(final, expected=sum(lengths))
     media = probe(final)
     video = next((track for track in media.get("streams", []) if track.get("codec_type") == "video"), {})
