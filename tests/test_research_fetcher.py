@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import httpx
 from google.genai.errors import ClientError
 
-from research_fetcher import BEATS, Source, ask, eric_search, related_search, search, validate_batch, write_briefing
+from research_fetcher import BEATS, Source, ask, eric_search, related_search, resolve_story_sources, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -26,6 +26,8 @@ class ResearchBriefingTest(unittest.TestCase):
                 "references": [lead.url, context.url],
                 "topic_area": beat,
             })
+        self.numbered = [dict(title=story["title"], hook_summary=story["hook_summary"], lead=index, supporting=[1])
+                         for index, story in enumerate(self.stories, 1)]
 
     def test_validated_story_preserves_exact_urls_and_order(self):
         self.assertEqual(validate_batch(self.stories, self.groups), self.stories)
@@ -33,6 +35,12 @@ class ResearchBriefingTest(unittest.TestCase):
     def test_rejects_a_story_reusing_an_earlier_title(self):
         with self.assertRaisesRegex(ValueError, "repeated"):
             validate_batch(self.stories, self.groups, [self.stories[1]["title"].upper()])
+
+    def test_numbered_sources_resolve_to_original_urls(self):
+        groups = dict(enumerate(self.groups.values(), 1))
+        self.assertEqual(validate_batch(resolve_story_sources(self.numbered, groups), self.groups), self.stories)
+        with self.assertRaisesRegex(ValueError, "supporting record"):
+            resolve_story_sources([dict(self.numbered[0], supporting=[2])], groups)
 
     def test_reads_canonical_peer_reviewed_eric_records(self):
         record = {"id": "EJ1234", "title": "Learning research", "source": "Example Journal",
@@ -94,11 +102,11 @@ class ResearchBriefingTest(unittest.TestCase):
 
     @patch("research_fetcher.ask")
     def test_source_audit_rejects_incomplete_batch(self, ask):
-        ask.side_effect = [self.stories, [{"passed": True}] * 2, self.stories, [{"passed": False}] * 3]
+        ask.side_effect = [self.numbered, [{"passed": True}] * 2, self.numbered, [{"passed": False}] * 3]
         with self.assertRaisesRegex(RuntimeError, "did not pass verification"):
             write_briefing(None, self.groups, [])
 
     @patch("research_fetcher.ask")
     def test_successful_source_audit_returns_complete_batch(self, ask):
-        ask.side_effect = [self.stories, [{"passed": True}] * 3]
+        ask.side_effect = [self.numbered, [{"passed": True}] * 3]
         self.assertEqual(write_briefing(None, self.groups, []), self.stories)

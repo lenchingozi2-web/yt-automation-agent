@@ -317,10 +317,29 @@ def validate_batch(raw: list, evidence: dict[str, list[Source]], recent_titles: 
     return sorted(stories, key=lambda story: BEATS.index(story["topic_area"]))
 
 
+def resolve_story_sources(raw: list, groups: dict[int, list[Source]]) -> list[dict]:
+    stories = []
+    for item in raw:
+        if not isinstance(item, dict) or type(item.get("lead")) is not int:
+            raise ValueError("Choose a numbered lead report")
+        sources = groups.get(item["lead"], [])
+        supporting = item.get("supporting")
+        if not sources or not isinstance(supporting, list) or not 1 <= len(supporting) <= 2 or any(
+            type(index) is not int or not 1 <= index < len(sources) for index in supporting
+        ):
+            raise ValueError("Choose supporting record numbers from the selected lead")
+        references = [sources[0].url, *(sources[index].url for index in supporting)]
+        stories.append({"title": item.get("title"), "hook_summary": item.get("hook_summary"), "references": references})
+    return stories
+
+
 def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], recent_titles: list[str]) -> list[dict]:
     if {sources[0].beat for sources in evidence.values()} != set(BEATS):
         raise RuntimeError("A channel topic had no fresh report with independent supporting sources.")
-    reports = [[source.evidence() for source in sources] for sources in evidence.values()]
+    groups = dict(enumerate(evidence.values(), 1))
+    reports = [{"lead": lead, "beat": sources[0].beat, "report": sources[0].evidence(),
+                "supporting": [{"number": number, **source.evidence()} for number, source in enumerate(sources[1:], 1)]}
+               for lead, sources in groups.items()]
     problem = ""
     for _ in range(2):
         raw = ask(gemini, """
@@ -331,15 +350,16 @@ Follow it with what was discovered and why it matters. Be specific, conversation
 Prefer an interesting fact to hype. Avoid stock hooks, invented scenes or dialogue, dramatization,
 personal medical advice, certainty beyond the evidence and copied wording. Say when a result is preliminary.
 Offer practical general health tips only when a guideline or review directly supports them.
-Do not reuse angles from previous productions. Use a different source group per story. Cite the lead
-report first, then one or two relevant independent records from its group. The lead report must
-establish the event or finding. The other records must corroborate it or substantiate distinct context
+Do not reuse angles from previous productions. Use a different lead number per story. Select one or
+two numbered supporting records from that lead's supporting list. The lead report must establish
+the event or finding. The supporting records must corroborate it or substantiate distinct context
 explicitly included in the summary. Do not imply contextual sources independently confirmed the event.
 Return a raw JSON array with exactly three objects, each with title (10–160 characters), hook_summary
-(80–700 characters, around 2–3 sentences), and references (two or three supplied exact article URLs).
+(80–700 characters, around 2–3 sentences), lead (integer), and supporting (one or two integers).
+Use the numbers exactly as supplied. Do not output URLs.
 """, {"reports": reports, "previous_titles": recent_titles, "previous_check": problem})
         try:
-            stories = validate_batch(raw, evidence, recent_titles)
+            stories = validate_batch(resolve_story_sources(raw, groups), evidence, recent_titles)
         except ValueError as error:
             problem = str(error)
             print(f"Briefing validation requested another pass: {problem}.", flush=True)
