@@ -1,7 +1,7 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
-import type { StudioVideo } from "@/src/lib/studio";
+import type { RevisionMode, StudioVideo } from "@/src/lib/studio";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
 const FILTERS = ["All", "In progress", "Ready", "Needs attention"] as const;
@@ -43,13 +43,76 @@ function Thumbnail({ video }: { video: StudioVideo }) {
   </div>;
 }
 
-function Preview({ video, close, approve, busy, feedback }: {
-  video: StudioVideo; close: () => void; approve: () => Promise<boolean>; busy: boolean; feedback: Feedback | null;
+export type RevisionInput = {
+  direction: string; scene?: number; mode?: RevisionMode; narration?: string; footage?: string; requestId: string;
+};
+
+function RevisionForm({ video, busy, submit }: {
+  video: StudioVideo; busy: boolean; submit: (input: RevisionInput) => Promise<void>;
+}) {
+  const [scene, setScene] = useState("");
+  const [mode, setMode] = useState<RevisionMode | "auto">("auto");
+  const [direction, setDirection] = useState("");
+  const [narration, setNarration] = useState("");
+  const [footage, setFootage] = useState("");
+  const requestId = useRef("");
+  const original = video.scenes[Number(scene) - 1];
+  return <form className="revision-form" onChange={() => { requestId.current = ""; }} onSubmit={(event) => {
+    event.preventDefault();
+    requestId.current ||= crypto.randomUUID();
+    void submit({ scene: scene ? Number(scene) : undefined, mode: mode === "auto" ? undefined : mode,
+      direction, narration: narration.trim() !== original?.narration ? narration : undefined,
+      footage: footage.trim() !== original?.search_queries.join(", ") ? footage : undefined,
+      requestId: requestId.current });
+  }}>
+    <label>What should change?
+      <textarea rows={2} maxLength={1600} value={direction} onChange={(event) => setDirection(event.target.value)}
+        placeholder="Scene 5 lacks voice" />
+    </label>
+    <div className="revision-fields">
+      <label>Scene
+        <select value={scene} onChange={(event) => { const value = event.target.value;
+          const selected = video.scenes[Number(value) - 1];
+          setScene(value);
+          setNarration(selected?.narration || "");
+          setFootage(selected?.search_queries.join(", ") || ""); }}>
+          <option value="">From your instructions</option>
+          {video.scenes.map((item) => <option key={item.scene_number} value={item.scene_number}>Scene {item.scene_number}</option>)}
+        </select>
+      </label>
+      <label>Change
+        <select value={mode} onChange={(event) => setMode(event.target.value as RevisionMode | "auto")}>
+          <option value="auto">From your instructions</option>
+          <option value="audio">Repair voice</option>
+          <option value="visual">Replace footage</option>
+          <option value="rewrite">Rewrite scene</option>
+        </select>
+      </label>
+    </div>
+    {original && <details>
+      <summary>Edit the scene directly</summary>
+      <label>Narration<textarea rows={3} maxLength={800} value={narration} placeholder={original.narration}
+        onChange={(event) => setNarration(event.target.value)} /></label>
+      <label>Footage search terms <small>Separated by commas</small>
+        <input maxLength={350} value={footage} placeholder={original.search_queries.join(", ")} onChange={(event) => setFootage(event.target.value)} />
+      </label>
+    </details>}
+    <button type="submit" className="button button-primary" disabled={busy}>
+      {busy ? <LoaderCircle size={16} className="spinner" /> : <RefreshCw size={16} />} {busy ? "Queuing…" : "Render revision"}
+    </button>
+  </form>;
+}
+
+function Preview({ video, close, approve, revise, busy, feedback }: {
+  video: StudioVideo; close: () => void; approve: () => Promise<boolean>;
+  revise: (input: RevisionInput) => Promise<boolean>; busy: boolean; feedback: Feedback | null;
 }) {
   const [failed, setFailed] = useState(false);
   const [watched, setWatched] = useState(false);
+  const [editing, setEditing] = useState(!video.video_url);
   const [attempted, setAttempted] = useState(false);
-  const canApprove = !video.youtube_url && (!video.publish_approved_at ||
+  const player = useRef<HTMLVideoElement>(null);
+  const canApprove = !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
     ["auth_required", "retry", "upload_uncertain", "not_configured"].includes(video.publish_status ?? ""));
   async function send() {
     setAttempted(true);
@@ -57,25 +120,46 @@ function Preview({ video, close, approve, busy, feedback }: {
   }
   return <Modal titleId="preview-title" close={close} className="preview-dialog">
     <header className="dialog-header">
-      <div><p>Video preview</p><h2 id="preview-title">{video.title}</h2></div>
+      <div><p>{video.revision ? "Scene " + video.revision.scene_number + " revision" : video.video_url ? "Video preview" : "Revise render"}</p>
+        <h2 id="preview-title">{video.title}</h2></div>
       <button className="icon-button" aria-label="Close preview" onClick={close}><X size={20} /></button>
     </header>
     <div className="preview-body">
-      <video src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
+      {video.video_url && <video ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
         className={video.format === "9:16" ? "vertical" : ""} aria-label={video.title}
-        onEnded={() => setWatched(true)} onError={() => setFailed(true)} />
-      {failed && <p role="alert" className="media-error">The preview could not load. Try downloading the MP4 or opening its YouTube copy.</p>}
+        onEnded={() => setWatched(true)} onError={() => setFailed(true)} />}
+      {failed && <p role="alert" className="media-error">The preview could not load. Try downloading the MP4.</p>}
+      {!!video.scene_times?.length && video.video_url && <label className="preview-scenes">Jump to scene
+        <select value="" onChange={(event) => { if (player.current && event.target.value) player.current.currentTime = Number(event.target.value); }}>
+          <option value="">Choose a scene</option>
+          {video.scene_times.map(({ scene_number, start }) => <option key={scene_number} value={start}>Scene {scene_number} · {Math.floor(start / 60)}:{String(Math.floor(start % 60)).padStart(2, "0")}</option>)}
+        </select>
+      </label>}
+      {!!video.sources?.length && <details className="preview-sources">
+        <summary>Research sources</summary>
+        <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
+      </details>}
+      {editing && <div className="revision-panel">
+        {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
+        <p className="review-note">{video.scene_times?.length && video.video_url
+          ? "Your current preview stays available while Studio renders the revision."
+          : "This render has no saved scene timings. Studio will use its saved script to build the revision."}</p>
+        <RevisionForm video={video} busy={busy} submit={async (input) => { setAttempted(true); if (await revise(input)) close(); }} />
+      </div>}
     </div>
     <footer className="dialog-footer preview-footer">
-      {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
-      {canApprove && <p className="review-note">
+      {!editing && attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
+      {canApprove && !editing && <p className="review-note">
         {video.publish_status === "upload_uncertain" ? "Check YouTube Studio for an existing copy before approving another upload."
           : watched ? "Approve to upload this video privately to YouTube." : "Watch the preview to the end to unlock approval."}
       </p>}
       <div className="preview-actions">
-        <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>
+        {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
         {video.youtube_url && <a className="button button-secondary" href={video.youtube_url} target="_blank" rel="noreferrer">Open YouTube <ArrowUpRight size={17} /></a>}
-        {canApprove && <button className="button button-primary" disabled={!watched || failed || busy} onClick={() => void send()}>
+        {!!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
+          setEditing(!editing); setAttempted(false); if (!editing) player.current?.pause();
+        }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
+        {canApprove && !editing && <button className="button button-primary" disabled={!watched || failed || busy} onClick={() => void send()}>
           {busy && <LoaderCircle size={16} className="spinner" />} Approve &amp; upload to YouTube
         </button>}
       </div>
@@ -83,9 +167,10 @@ function Preview({ video, close, approve, busy, feedback }: {
   </Modal>;
 }
 
-export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, feedback, reuse }: {
+export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, feedback, reuse }: {
   videos: StudioVideo[]; loading: boolean; error: string; refreshing: boolean; refresh: () => void;
   busy: string | null; retry: (video: StudioVideo, publish?: boolean) => Promise<boolean>; feedback: Feedback | null;
+  revise: (video: StudioVideo, input: RevisionInput) => Promise<boolean>;
   reuse: (video: StudioVideo) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("All");
@@ -95,7 +180,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
   const query = useDeferredValue(search.trim().toLowerCase());
   const records = useMemo(() => videos.map((video) => ({ video, state: videoState(video) })), [videos]);
   const filtered = records.filter(({ video, state }) => (filter === "All" || state.filter === filter) && (!query || video.title.toLowerCase().includes(query)));
-  const preview = videos.find((video) => video.id === previewId && video.video_url);
+  const preview = videos.find((video) => video.id === previewId && ["completed", "failed"].includes(video.status));
   const dateOf = (date?: string) => date && Number.isFinite(Date.parse(date)) ? dateFormat.format(new Date(date)) : "";
 
   return <section className="panel queue" id="queue" aria-labelledby="queue-title">
@@ -135,6 +220,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
           <div className="video-info">
             <div className="video-meta"><span className={"status status-" + state.tone}>{state.label}</span><span>{video.format}</span>{dateOf(video.created_at) && <span>{dateOf(video.created_at)}</span>}</div>
             <h3>{video.title}</h3>
+            {video.revision && <p>Revision · Scene {video.revision.scene_number}</p>}
             {problem ? <p className="video-problem">{problem}</p> : progress ? <p role="status">{progress}</p> : video.description ? <p className="video-description">{video.description}</p> : null}
             {video.preview_expired_at && !video.video_url && <p>MP4 preview expired. The YouTube copy is available.</p>}
           </div>
@@ -146,12 +232,14 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
             {video.status === "failed" && <button className="button button-secondary" disabled={!!busy} onClick={() => void retry(video)}>
               {busy === video.id && <LoaderCircle className="spinner" size={16} />} Retry render
             </button>}
+            {video.scenes.length > 0 && !video.video_url && ["completed", "failed"].includes(video.status) &&
+              <button className="text-button" onClick={() => setPreviewId(video.id)}>Regenerate or edit</button>}
             {video.status === "completed" && <button className="text-button" onClick={() => reuse(video)}>Reuse script</button>}
           </div>
         </li>;
       })}</ul>}
     {filtered.length > shown && <div className="queue-more"><button className="button button-secondary" onClick={() => setShown((count) => count + PAGE_SIZE)}>Show more videos</button></div>}
     {preview && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
-      approve={() => retry(preview, true)} busy={busy !== null} feedback={feedback} />}
+      approve={() => retry(preview, true)} revise={(input) => revise(preview, input)} busy={busy !== null} feedback={feedback} />}
   </section>;
 }

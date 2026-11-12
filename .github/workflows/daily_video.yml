@@ -18,7 +18,7 @@ on:
     - cron: '17 8,10,12 * * *'
   push:
     branches: [main]
-    paths: [studio_automation.py, .github/workflows/daily_video.yml]
+    paths: [studio_automation.py, src/lib/studio-daily.ts, src/lib/studio-research.ts, .github/workflows/daily_video.yml]
 permissions:
   contents: read
   actions: write
@@ -31,6 +31,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

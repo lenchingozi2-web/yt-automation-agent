@@ -267,3 +267,16 @@ h3 { font-weight: 620; }
 .review-note { color: var(--muted); font-size: .85rem; }
 .preview-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 @media (max-width: 420px) { .preview-actions .button-primary { width: 100%; } }
+
+.revision-panel, .preview-sources, .preview-scenes { margin-block: 12px; }
+.revision-panel, .preview-sources, .preview-scenes { padding-inline: 12px; }
+.revision-form, .revision-form label, .revision-form details, .preview-scenes { display: grid; gap: 8px; }
+.revision-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; }
+.revision-form button { justify-self: start; }
+.revision-form summary, .preview-sources summary { cursor: pointer; }
+.preview-sources li { margin-block: 4px; }
+.preview-sources a { color: var(--gold, #e7c782); text-decoration: underline; }
+.preview-dialog[open] { display: flex; flex-direction: column; }
+.preview-body { overflow-y: auto; overscroll-behavior: contain; }
+.preview-dialog .dialog-header, .preview-dialog .dialog-footer { flex-shrink: 0; }
+.revision-form :is(input, textarea, select), .preview-scenes select { width: 100%; }

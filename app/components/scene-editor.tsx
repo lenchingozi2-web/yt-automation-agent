@@ -40,6 +40,10 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
           <label className="editor-wide">Tags <small>Separated by commas</small><input value={draft.tags.join(",")}
             onChange={(event) => update({ tags: event.target.value.split(",") })} /></label>
         </fieldset>
+        {!!draft.sources?.length && <details className="preview-sources">
+          <summary>Research sources for the generated draft</summary>
+          <ul>{draft.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
+        </details>}
         <fieldset disabled={working} className="editor-scenes">
           <legend>Narration and footage</legend>
           {draft.scenes.map((scene, index) => <section className="scene" key={index} aria-labelledby={`scene-${index}`}>

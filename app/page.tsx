@@ -7,7 +7,7 @@ import { getSupabaseClient } from "@/src/lib/supabase";
 import { normalizeDraft, normalizeVideo, toSafeMessage, type Draft, type StudioVideo } from "@/src/lib/studio";
 import { Brand, Notice, PolicyLinks, SignIn, type Feedback } from "./components/studio-shell";
 import { Composer } from "./components/composer";
-import { ProductionQueue } from "./components/production-queue";
+import { ProductionQueue, type RevisionInput } from "./components/production-queue";
 import { SceneEditor } from "./components/scene-editor";
 
 type Quota = { used: number; limit: number };
@@ -195,6 +195,14 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     });
   }
 
+  async function revise(video: StudioVideo, input: RevisionInput) {
+    return action(video.id, async () => {
+      const result = await post<RenderResult>("/api/revise", { id: video.id, ...input });
+      setFeedback({ kind: "success", message: result.message, detail: result.note });
+      void refresh(true);
+    });
+  }
+
   return (
     <div className="studio">
       <a className="skip-link" href="#workspace">Skip to workspace</a>
@@ -241,7 +249,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} feedback={feedback} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
+          busy={busy} retry={retry} revise={revise} feedback={feedback} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>

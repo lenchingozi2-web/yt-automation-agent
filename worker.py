@@ -8,10 +8,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 from datetime import datetime, timezone
 import os
 import subprocess
+import wave
 import time
 from pathlib import Path
 from typing import Any
@@ -24,9 +26,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import create_thumbnail
-from studio_audio import make_audio, validate_audio
+from studio_audio import make_audio, validate_audio, probe
 from studio_maintenance import metadata as stored_metadata
 from studio_publish import credential_version, has_approval, publication_due
+from studio_revision import prepare_revision, extract_audio, reuse_visual, footage_history
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -72,40 +75,46 @@ def usable_footage(path: Path) -> bool:
     return True
 
 
-async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | None = None) -> bool:
+async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict) -> str | None:
     """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key:
-        return False
-    used = used if used is not None else set()
+        return None
     portrait = str(scene.get("format", "16:9")) == "9:16"
     queries = list(scene.get("search_queries", []))
     context = str(scene.get("visual_context", scene.get("narration", ""))).lower()
-    medical = bool(re.search(r"\b(medical|health|hospital|doctor|patient|clinician|heart|wearable)\b", context))
+    medical = bool(re.search(r"\b(medical|health|hospital|doctor|patient|clinician|wearable)\b", context))
+    queries = [str(q).strip() for q in queries if str(q).strip()]
     if medical:
-        queries = [q for q in queries if not re.search(r"nature|landscape|river|subscribe|green.?screen", str(q), re.I)]
-        queries += ["doctor patient", "hospital computer", "medical laboratory"]
+        queries = [q for q in queries if not re.search(r"nature|landscape|river|subscribe|green.?screen", q, re.I)]
     if not queries:
-        queries = ["technology"]
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        queries = [str(scene.get("visual_context") or scene.get("narration") or "").strip()[:70]]
+    async with httpx.AsyncClient(timeout=22, follow_redirects=True) as client:
         for query in queries:
-            if not str(query).strip():
-                continue
-            response = await client.get("https://pixabay.com/api/videos/", params={
-                "key": key, "q": str(query).strip(), "video_type": "all",
-                "safesearch": "true", "per_page": 20,
-            })
-            if response.status_code != 200:
-                continue
+            if query not in catalog:
+                response = await client.get("https://pixabay.com/api/videos/", params={
+                    "key": key, "q": query[:100], "video_type": "all",
+                    "safesearch": "true", "per_page": 25,
+                })
+                if response.status_code != 200:
+                    continue
+                catalog[query] = response.json().get("hits", [])
+            query_words = set(re.findall(r"[a-z]{3,}", query.lower()))
             preferred = []
             fallback = []
-            for hit in response.json().get("hits", []):
+            for hit in catalog[query]:
                 tags = str(hit.get("tags", "")).lower()
                 if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|intro|outro", tags):
                     continue
                 if medical and not re.search(r"medic|doctor|patient|health|hospital|laborator|wearable|watch|fitness|heart|nurse|science|data|computer|technolog|artificial|brain|\bai\b", tags):
                     continue
-                if str(hit.get("id")) in used:
+                clip_id = str(hit.get("id") or "")
+                if not clip_id or clip_id in used:
+                    continue
+                tag_words = set(re.findall(r"[a-z]{3,}", tags))
+                score = len(query_words & tag_words) * 3 + len(set(context.split()) & tag_words)
+                duration = float(hit.get("duration") or 0)
+                if 0 < duration < 2.5:
                     continue
                 variants = hit.get("videos", {})
                 if not isinstance(variants, dict):
@@ -120,16 +129,21 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
                     # Landscape must never select vertical media.
                     # Portrait prefers true vertical; horizontal HD can be center cropped.
                     if portrait and height > width and width >= 480 and height >= 720:
-                        preferred.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
+                        preferred.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
                     elif not portrait and width >= height and width >= 1280 and height >= 720:
-                        preferred.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
+                        preferred.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
                     elif portrait and width >= height and width >= 1280 and height >= 720:
-                        fallback.append((width * height, {**variant, "clip_id": str(hit.get("id"))}))
-            eligible = sorted(preferred, key=lambda item: item[0])
-            if portrait and not eligible:
-                eligible = sorted(fallback, key=lambda item: item[0])
-            # Try smallest adequate variants; cap response size to avoid 4K memory spikes.
-            for _, variant in eligible[:4]:
+                        fallback.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
+            # Try distinct candidate clips in ranked order, using the smallest adequate variant.
+            eligible = sorted(preferred, key=lambda item: item[:3]) + sorted(fallback, key=lambda item: item[:3])
+            seen = set()
+            for _, _, _, variant in eligible:
+                clip_id = variant["clip_id"]
+                if clip_id in seen:
+                    continue
+                if len(seen) >= 6:
+                    break
+                seen.add(clip_id)
                 count = 0
                 try:
                     async with client.stream("GET", variant["url"]) as download:
@@ -142,55 +156,87 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str] | No
                                     raise ValueError("Pixabay footage exceeds 60 MB safety limit")
                                 handle.write(chunk)
                     if count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target):
-                        used.add(variant["clip_id"])
-                        return True
+                        return clip_id
                 except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
                     print(f"[b-roll] skipping unusable Pixabay clip: {str(error)[:180]}")
                 finally:
                     if target.exists() and target.stat().st_size <= 10000:
                         target.unlink(missing_ok=True)
-    return False
+    return None
 
 
-def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str] | None = None, shot: int = 0) -> Path:
+def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: set[str], catalog: dict, shot: int):
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
-    if target.exists() and target.stat().st_size > 0 and usable_footage(target):
-        return target
-    if not asyncio.run(fetch_pixabay(scene, target, used)):
-        raise RuntimeError(f"No usable Pixabay footage for scene {scene['scene_number']}; retry or edit its search keywords")
-    return target
+    # A previous attempt can have left assets for another revision or a partial download.
+    target.unlink(missing_ok=True)
+    clip_id = asyncio.run(fetch_pixabay(scene, target, used, recent, catalog))
+    if clip_id:
+        used.add(clip_id)
+        return target, clip_id
+    target.unlink(missing_ok=True)
+    return None
 
 
-def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path) -> Path:
-    output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
-    output.unlink(missing_ok=True)  # Never reuse a partial or outdated render.
-    escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    portrait = str(scene.get("format", "16:9")) == "9:16"
-    width, height = (1080, 1920) if portrait else (1920, 1080)
-    duration = validate_audio(audio)
-    sources = raw if isinstance(raw, list) else [raw]
-    command = ["ffmpeg", "-y"]
+def video_size(scene):
+    return (1080, 1920) if scene.get("format") == "9:16" else (1920, 1080)
+
+
+def video_encoder():
+    return ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
+
+
+def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
     filters = []
-    shot_duration = duration / len(sources)
+    if normalize:
+        filters += ["highpass=f=65", "equalizer=f=3200:t=q:w=1.3:g=-1",
+                    "loudnorm=I=-17:TP=-2:LRA=8"]
+    if abs(tempo - 1) > .005:
+        while tempo > 2:
+            filters.append("atempo=2")
+            tempo /= 2
+        while tempo < .5:
+            filters.append("atempo=0.5")
+            tempo *= 2
+        filters.append(f"atempo={tempo:.6f}")
+    filters += ["aresample=48000", f"apad=whole_dur={duration:.6f}", f"atrim=duration={duration:.6f}"]
+    if normalize:
+        filters += ["afade=t=in:d=0.015", f"afade=t=out:st={max(0, duration - .028):.6f}:d=0.028"]
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-i", str(audio), "-map", "0:a:0", "-af", ",".join(filters),
+         "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(path)])
+    validate_audio(path, expected=duration)
+
+
+def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path,
+                 *, duration: float | None = None, normalized_audio=False) -> Path:
+    output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
+    escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    width, height = video_size(scene)
+    source_duration = validate_audio(audio)
+    duration = duration or math.ceil(source_duration * 30) / 30
+    pcm = output.with_suffix(".wav")
+    prepare_scene_audio(audio, pcm, duration, normalize=not normalized_audio)
+    sources = raw if isinstance(raw, list) else [raw]
+    command = ["ffmpeg", "-y", "-v", "error"]
+    filters = []
+    frames = round(duration * 30)
     for i, source in enumerate(sources):
-        # Continuous camera movement and new footage every few seconds.
         command += ["-stream_loop", "-1", "-i", str(source)]
+        shot_frames = round((i + 1) * frames / len(sources)) - round(i * frames / len(sources))
         scaled_w, scaled_h = int(width * 1.06) // 2 * 2, int(height * 1.06) // 2 * 2
         filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
                        f"crop={width}:{height}:x='(iw-ow)*(0.5+0.45*sin(t/3+{i}))':y='(ih-oh)/2',"
-                       f"setsar=1,fps=30,trim=duration={shot_duration:.6f},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+                       f"setsar=1,fps=30,trim=end_frame={shot_frames},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
     filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
-    font_size, margin_v = (64, 300) if portrait else (54, 100)
+    font_size, margin_v = (64, 300) if height > width else (54, 100)
     filters.append("[visuals]subtitles='" + escaped + "':force_style='"
                    f"PlayResX={width},PlayResY={height},FontName=DejaVu Sans,FontSize={font_size},"
                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
                    f"Alignment=2,MarginV={margin_v},MarginL=80,MarginR=80'[vout]")
-    command += ["-i", str(audio), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
-                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-t", str(duration),
-                "-af", "loudnorm=I=-16:TP=-1.5:LRA=9,aresample=48000", "-ar", "48000", "-ac", "2",
-                "-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(output)]
+    command += ["-i", str(pcm), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
+                "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-t", f"{duration:.6f}",
+                *video_encoder(), "-c:a", "aac", "-b:a", "160k", str(output)]
     run(command, timeout=max(300, int(duration * 20)))
     validate_audio(output, expected=duration)
     return output
@@ -200,13 +246,26 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
     if not rendered:
         raise ValueError("Cannot join an empty video")
     final = directory / "final_video.mp4"
-    final.unlink(missing_ok=True)
     concat = directory / "concat.txt"
-    concat.write_text("\n".join(f"file '{p.resolve()}'" for p in rendered), encoding="utf-8")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat),
-         "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
-         "-af", "aresample=async=1:first_pts=0", "-b:a", "160k", "-movflags", "+faststart", str(final)], timeout=600)
-    validate_audio(final, expected=sum(ffprobe_duration(p) for p in rendered))
+    narration = directory / "master.wav"
+    lengths = []
+    with wave.open(str(narration), "wb") as master:
+        master.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+        for clip in rendered:
+            with wave.open(str(clip.with_suffix(".wav")), "rb") as pcm:
+                if (pcm.getnchannels(), pcm.getsampwidth(), pcm.getframerate()) != (2, 2, 48000):
+                    raise ValueError("Scene narration does not match the master audio format")
+                lengths.append(pcm.getnframes() / 48000)
+                master.writeframes(pcm.readframes(pcm.getnframes()))
+    concat.write_text("".join(f"file '{clip.resolve()}'\nduration {length:.6f}\n" for clip, length in zip(rendered, lengths)), encoding="utf-8")
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-f", "concat", "-safe", "0", "-i", str(concat),
+         "-i", str(narration), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(final)], timeout=600)
+    validate_audio(final, expected=sum(lengths))
+    media = probe(final)
+    video = next((track for track in media.get("streams", []) if track.get("codec_type") == "video"), {})
+    if abs(float(video.get("duration", 0)) - sum(lengths)) > .12:
+        raise ValueError("The final picture and narration durations do not match")
     return final
 
 
@@ -282,7 +341,6 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     ratio = merged.get("aspect_ratio") or merged.get("format") or "16:9"
     ratio = "9:16" if ratio == "9:16" else "16:9"
     result = []
-    import re
     for i, raw in enumerate(scenes):
         item = raw if isinstance(raw, dict) else {"narration": str(raw)}
         narration = str(item.get("narration") or item.get("voiceover") or item.get("text") or "").strip()
@@ -305,10 +363,9 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
             chunks.append(" ".join(current))
         for chunk in chunks:
             result.append({"scene_number": len(result) + 1, "narration": chunk,
-                           "search_queries": queries, "format": ratio})
-    context = str(merged.get("title", "")) + " " + " ".join(x["narration"] for x in result)
+                           "search_queries": queries, "format": ratio, "logical_scene": i + 1})
     for item in result:
-        item["visual_context"] = context[:12000]
+        item["visual_context"] = (str(merged.get("title", "")) + " " + item["narration"])[:1200]
     return result, ratio, merged
 
 
@@ -366,7 +423,7 @@ def storage_preview(path: Path) -> Path:
     if seconds < 300:
         target_width, target_height = ((720, 1280) if portrait else (1280, 720))
     preview = path.with_name("stream_preview.mp4")
-    nominal_kbps = int((45_000_000 * 8 / seconds / 1000 - 64) * 0.84)
+    nominal_kbps = int((45_000_000 * 8 / seconds / 1000 - 160) * 0.84)
     for shrink in (1.0, 0.70, 0.50):
         bitrate = max(120, min(3200, int(nominal_kbps * shrink)))
         run(["ffmpeg", "-y", "-i", str(path),
@@ -374,7 +431,7 @@ def storage_preview(path: Path) -> Path:
              "-c:v", "libx264", "-preset", "veryfast",
              "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
              "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-b:a", "64k", "-ac", "2",
+             "-c:a", "copy",
              "-movflags", "+faststart", str(preview)], timeout=1200)
         if preview.stat().st_size < maximum:
             print(f"[storage] preview {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
@@ -418,31 +475,81 @@ def process(video: dict[str, Any], supabase) -> None:
     directory = ROOT / video_id
     directory.mkdir(parents=True, exist_ok=True)
     scenes, ratio, details = video_details(video)
-    rendered: list[Path] = []
-    used_footage: set[str] = set()
-    import math
+    revision = details.get("revision") or {}
+    target_scene = revision.get("scene_number")
+    mode = revision.get("mode")
+    parent, original_scenes, used_footage = prepare_revision(supabase, video, details, directory)
+    recent_footage = footage_history(supabase, video_id)
+    catalog = {}
+    rendered = []
+    timeline = []
+    positions = {}
+    cursor = 0.0
     for scene in scenes:
-        save_fields(supabase, video, progress_note=f"Rendering scene {scene['scene_number']} of {len(scenes)}")
-        audio, srt = make_audio(scene, directory)
-        seconds = ffprobe_duration(audio)
-        count = max(1, math.ceil(seconds / SHOT_SECONDS))
-        raw = []
-        for shot in range(count):
-            # Rotate relevant search phrases across shots, avoiding repeated clip IDs.
-            queries = scene["search_queries"]
-            shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
-            raw.append(fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, shot))
-        rendered.append(render_scene(scene, raw, audio, srt, directory))
-        # Large productions must not accumulate hundreds of stock downloads.
-        for source in raw:
-            if source.name != "raw_01_00.mp4":
-                source.unlink(missing_ok=True)
+        number = scene["scene_number"]
+        logical = scene["logical_scene"]
+        chunk = positions.get(logical, 0)
+        positions[logical] = chunk + 1
+        changed = logical == target_scene
+        entries = original_scenes.get(logical, [])
+        entry = entries[chunk] if chunk < len(entries) else None
+        if parent and not entry and (not changed or mode in ("audio", "visual")):
+            raise ValueError(f"Saved edit points no longer match scene {logical}")
+        save_fields(supabase, video, progress_note=f"Preparing scene {number} of {len(scenes)}")
+        if parent and entry and (not changed or mode == "audio"):
+            replacement = make_audio(scene, directory)[0] if changed else None
+            clip = reuse_visual(parent, entry, scene, directory, replacement)
+            captions = entry.get("captions", "")
+            clip_ids = entry.get("footage", [])
+        else:
+            keep_audio = bool(parent and entry and changed and mode == "visual")
+            if keep_audio:
+                audio = directory / f"source_audio_{number:02d}.wav"
+                srt = audio.with_suffix(".srt")
+                extract_audio(parent, entry, audio)
+                srt.write_text(entry["captions"], encoding="utf-8")
+            else:
+                audio, srt = make_audio(scene, directory)
+            seconds = ffprobe_duration(audio)
+            count = max(1, math.ceil(seconds / SHOT_SECONDS))
+            raw, clip_ids = [], []
+            for shot in range(count):
+                queries = scene["search_queries"]
+                shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
+                match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
+                if not match:
+                    break
+                source, clip_id = match
+                raw.append(source)
+                clip_ids.append(clip_id)
+            if not raw:
+                raise RuntimeError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
+            clip = render_scene(scene, raw, audio, srt, directory,
+                                duration=float(entry["duration"]) if keep_audio else None,
+                                normalized_audio=keep_audio)
+            captions = srt.read_text(encoding="utf-8")
+            for source in raw:
+                if source.name != "raw_01_00.mp4":
+                    source.unlink(missing_ok=True)
+        with wave.open(str(clip.with_suffix(".wav")), "rb") as pcm:
+            duration = pcm.getnframes() / pcm.getframerate()
+        timeline.append({"scene_number": logical, "start": round(cursor, 6), "duration": round(duration, 6),
+                         "captions": captions, "footage": clip_ids})
+        cursor += duration
+        rendered.append(clip)
     save_fields(supabase, video, progress_note="Joining scenes")
     final = stitch(rendered, directory)
-    # Render the thumbnail from the same Pixabay B-roll rather than paying for another image API.
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     thumbnail_path = directory / "thumbnail.jpg"
-    create_thumbnail(directory / "raw_01_00.mp4", headline, thumbnail_path)
+    thumbnail_source = directory / "raw_01_00.mp4"
+    if parent and (target_scene != 1 or mode == "audio"):
+        try:
+            thumbnail_path.write_bytes(supabase.storage.from_(
+                os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(revision["parent_id"] + ".jpg"))
+        except Exception:
+            create_thumbnail(rendered[0], headline, thumbnail_path)
+    else:
+        create_thumbnail(thumbnail_source, headline, thumbnail_path)
     thumbnail_url, thumbnail_error = "", ""
     try:
         thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
@@ -463,7 +570,7 @@ def process(video: dict[str, Any], supabase) -> None:
     warnings = [x for x in (thumbnail_error, storage_error) if x]
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v5",
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v6", scene_timeline=timeline,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 ready for review. " + " ".join(warnings), error_message=None)

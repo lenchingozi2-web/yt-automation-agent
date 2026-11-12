@@ -10,10 +10,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from studio_audio import make_audio, validate_audio, write_srt
-from studio_automation import generate_json, validate_script
+from studio_audio import make_audio, phrase_cues, validate_audio, write_srt
+from studio_automation import generate_researched_draft
 from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage
 from studio_publish import publication_due
+from studio_revision import reuse_visual
 
 
 def ffmpeg(*args):
@@ -70,17 +71,65 @@ class MediaRegression(unittest.TestCase):
                     path.write_bytes(b'partial audio')
                     raise ConnectionError('interrupted')
                 ffmpeg('-f','lavfi','-i','sine=frequency=440:sample_rate=24000','-t','2',path)
-                return [(0,.5,'Hello'),(.6,1.2,'world')]
+                return [(i * .6, (i + 1) * .6, word) for i, word in enumerate(text.split())]
             scene={'scene_number':1,'narration':'Hello world'}
             with patch('studio_audio.synthesize',fake), patch('studio_audio.time.sleep'):
                 audio,srt=make_audio(scene,directory)
                 self.assertEqual(len(calls),2)
-                self.assertIn('00:00:01,200',srt.read_text())
+                self.assertIn('00:00:01,300',srt.read_text())
                 make_audio(scene,directory)
                 self.assertEqual(len(calls),2)
                 make_audio({**scene,'narration':'New narration'},directory)
                 self.assertEqual(len(calls),3)
                 validate_audio(audio)
+
+    def test_audio_repair_preserves_picture_and_surrounding_narration(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source = directory / 'stock.mp4'
+            ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-t', '2', '-c:v', 'libx264', source)
+            rendered = []
+            for number, hz in ((1, 440), (2, 660), (3, 550)):
+                audio, srt = directory / f'voice{number}.wav', directory / f'voice{number}.srt'
+                ffmpeg('-f', 'lavfi', '-i', f'sine=frequency={hz}:sample_rate=48000', '-t', '1.6', audio)
+                write_srt([(0, 1.6, 'Keep the picture.')], srt)
+                rendered.append(render_scene({'scene_number': number}, source, audio, srt, directory))
+            parent = stitch(rendered, directory).rename(directory / 'parent.mp4')
+            replacement = directory / 'repair.wav'
+            ffmpeg('-f', 'lavfi', '-i', 'sine=frequency=770:sample_rate=48000', '-t', '1.6', replacement)
+            parts = [reuse_visual(parent, {'start': (number - 1) * 1.6, 'duration': 1.6},
+                     {'scene_number': number}, directory, replacement if number == 2 else None)
+                     for number in range(1, 4)]
+            revised = stitch(parts, directory)
+            self.assertGreater(energy(revised, 440, start=.3), energy(revised, 770, start=.3) * 10)
+            self.assertGreater(energy(revised, 770, start=1.9), energy(revised, 660, start=1.9) * 10)
+            self.assertGreater(energy(revised, 550, start=3.5), energy(revised, 770, start=3.5) * 10)
+            def picture(path):
+                return subprocess.check_output(['ffmpeg', '-v', 'error', '-ss', '2.3', '-i', str(path),
+                    '-vf', 'scale=1:1', '-frames:v', '1', '-pix_fmt', 'rgb24', '-threads', '1', '-f', 'rawvideo', '-'])
+            self.assertTrue(all(abs(a-b) <= 3 for a,b in zip(picture(parent), picture(revised))))
+
+    def test_twelve_minute_join_keeps_continuous_narration(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            clips = []
+            for name, frequency in [('a', 440), ('b', 660)]:
+                clip = directory / (name + '.mp4')
+                ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-t', '12',
+                       '-an', '-c:v', 'libx264', '-video_track_timescale', '90000', clip)
+                ffmpeg('-f', 'lavfi', '-i', f'sine=frequency={frequency}:sample_rate=48000',
+                       '-t', '12', '-ac', '2', clip.with_suffix('.wav'))
+                clips.append(clip)
+            final = stitch(clips * 30, directory)
+            validate_audio(final, expected=720)
+            for index in (0, 1, 29, 30, 58, 59):
+                start = index * 12 + .1
+                expected, other = (440, 660) if index % 2 == 0 else (660, 440)
+                self.assertGreater(energy(final, expected, start=start), energy(final, other, start=start) * 10)
+
+    def test_captions_break_at_clauses_and_pauses(self):
+        marks = [(0,.3,'Here'),(.3,.5,'it'),(.5,.9,'is,'),(1,1.25,'one'),(1.26,1.6,'example.'),(2.1,2.4,'Done.')]
+        self.assertEqual([cue[2] for cue in phrase_cues(marks, 2.5)], ['Here it is,', 'one example.', 'Done.'])
 
     def test_green_screen_stock_is_rejected(self):
         with TemporaryDirectory() as tmp:
@@ -108,21 +157,14 @@ class PipelineRegression(unittest.TestCase):
         self.assertTrue(all(len(s['narration'].split())<=40 for s in scenes))
         self.assertEqual(scenes[0]['search_queries'],['hospital','doctor'])
 
-    def test_generator_falls_back_only_to_chat_models(self):
-        class Response:
-            def raise_for_status(self): pass
-            def json(self): return {'choices':[{'message':{'content':'{"title":"A useful topic"}'}}]}
-        with patch.dict(os.environ,{'GEMINI_API_KEY':'','GROQ_API_KEY':'dummy'}), patch('studio_automation.httpx.Client') as client:
-            client.return_value.__enter__.return_value.post.return_value=Response()
-            client.return_value.__enter__.return_value.get.side_effect=ConnectionError("catalog unavailable")
-            result=generate_json('Return a JSON script')
-            request=client.return_value.__enter__.return_value.post.call_args.kwargs
-            self.assertEqual(request['json']['model'],'openai/gpt-oss-20b')
-            self.assertEqual(result['title'],'A useful topic')
-
-    def test_missing_narration_fails_validation(self):
-        with self.assertRaisesRegex(ValueError,'no narration'):
-            validate_script({'title':'test','scenes':[{'narration':'','search_queries':['doctor']}]*3},60,'9:16')
+    def test_daily_generation_uses_shared_research_engine(self):
+        from subprocess import CompletedProcess
+        with patch('studio_automation.subprocess.run', return_value=CompletedProcess([], 0, '{"title":"A researched topic"}')) as run:
+            draft = generate_researched_draft('Study methods', 60, '9:16', ['Previous video'])
+            self.assertEqual(draft['title'], 'A researched topic')
+            args, kwargs = run.call_args
+            self.assertTrue(args[0][-1].endswith('src/lib/studio-daily.ts'))
+            self.assertEqual(json.loads(kwargs['input'])['recent'], ['Previous video'])
 
     def test_auth_failure_gives_reconnect_action(self):
         state,note=safe_publish_error(RuntimeError('invalid_grant expired or revoked'))

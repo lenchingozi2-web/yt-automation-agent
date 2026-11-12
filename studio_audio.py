@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
-RATE = os.getenv("EDGE_TTS_RATE", "-2%")
+RATE = os.getenv("EDGE_TTS_RATE", "-4%")
+AUDIO_VERSION = "natural-phrases-v2"
 
 
 def probe(path: Path) -> dict:
@@ -31,7 +32,7 @@ def validate_audio(path: Path, expected: float | None = None, words: int = 0) ->
         raise ValueError("Narration is empty or truncated")
     if expected is not None and abs(seconds - expected) > max(0.35, expected * .02):
         raise ValueError(f"Narration length mismatch: {seconds:.2f}s vs {expected:.2f}s")
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-v", "info", "-i", str(path),
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-v", "info", "-xerror", "-i", str(path),
                              "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
                             capture_output=True, text=True, timeout=180)
     match = re.search(r"mean_volume: ([-\w.]+) dB", result.stderr)
@@ -64,15 +65,53 @@ async def synthesize(text: str, path: Path) -> list[tuple[float, float, str]]:
     return boundaries
 
 
+def phrase_cues(boundaries: list[tuple[float, float, str]], seconds: float, portrait: bool = False):
+    """Keep captions timed to speech, breaking on clauses and natural pauses."""
+    lines = []
+    group = []
+    limit = 31 if portrait else 44
+    for word in boundaries:
+        if not word[2].strip() or word[0] >= seconds:
+            continue
+        if group:
+            phrase = " ".join(part[2] for part in group)
+            boundary = phrase.endswith((".", "!", "?", ",", ":", "—")) and len(group) >= 2
+            if (boundary or word[0] - group[-1][1] > .36 or
+                    len(phrase) + len(word[2]) + 1 > limit or word[1] - group[0][0] > 2.8):
+                lines.append(group)
+                group = []
+        group.append(word)
+    if group:
+        lines.append(group)
+    cues = []
+    for index, group in enumerate(lines):
+        end = lines[index + 1][0][0] if index + 1 < len(lines) else seconds
+        text = " ".join(part[2] for part in group)
+        text = re.sub(r"\s+([,.;:!?%])", r"\1", text)
+        cues.append((group[0][0], min(end, group[-1][1] + .10), text))
+    return cues
+
+
+def complete_boundaries(boundaries: list[tuple[float, float, str]], text: str, seconds: float) -> None:
+    def characters(value):
+        return len(re.findall(r"\w", value))
+    expected = characters(text)
+    reported = sum(characters(word[2]) for word in boundaries)
+    if (not boundaries or reported < expected * .73 or
+            boundaries[-1][1] > seconds + .45 or seconds - boundaries[-1][1] > 2.5 or
+            any(second[0] < first[0] for first, second in zip(boundaries, boundaries[1:]))):
+        raise ValueError("Neural narration has incomplete or inconsistent word timings")
+
+
 def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
     number = int(scene["scene_number"])
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
     if not text:
         raise ValueError(f"Scene {number} has no narration")
-    audio = directory / f"scene_{number:02d}.mp3"
+    audio = directory / f"scene_{number:02d}.wav"
     srt = audio.with_suffix(".srt")
     manifest = audio.with_suffix(".audio.json")
-    fingerprint = hashlib.sha256((VOICE + RATE + text).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, VOICE, RATE, scene.get("format"), text]).encode()).hexdigest()
     if manifest.exists() and audio.exists() and srt.exists():
         try:
             if json.loads(manifest.read_text())["fingerprint"] == fingerprint:
@@ -81,27 +120,25 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
         except (ValueError, KeyError, OSError, subprocess.SubprocessError):
             pass
     temporary = audio.with_suffix(".part.mp3")
+    decoded = audio.with_suffix(".part.wav")
     for attempt in range(3):
         try:
             boundaries = asyncio.run(asyncio.wait_for(synthesize(text, temporary), 90))
             seconds = validate_audio(temporary, words=len(text.split()))
-            cues = []
-            # Preserve actual word timing, grouping short readable captions.
-            for start in range(0, len(boundaries), 5):
-                group = boundaries[start:start + 5]
-                cues.append((group[0][0], min(seconds, group[-1][1]), " ".join(x[2] for x in group)))
-            if not cues:
-                words = text.split()
-                groups = [" ".join(words[i:i + 5]) for i in range(0, len(words), 5)]
-                cues = [(i * seconds / len(groups), (i + 1) * seconds / len(groups), x)
-                        for i, x in enumerate(groups)]
-            write_srt(cues, srt)
-            temporary.replace(audio)
+            complete_boundaries(boundaries, text, seconds)
+            subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-y", "-i", str(temporary),
+                            "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(decoded)],
+                           capture_output=True, check=True, timeout=30)
+            seconds = validate_audio(decoded, expected=seconds, words=len(text.split()))
+            write_srt(phrase_cues(boundaries, seconds, scene.get("format") == "9:16"), srt)
+            decoded.replace(audio)
+            temporary.unlink(missing_ok=True)
             manifest.write_text(json.dumps({"fingerprint": fingerprint, "voice": VOICE,
                                              "rate": RATE, "seconds": seconds}))
             return audio, srt
         except Exception as error:
             temporary.unlink(missing_ok=True)
+            decoded.unlink(missing_ok=True)
             if attempt == 2:
                 raise RuntimeError(f"Neural narration unavailable for scene {number}; retry queued job") from error
             time.sleep(2 ** attempt)

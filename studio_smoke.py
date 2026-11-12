@@ -6,12 +6,14 @@ publish to YouTube or use the user's real drafts.
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 import shutil
 import sys
 from pathlib import Path
 
 from supabase import create_client
 from studio_maintenance import metadata
+from studio_publish import has_approval
 from worker import ROOT, process
 # Verify multi-scene neural narration, montage, final audio and real storage.
 
@@ -58,6 +60,7 @@ def main() -> int:
         return 3
 
     video_id = str(row["id"])
+    disposable_ids = [video_id]
     try:
         process(row, client)
         result = client.table("videos").select("*").eq("id", video_id).single().execute()
@@ -66,7 +69,8 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
-        assert stored.get("render_version") == "studio-v5"
+        assert stored.get("render_version") == "studio-v6"
+        assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
         from studio_audio import validate_audio
         for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
             validate_audio(scene_file)
@@ -75,22 +79,39 @@ def main() -> int:
         jpg = client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(video_id + ".jpg")
         assert len(mp4) > 10000 and b"ftyp" in mp4[:64], "MP4 not playable"
         assert jpg[:2] == bytes.fromhex("ffd8"), "invalid JPEG thumbnail"
-        print("PASS: Real test render saved; MP4 and thumbnail downloaded and validated.")
+        revised_draft = deepcopy(draft)
+        revised_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
+                                                     "mode": "audio", "original_media": True}
+        payload = {**base, "scenes": revised_draft}
+        if row.get("user_id"):
+            payload["user_id"] = row["user_id"]
+        revision = client.table("videos").insert(payload).execute().data[0]
+        revision_id = str(revision["id"])
+        disposable_ids.append(revision_id)
+        process(revision, client)
+        revised = metadata(client.table("videos").select("*").eq("id", revision_id).single().execute().data)
+        assert revised["status"] == "completed" and revised["publish_status"] == "awaiting_review"
+        assert not has_approval(revised) and not revised.get("youtube_url")
+        assert revised["scene_timeline"] == stored["scene_timeline"], "an audio repair moved the scene or changed footage"
+        assert client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4") == mp4
+        validate_audio(ROOT / revision_id / "final_video.mp4")
+        print("PASS: Real MP4, thumbnail and targeted voice repair saved and validated without YouTube approval.")
         return 0
     except Exception as error:
         print("FAILED: Real render:", type(error).__name__, str(error)[-1200:])
         return 4
     finally:
-        for bucket, suffix in (("renders", ".mp4"), ("thumbnails", ".jpg")):
+        for disposable_id in reversed(disposable_ids):
+            for bucket, suffix in (("renders", ".mp4"), ("thumbnails", ".jpg")):
+                try:
+                    client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET" if bucket == "renders" else "SUPABASE_THUMBNAIL_BUCKET", bucket)).remove([disposable_id + suffix])
+                except Exception:
+                    print("WARNING: Could not remove disposable", bucket, "media")
             try:
-                client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET" if bucket == "renders" else "SUPABASE_THUMBNAIL_BUCKET", bucket)).remove([video_id + suffix])
+                client.table("videos").delete().eq("id", disposable_id).execute()
             except Exception:
-                print("WARNING: Could not remove disposable", bucket, "media")
-        try:
-            client.table("videos").delete().eq("id", video_id).execute()
-        except Exception:
-            print("WARNING: Could not remove disposable test row", video_id)
-        shutil.rmtree(ROOT / video_id, ignore_errors=True)
+                print("WARNING: Could not remove disposable test row", disposable_id)
+            shutil.rmtree(ROOT / disposable_id, ignore_errors=True)
 
 
 if __name__ == "__main__":

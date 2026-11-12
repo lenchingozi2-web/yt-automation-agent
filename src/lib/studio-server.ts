@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { normalizeDraft, toSafeMessage, type Draft } from "@/src/lib/studio";
+import { normalizeDraft, toSafeMessage, type Draft, type VideoRevision } from "@/src/lib/studio";
 
 export class StudioAuthError extends Error { constructor(message = "Please sign in to use Studio.") { super(message); } }
 const url = () => process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "";
@@ -63,9 +63,9 @@ const missingColumn = (error: unknown) => {
 function scriptPayload(draft: Draft) {
   return { ...draft, aspect_ratio: draft.format, duration: draft.duration_seconds, metadata: {
     aspect_ratio: draft.format, duration: draft.duration_seconds, description: draft.description,
-    tags: draft.tags, video_url: "", youtube_url: "", error_message: "" } };
+    tags: draft.tags, sources: draft.sources, video_url: "", youtube_url: "", error_message: "" } };
 }
-export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string, jobId?: string) {
+export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string, jobId?: string, revision?: VideoRevision) {
   const draft = normalizeDraft(approved);
   if (!draft.title.trim() || draft.scenes.length < 1 || draft.scenes.some(scene => !scene.narration.trim())) {
     throw new StudioRequestError("A title and narration for every scene are required.", 400);
@@ -79,10 +79,11 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
     throw new StudioRequestError("Preview storage is nearly full. Publish or safely archive older videos before queueing another.", 507);
   }
   const packed = scriptPayload(draft);
+  const metadata = { ...packed.metadata, ...(revision ? { revision } : {}) };
   // Actual production table uses scenes JSON and may have no metadata/script columns.
   // Keep custom thumbnail, duration and YouTube metadata alongside the first scene.
   const enrichedScenes = draft.scenes.map((scene, index) => index === 0
-    ? { ...scene, _studio: { ...packed.metadata, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, format: draft.format, tags: draft.tags } }
+    ? { ...scene, _studio: { ...metadata, duration_seconds: draft.duration_seconds, thumbnail_title: draft.thumbnail_title || draft.title, format: draft.format, tags: draft.tags } }
     : scene);
   const withUser = (payload: Record<string, unknown>) => ({ ...payload, ...(userId ? { user_id: userId } : {}), ...(jobId ? { id: jobId } : {}) });
   const candidates: Record<string, unknown>[] = [
@@ -91,8 +92,8 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
     withUser({ title: draft.title, status: "pending", description: draft.description, scenes: enrichedScenes }),
     withUser({ title: draft.title, status: "pending", scenes: enrichedScenes }),
     withUser({ title: draft.title, status: "pending", scenes: JSON.stringify(enrichedScenes) }),
-    withUser({ title: draft.title, status: "pending", script: packed }),
-    withUser({ title: draft.title, status: "pending", scenes: packed }),
+    withUser({ title: draft.title, status: "pending", script: { ...packed, metadata, ...(revision ? { revision } : {}) } }),
+    withUser({ title: draft.title, status: "pending", scenes: { ...packed, ...metadata } }),
   ];
   let lastError: unknown;
   for (const payload of candidates) {
@@ -106,6 +107,11 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
     if (!missingColumn(error) && !/invalid input syntax|json|expected array|type mismatch|null value|check constraint|violates not-null/i.test(toSafeMessage(error))) break;
   }
   throw new Error("Could not save approved video: " + toSafeMessage(lastError, "Check the videos table schema and RLS policies."));
+}
+export async function recentTitles(client: SupabaseClient) {
+  const { data, error } = await client.from("videos").select("title").order("created_at", { ascending: false }).limit(35);
+  if (error) throw error;
+  return [...new Set((data || []).map((row) => String(row.title || "").slice(0, 150)).filter(Boolean))];
 }
 export const STUDIO_DAILY_LIMIT = Math.max(1, Math.min(20, Number(process.env.STUDIO_DAILY_LIMIT || 3) || 3));
 export function lagosStartOfDay(): string {
