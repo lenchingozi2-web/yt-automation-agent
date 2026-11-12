@@ -27,6 +27,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import create_thumbnail
+from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import make_audio, validate_audio, probe
 from studio_maintenance import metadata as stored_metadata
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due
@@ -404,6 +405,37 @@ def apply_uploaded_thumbnail(video, client, youtube_id, thumbnail=None) -> bool:
     return True
 
 
+def redesign_uploaded_thumbnail(video_id: str, client) -> None:
+    """Replace the already-uploaded original PWS video's thumbnail, never reupload its MP4."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", video_id, re.I):
+        raise ValueError("Invalid Studio video ID")
+    rows = client.table("videos").select("*").eq("id", video_id).eq("status", "completed").limit(1).execute().data or []
+    if not rows:
+        raise ValueError("Completed Studio video not found")
+    video = rows[0]
+    details = stored_metadata(video)
+    youtube_id = details.get("youtube_id") or details.get("youtube_video_id")
+    title = str(details.get("title") or video.get("title") or "").lower().replace("-", "–")
+    if not ("prader" in title and "willi" in title):
+        raise ValueError("Selected video is not the Prader–Willi story")
+    if details.get("revision"):
+        raise ValueError("The original upload is required, not a revised version")
+    if (not has_approval(details) or details.get("publish_status") != "uploaded"
+            or not isinstance(youtube_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{11}", youtube_id)):
+        raise ValueError("Only an already-approved and successfully uploaded video can change thumbnails")
+    directory = ROOT / video_id
+    directory.mkdir(parents=True, exist_ok=True)
+    path = make_prader_willi_thumbnail(directory / "thumbnail.jpg")
+    # Keep Studio's saved thumbnail in sync so later retries restore the NEW image.
+    new_url = upload_thumbnail(client, path, video_id)
+    save_fields(client, video, thumbnail_url=new_url,
+                thumbnail_publish_status="pending", progress_note="Replacing custom YouTube thumbnail")
+    if not apply_uploaded_thumbnail(video, client, youtube_id, path):
+        raise RuntimeError("New design saved but YouTube rejected the thumbnail; retry from Studio")
+    print("[thumbnail] Redesigned original Prader-Willi video:", video_id, flush=True)
+
+
 def decode(value: Any) -> dict[str, Any]:
     if isinstance(value, dict): return value
     if isinstance(value, str):
@@ -671,7 +703,9 @@ def process(video: dict[str, Any], supabase) -> None:
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     thumbnail_path = directory / "thumbnail.jpg"
     thumbnail_source = directory / "raw_01_00.mp4"
-    if parent and (target_scene != 1 or mode == "audio"):
+    if "prader" in headline.lower() and "willi" in headline.lower():
+        make_prader_willi_thumbnail(thumbnail_path)
+    elif parent and (target_scene != 1 or mode == "audio"):
         try:
             thumbnail_path.write_bytes(supabase.storage.from_(
                 os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(revision["parent_id"] + ".jpg"))
@@ -802,6 +836,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--publish-only", action="store_true")
     parser.add_argument("--thumbnail-only", metavar="STUDIO_VIDEO_ID")
+    parser.add_argument("--redesign-thumbnail", metavar="ORIGINAL_STUDIO_VIDEO_ID")
     parser.add_argument("--max-jobs", type=int, default=3)
     parser.add_argument("--max-uploads", type=int, default=8)
     args = parser.parse_args(argv)
@@ -809,6 +844,9 @@ def main(argv: list[str] | None = None) -> None:
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or require_env("SUPABASE_KEY")
     supabase = create_client(url, key)
     ROOT.mkdir(parents=True, exist_ok=True)
+    if args.redesign_thumbnail:
+        redesign_uploaded_thumbnail(args.redesign_thumbnail, supabase)
+        return
     if args.thumbnail_only:
         if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.thumbnail_only, re.I):
             parser.error("Select a valid Studio video ID")

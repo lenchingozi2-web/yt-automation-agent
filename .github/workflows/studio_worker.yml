@@ -6,11 +6,15 @@ on:
         type: string
         description: Studio video ID to retry its YouTube thumbnail only
         required: false
+      redesign_pws_video_id:
+        type: string
+        description: Already-uploaded original Prader-Willi Studio video ID to redesign the thumbnail
+        required: false
   repository_dispatch:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '2-57/5 * * * *'
 permissions:
@@ -33,6 +37,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
+          REDESIGN_PWS_THUMBNAIL: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '' }}
         run: |
           python3 - <<'PY'
           import json
@@ -44,7 +49,7 @@ jobs:
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
           work = True
-          if url and key and not os.getenv("THUMBNAIL_VIDEO_ID"):
+          if url and key and not os.getenv("THUMBNAIL_VIDEO_ID") and os.getenv("REDESIGN_PWS_THUMBNAIL") != "true":
               headers = {"apikey": key, "Authorization": "Bearer " + key}
               def read(query):
                   request = Request(url + "/rest/v1/videos?" + query, headers=headers)
@@ -98,6 +103,19 @@ jobs:
           else
             python worker.py --drain --max-jobs 3
           fi
+      - name: Replace original Prader-Willi custom thumbnail without reuploading the video
+        if: steps.queue.outputs.work == 'true' && ((github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '')
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          REDESIGN_VIDEO_ID: ${{ inputs.redesign_pws_video_id }}
+        run: |
+          set -euo pipefail
+          video_id="${REDESIGN_VIDEO_ID:-81cc5198-e9eb-5a20-9c12-c59af2bb01be}"
+          python worker.py --redesign-thumbnail "$video_id"
       - name: Preserve MP4 only when repository is private
         if: always() && github.event.repository.private == true && steps.queue.outputs.work == 'true'
         uses: actions/upload-artifact@v4
