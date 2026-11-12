@@ -26,7 +26,7 @@ class ResearchBriefingTest(unittest.TestCase):
                 "references": [lead.url, context.url],
                 "topic_area": beat,
             })
-        self.numbered = [dict(title=story["title"], hook_summary=story["hook_summary"], lead=index, supporting=[1])
+        self.numbered = [dict(title=story["title"], hook_summary=story["hook_summary"], pair=index)
                          for index, story in enumerate(self.stories, 1)]
 
     def test_validated_story_preserves_exact_urls_and_order(self):
@@ -37,10 +37,10 @@ class ResearchBriefingTest(unittest.TestCase):
             validate_batch(self.stories, self.groups, [self.stories[1]["title"].upper()])
 
     def test_numbered_sources_resolve_to_original_urls(self):
-        groups = dict(enumerate(self.groups.values(), 1))
-        self.assertEqual(validate_batch(resolve_story_sources(self.numbered, groups), self.groups), self.stories)
-        with self.assertRaisesRegex(ValueError, "supporting record"):
-            resolve_story_sources([dict(self.numbered[0], supporting=[2])], groups)
+        pairs = {index: tuple(sources) for index, sources in enumerate(self.groups.values(), 1)}
+        self.assertEqual(validate_batch(resolve_story_sources(self.numbered, pairs), self.groups), self.stories)
+        with self.assertRaisesRegex(ValueError, "source pair"):
+            resolve_story_sources([dict(self.numbered[0], pair=100)], pairs)
 
     def test_reads_canonical_peer_reviewed_eric_records(self):
         record = {"id": "EJ1234", "title": "Learning research", "source": "Example Journal",

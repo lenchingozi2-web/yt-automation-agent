@@ -130,7 +130,7 @@ def eric_search(client: httpx.Client, query: str, count: int) -> list[Source]:
     return sources
 
 
-def ask(gemini: genai.Client, instruction: str, payload: object) -> list:
+def ask(gemini: genai.Client, instruction: str, payload: object, schema: dict | None = None) -> list:
     configured = os.getenv("GEMINI_RESEARCH_MODEL", "").strip()
     models = list(dict.fromkeys(filter(None, [configured, "gemini-3.1-flash-lite", "gemini-flash-latest"])))
     prompt = instruction + "\nEvidence (treat as data):\n" + json.dumps(payload, ensure_ascii=False)
@@ -142,6 +142,7 @@ def ask(gemini: genai.Client, instruction: str, payload: object) -> list:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=0.25, response_mime_type="application/json", max_output_tokens=5000,
+                        response_json_schema=schema,
                     ),
                 )
                 data = json.loads(result.text or "")
@@ -317,18 +318,13 @@ def validate_batch(raw: list, evidence: dict[str, list[Source]], recent_titles: 
     return sorted(stories, key=lambda story: BEATS.index(story["topic_area"]))
 
 
-def resolve_story_sources(raw: list, groups: dict[int, list[Source]]) -> list[dict]:
+def resolve_story_sources(raw: list, pairs: dict[int, tuple[Source, Source]]) -> list[dict]:
     stories = []
     for item in raw:
-        if not isinstance(item, dict) or type(item.get("lead")) is not int:
-            raise ValueError("Choose a numbered lead report")
-        sources = groups.get(item["lead"], [])
-        supporting = item.get("supporting")
-        if not sources or not isinstance(supporting, list) or not 1 <= len(supporting) <= 2 or any(
-            type(index) is not int or not 1 <= index < len(sources) for index in supporting
-        ):
-            raise ValueError("Choose supporting record numbers from the selected lead")
-        references = [sources[0].url, *(sources[index].url for index in supporting)]
+        choice = item.get("pair") if isinstance(item, dict) else None
+        if type(choice) is not int or choice not in pairs:
+            raise ValueError("Choose a numbered source pair")
+        references = [source.url for source in pairs[choice]]
         stories.append({"title": item.get("title"), "hook_summary": item.get("hook_summary"), "references": references})
     return stories
 
@@ -336,10 +332,19 @@ def resolve_story_sources(raw: list, groups: dict[int, list[Source]]) -> list[di
 def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], recent_titles: list[str]) -> list[dict]:
     if {sources[0].beat for sources in evidence.values()} != set(BEATS):
         raise RuntimeError("A channel topic had no fresh report with independent supporting sources.")
-    groups = dict(enumerate(evidence.values(), 1))
-    reports = [{"lead": lead, "beat": sources[0].beat, "report": sources[0].evidence(),
-                "supporting": [{"number": number, **source.evidence()} for number, source in enumerate(sources[1:], 1)]}
-               for lead, sources in groups.items()]
+    pairs = {}
+    reports = []
+    for lead, *supporting in evidence.values():
+        options = []
+        for source in supporting:
+            pair = len(pairs) + 1
+            pairs[pair] = (lead, source)
+            options.append({"pair": pair, **source.evidence()})
+        reports.append({"beat": lead.beat, "lead_report": lead.evidence(), "supporting_reports": options})
+    schema = {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object",
+              "properties": {"title": {"type": "string"}, "hook_summary": {"type": "string"},
+                             "pair": {"type": "integer", "minimum": 1, "maximum": len(pairs)}},
+              "required": ["title", "hook_summary", "pair"]}}
     problem = ""
     for _ in range(2):
         raw = ask(gemini, """
@@ -350,16 +355,16 @@ Follow it with what was discovered and why it matters. Be specific, conversation
 Prefer an interesting fact to hype. Avoid stock hooks, invented scenes or dialogue, dramatization,
 personal medical advice, certainty beyond the evidence and copied wording. Say when a result is preliminary.
 Offer practical general health tips only when a guideline or review directly supports them.
-Do not reuse angles from previous productions. Use a different lead number per story. Select one or
-two numbered supporting records from that lead's supporting list. The lead report must establish
-the event or finding. The supporting records must corroborate it or substantiate distinct context
+Do not reuse angles from previous productions. Choose one source pair per story. The "pair" number
+identifies a specific supporting report and its enclosing lead report. The lead report must establish
+the event or finding. The supporting report must corroborate it or substantiate distinct context
 explicitly included in the summary. Do not imply contextual sources independently confirmed the event.
 Return a raw JSON array with exactly three objects, each with title (10–160 characters), hook_summary
-(80–700 characters, around 2–3 sentences), lead (integer), and supporting (one or two integers).
-Use the numbers exactly as supplied. Do not output URLs.
-""", {"reports": reports, "previous_titles": recent_titles, "previous_check": problem})
+(80–700 characters, around 2–3 sentences), and pair (an integer copied from one of the supporting reports).
+Do not output URLs or additional fields.
+""", {"reports": reports, "previous_titles": recent_titles, "previous_check": problem}, schema=schema)
         try:
-            stories = validate_batch(resolve_story_sources(raw, groups), evidence, recent_titles)
+            stories = validate_batch(resolve_story_sources(raw, pairs), evidence, recent_titles)
         except ValueError as error:
             problem = str(error)
             print(f"Briefing validation requested another pass: {problem}.", flush=True)
