@@ -9,12 +9,13 @@ import os
 from copy import deepcopy
 import shutil
 import sys
+from unittest.mock import patch
 from pathlib import Path
 
 from supabase import create_client
 from studio_maintenance import metadata
 from studio_publish import has_approval
-from worker import ROOT, process
+from worker import ROOT, fetch_broll, process
 # Verify multi-scene neural narration, montage, final audio and real storage.
 
 
@@ -95,6 +96,25 @@ def main() -> int:
         assert revised["scene_timeline"] == stored["scene_timeline"], "an audio repair moved the scene or changed footage"
         assert client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4") == mp4
         validate_audio(ROOT / revision_id / "final_video.mp4")
+        visual_draft = deepcopy(draft)
+        visual_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
+                                                   "mode": "visual", "original_media": True}
+        visual_draft[1]["search_queries"] = ["mountain landscape", "waterfall"]
+        visual_row = client.table("videos").insert({**payload, "scenes": visual_draft}).execute().data[0]
+        visual_id = str(visual_row["id"])
+        disposable_ids.append(visual_id)
+        with (
+            patch("worker.make_audio", side_effect=AssertionError("Footage-only edits must reuse narration")),
+            patch("worker.fetch_broll", wraps=fetch_broll) as footage,
+        ):
+            process(visual_row, client)
+            assert footage.call_count and all(call.args[0]["logical_scene"] == 2 for call in footage.call_args_list)
+        visual_meta = metadata(client.table("videos").select("*").eq("id", visual_id).single().execute().data)
+        assert visual_meta["status"] == "completed" and visual_meta["publish_status"] == "awaiting_review"
+        assert visual_meta["scene_timeline"][0] == stored["scene_timeline"][0]
+        assert not has_approval(visual_meta) and not visual_meta.get("youtube_url")
+        assert visual_meta["scene_timeline"][1]["footage"] != stored["scene_timeline"][1]["footage"]
+        print("PASS: Real footage-only edit changed scene 2 with zero narration generation and reused scene 1.")
         print("PASS: Real MP4, thumbnail and targeted voice repair saved and validated without YouTube approval.")
         return 0
     except Exception as error:

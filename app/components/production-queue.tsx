@@ -143,8 +143,8 @@ function Preview({ video, close, approve, revise, busy, feedback }: {
         {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
         <p className="review-note">{video.scene_times?.length && video.video_url
           ? "Your current preview stays available while Studio renders the revision."
-          : "This render has no saved scene timings. Studio will use its saved script to build the revision."}</p>
-        <RevisionForm video={video} busy={busy} submit={async (input) => { setAttempted(true); if (await revise(input)) close(); }} />
+          : "This preview has no saved scene timings for a targeted revision."}</p>
+        {!!video.scene_times?.length && video.video_url && <RevisionForm video={video} busy={busy} submit={async (input) => { setAttempted(true); if (await revise(input)) close(); }} />}
       </div>}
     </div>
     <footer className="dialog-footer preview-footer">

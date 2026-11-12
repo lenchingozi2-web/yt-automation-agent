@@ -29,7 +29,7 @@ from studio_media import create_thumbnail
 from studio_audio import make_audio, validate_audio, probe
 from studio_maintenance import metadata as stored_metadata
 from studio_publish import credential_version, has_approval, publication_due
-from studio_revision import prepare_revision, extract_audio, reuse_visual, footage_history
+from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -208,10 +208,10 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
 
 
 def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path,
-                 *, duration: float | None = None, normalized_audio=False) -> Path:
+                 *, duration: float | None = None, normalized_audio=False, size=None, bitrate=None) -> Path:
     output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    width, height = video_size(scene)
+    width, height = size or video_size(scene)
     source_duration = validate_audio(audio)
     duration = duration or math.ceil(source_duration * 30) / 30
     pcm = output.with_suffix(".wav")
@@ -234,12 +234,20 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
                    f"PlayResX={width},PlayResY={height},FontName=DejaVu Sans,FontSize={font_size},"
                    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
                    f"Alignment=2,MarginV={margin_v},MarginL=80,MarginR=80'[vout]")
+    bitrate_args = ["-maxrate", f"{bitrate}k", "-bufsize", f"{bitrate * 2}k"] if bitrate else []
     command += ["-i", str(pcm), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
                 "-map", "[vout]", "-map", f"{len(sources)}:a:0", "-frames:v", str(frames), "-t", f"{duration:.6f}",
-                *video_encoder(), "-c:a", "aac", "-b:a", "160k", str(output)]
+                *video_encoder(), *bitrate_args, "-c:a", "aac", "-b:a", "160k", str(output)]
     run(command, timeout=max(300, int(duration * 20)))
     validate_audio(output, expected=duration)
     return output
+
+
+def keyframe_options(durations):
+    offsets = [0.0]
+    for duration in durations:
+        offsets.append(offsets[-1] + duration)
+    return ["-force_key_frames", ",".join(f"{offset:.6f}" for offset in offsets[:-1])] if durations else []
 
 
 def stitch(rendered: list[Path], directory: Path) -> Path:
@@ -280,7 +288,7 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
         filters.append(labels + f"concat=n={len(rendered)}:v=1:a=0,setpts=N/(30*TB)[picture]")
         run([*independent, "-i", str(narration), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
              "-map", "[picture]", "-map", f"{len(rendered)}:a:0", "-r", "30", "-fps_mode", "cfr",
-             *video_encoder(), *output], timeout=max(600, round(sum(lengths) * 5)))
+             *video_encoder(), *keyframe_options(lengths), *output], timeout=max(600, round(sum(lengths) * 5)))
     validate_audio(final, expected=sum(lengths))
     media = probe(final)
     video = next((track for track in media.get("streams", []) if track.get("codec_type") == "video"), {})
@@ -423,7 +431,7 @@ def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
     row.update(payload)
 
 
-def storage_preview(path: Path) -> Path:
+def storage_preview(path: Path, timeline=(), *, preserve_picture=False) -> Path:
     """Create a playable preview under the Supabase Free 50 MB single-file limit.
 
     The 1080p master stays on disk for optional YouTube upload and Actions artifact.
@@ -431,6 +439,8 @@ def storage_preview(path: Path) -> Path:
     maximum = 48_000_000
     if path.stat().st_size < maximum:
         return path
+    if preserve_picture:
+        raise RuntimeError("This targeted revision exceeds the preview file limit. Reduce the replacement scene length or footage complexity.")
     seconds = ffprobe_duration(path)
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -450,7 +460,8 @@ def storage_preview(path: Path) -> Path:
              "-vf", f"scale={target_width}:{target_height}:flags=lanczos",
              "-c:v", "libx264", "-preset", "veryfast",
              "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
-             "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p",
+             "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p", "-bf", "0",
+             *keyframe_options([entry["duration"] for entry in timeline]),
              "-c:a", "copy",
              "-movflags", "+faststart", str(preview)], timeout=1200)
         if preview.stat().st_size < maximum:
@@ -459,7 +470,7 @@ def storage_preview(path: Path) -> Path:
     raise RuntimeError("Preview could not fit under the 50 MB Supabase Free file limit. The master MP4 is saved as a GitHub Actions artifact.")
 
 
-def upload_mp4(client, path: Path, video_id: str) -> str:
+def upload_mp4(client, path: Path, video_id: str, timeline=(), *, preserve_picture=False) -> str:
     bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     try:
         client.storage.get_bucket(bucket)
@@ -468,7 +479,7 @@ def upload_mp4(client, path: Path, video_id: str) -> str:
             client.storage.create_bucket(bucket, options={"public": True})
         else: raise
     filename = f"{video_id}.mp4"
-    preview = storage_preview(path)
+    preview = storage_preview(path, timeline, preserve_picture=preserve_picture)
     validate_audio(preview, expected=ffprobe_duration(path))
     client.storage.from_(bucket).upload(filename, preview.read_bytes(),
         file_options={"content-type": "video/mp4", "upsert": "true"})
@@ -499,66 +510,91 @@ def process(video: dict[str, Any], supabase) -> None:
     target_scene = revision.get("scene_number")
     mode = revision.get("mode")
     parent, original_scenes, used_footage = prepare_revision(supabase, video, details, directory)
-    recent_footage = footage_history(supabase, video_id)
+    selected = [scene for scene in scenes if scene["logical_scene"] == target_scene] if parent else scenes
+    original_timeline = [entry for entries in original_scenes.values() for entry in entries]
+    originals = original_scenes.get(target_scene, [])
+    size = None
+    bitrate = None
+    if parent:
+        if not originals or not selected or mode not in ("audio", "visual", "rewrite"):
+            raise ValueError("The selected scene has no saved edit points.")
+        if mode in ("audio", "visual") and len(selected) != len(originals):
+            raise ValueError("Saved edit points no longer match the selected scene.")
+        source = picture_track(parent)
+        size = (int(source["width"]), int(source["height"]))
+        if parent.stat().st_size > 36_000_000:
+            available = max(0, 46_000_000 - parent.stat().st_size)
+            bitrate = max(180, int(available * 8 / sum(item["duration"] for item in originals) / 1000))
+        print(f"[revision] scene {target_scene}: {mode}; reusing {len(original_scenes) - 1} other scenes", flush=True)
+    recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
     catalog = {}
     rendered = []
-    timeline = []
-    positions = {}
-    cursor = 0.0
-    for scene in scenes:
+    voices = []
+    replacement_timeline = []
+    for index, scene in enumerate(selected):
         number = scene["scene_number"]
         logical = scene["logical_scene"]
-        chunk = positions.get(logical, 0)
-        positions[logical] = chunk + 1
-        changed = logical == target_scene
-        entries = original_scenes.get(logical, [])
-        entry = entries[chunk] if chunk < len(entries) else None
-        if parent and not entry and (not changed or mode in ("audio", "visual")):
-            raise ValueError(f"Saved edit points no longer match scene {logical}")
-        save_fields(supabase, video, progress_note=f"Preparing scene {number} of {len(scenes)}")
-        if parent and entry and (not changed or mode == "audio"):
-            replacement = make_audio(scene, directory)[0] if changed else None
-            clip = reuse_visual(parent, entry, scene, directory, replacement)
-            captions = entry.get("captions", "")
-            clip_ids = entry.get("footage", [])
+        entry = originals[index] if index < len(originals) else None
+        save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
+        if parent and mode == "audio":
+            audio, _ = make_audio(scene, directory)
+            duration = float(entry["duration"])
+            voice = directory / f"revised_audio_{number:02d}.wav"
+            prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
+            voices.append(voice)
+            replacement_timeline.append(entry)
+            continue
+        keep_audio = bool(parent and mode == "visual")
+        if keep_audio:
+            audio = directory / f"source_audio_{number:02d}.wav"
+            srt = audio.with_suffix(".srt")
+            extract_audio(parent, entry, audio)
+            srt.write_text(entry["captions"], encoding="utf-8")
         else:
-            keep_audio = bool(parent and entry and changed and mode == "visual")
-            if keep_audio:
-                audio = directory / f"source_audio_{number:02d}.wav"
-                srt = audio.with_suffix(".srt")
-                extract_audio(parent, entry, audio)
-                srt.write_text(entry["captions"], encoding="utf-8")
-            else:
-                audio, srt = make_audio(scene, directory)
-            seconds = ffprobe_duration(audio)
-            count = max(1, math.ceil(seconds / SHOT_SECONDS))
-            raw, clip_ids = [], []
-            for shot in range(count):
-                queries = scene["search_queries"]
-                shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
-                match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
-                if not match:
-                    break
-                source, clip_id = match
-                raw.append(source)
-                clip_ids.append(clip_id)
-            if not raw:
-                raise RuntimeError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
-            clip = render_scene(scene, raw, audio, srt, directory,
-                                duration=float(entry["duration"]) if keep_audio else None,
-                                normalized_audio=keep_audio)
-            captions = srt.read_text(encoding="utf-8")
-            for source in raw:
-                if source.name != "raw_01_00.mp4":
-                    source.unlink(missing_ok=True)
-        with wave.open(str(clip.with_suffix(".wav")), "rb") as pcm:
-            duration = pcm.getnframes() / pcm.getframerate()
-        timeline.append({"scene_number": logical, "start": round(cursor, 6), "duration": round(duration, 6),
-                         "captions": captions, "footage": clip_ids})
-        cursor += duration
+            audio, srt = make_audio(scene, directory)
+        seconds = ffprobe_duration(audio)
+        count = max(1, math.ceil(seconds / SHOT_SECONDS))
+        raw, clip_ids = [], []
+        for shot in range(count):
+            queries = scene["search_queries"]
+            shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
+            match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
+            if not match:
+                break
+            source, clip_id = match
+            raw.append(source)
+            clip_ids.append(clip_id)
+        if not raw:
+            raise RuntimeError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
+        clip = render_scene(scene, raw, audio, srt, directory,
+                            duration=float(entry["duration"]) if keep_audio else None,
+                            normalized_audio=keep_audio, size=size, bitrate=bitrate)
+        for source in raw:
+            if source.name != "raw_01_00.mp4":
+                source.unlink(missing_ok=True)
         rendered.append(clip)
+        voice = clip.with_suffix(".wav")
+        voices.append(voice)
+        with wave.open(str(voice), "rb") as pcm:
+            duration = pcm.getnframes() / pcm.getframerate()
+        replacement_timeline.append({"scene_number": logical, "duration": round(duration, 6),
+                                     "captions": srt.read_text(encoding="utf-8"), "footage": clip_ids})
     save_fields(supabase, video, progress_note="Joining scenes")
-    final = stitch(rendered, directory)
+    if parent:
+        start = round(float(originals[0]["start"]) * 30)
+        last = originals[-1]
+        end = round((float(last["start"]) + float(last["duration"])) * 30)
+        final = stitch_revision(parent, start, end, rendered, voices, mode, directory)
+        entries = ([entry for entry in original_timeline if entry["scene_number"] < target_scene] +
+                   replacement_timeline + [entry for entry in original_timeline if entry["scene_number"] > target_scene])
+    else:
+        final = stitch(rendered, directory)
+        entries = replacement_timeline
+    cursor = 0
+    timeline = []
+    for entry in entries:
+        timeline.append({**entry, "start": round(cursor / 30, 6)})
+        cursor += round(entry["duration"] * 30)
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     thumbnail_path = directory / "thumbnail.jpg"
     thumbnail_source = directory / "raw_01_00.mp4"
@@ -567,7 +603,7 @@ def process(video: dict[str, Any], supabase) -> None:
             thumbnail_path.write_bytes(supabase.storage.from_(
                 os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(revision["parent_id"] + ".jpg"))
         except Exception:
-            create_thumbnail(rendered[0], headline, thumbnail_path)
+            create_thumbnail(parent, headline, thumbnail_path)
     else:
         create_thumbnail(thumbnail_source, headline, thumbnail_path)
     thumbnail_url, thumbnail_error = "", ""
@@ -580,7 +616,7 @@ def process(video: dict[str, Any], supabase) -> None:
     save_fields(supabase, video, progress_note="Saving MP4 preview")
     storage_url, storage_error = "", ""
     try:
-        storage_url = upload_mp4(supabase, final, video_id)
+        storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
     except Exception as error:
         storage_error = f"MP4 preview storage: {str(error)[:250]}"
         print(f"[storage] {storage_error}", flush=True)

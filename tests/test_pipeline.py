@@ -14,7 +14,7 @@ from studio_audio import make_audio, phrase_cues, validate_audio, write_srt
 from studio_automation import generate_researched_draft
 from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage, run
 from studio_publish import publication_due
-from studio_revision import reuse_visual
+from studio_revision import stitch_revision
 
 
 def ffmpeg(*args):
@@ -97,10 +97,8 @@ class MediaRegression(unittest.TestCase):
             parent = stitch(rendered, directory).rename(directory / 'parent.mp4')
             replacement = directory / 'repair.wav'
             ffmpeg('-f', 'lavfi', '-i', 'sine=frequency=770:sample_rate=48000', '-t', '1.6', replacement)
-            parts = [reuse_visual(parent, {'start': (number - 1) * 1.6, 'duration': 1.6},
-                     {'scene_number': number}, directory, replacement if number == 2 else None)
-                     for number in range(1, 4)]
-            revised = stitch(parts, directory)
+            ffmpeg('-i', replacement, '-ac', '2', directory / 'repair_stereo.wav')
+            revised = stitch_revision(parent, 48, 96, [], [directory / 'repair_stereo.wav'], "audio", directory)
             self.assertGreater(energy(revised, 440, start=.3), energy(revised, 770, start=.3) * 10)
             self.assertGreater(energy(revised, 770, start=1.9), energy(revised, 660, start=1.9) * 10)
             self.assertGreater(energy(revised, 550, start=3.5), energy(revised, 770, start=3.5) * 10)
@@ -108,6 +106,33 @@ class MediaRegression(unittest.TestCase):
                 return subprocess.check_output(['ffmpeg', '-v', 'error', '-ss', '2.3', '-i', str(path),
                     '-vf', 'scale=1:1', '-frames:v', '1', '-pix_fmt', 'rgb24', '-threads', '1', '-f', 'rawvideo', '-'])
             self.assertTrue(all(abs(a-b) <= 3 for a,b in zip(picture(parent), picture(revised))))
+
+    def test_visual_revision_copies_approved_frames_and_entire_narration(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            parent = folder / 'parent.mp4'
+            replacement = folder / 'replacement.mp4'
+            ffmpeg('-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=30',
+                   '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+                   '-t', '3', '-c:v', 'libx264', '-bf', '0', '-g', '30',
+                   '-video_track_timescale', '90000', '-ac', '2', '-c:a', 'aac', parent)
+            ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-frames:v', 30,
+                   '-c:v', 'libx264', '-bf', '0', '-video_track_timescale', '90000', replacement)
+            revised = stitch_revision(parent, 30, 60, [replacement], [], "visual", folder)
+            def frame_hashes(path):
+                return [line.split(',')[-1].strip() for line in subprocess.check_output(
+                    ['ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:v:0', '-f', 'framemd5', '-'],
+                    text=True).splitlines() if not line.startswith('#')]
+            before, after = frame_hashes(parent), frame_hashes(revised)
+            self.assertEqual(before[:30], after[:30])
+            self.assertEqual(before[60:], after[60:])
+            self.assertNotEqual(before[30:60], after[30:60])
+            def audio_packet_hashes(path):
+                result = subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                    '-show_packets', '-show_entries', 'packet=data_hash', '-show_data_hash', 'sha256',
+                    '-of', 'json', str(path)])
+                return [packet["data_hash"] for packet in json.loads(result)["packets"]]
+            self.assertEqual(audio_packet_hashes(parent), audio_packet_hashes(revised))
 
     def test_twelve_minute_join_keeps_continuous_narration(self):
         with TemporaryDirectory() as tmp:

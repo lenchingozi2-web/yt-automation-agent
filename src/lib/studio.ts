@@ -36,11 +36,31 @@ export function revisionTarget(scene: unknown, direction: string, sceneCount: nu
 
 export function revisionMode(value: unknown, direction: string): RevisionMode {
   if (value === "audio" || value === "visual" || value === "rewrite") return value;
-  if (/\b(?:voice(?:over)?|audio|silent|sound|crackl?es?|narration is missing)\b/i.test(direction) &&
-      !/\b(?:rewrite|rephrase|change the words|script|footage|visual)\b/i.test(direction)) return "audio";
-  if (/\b(?:footage|visuals?|align|shots?|replace the scene|change scene|clips?|image|b-roll)\b/i.test(direction) &&
-      !/\b(?:rewrite|rephrase|script|narration|voice|audio)\b/i.test(direction)) return "visual";
+  const rewrite = /\b(?:rewrit\w*|rephras\w*|fact.?check|correct (?:the )?(?:claim|script|narration)|(?:change|edit|replace|update|fix) (?:the )?(?:words|wording|script|narration|claim|dialogue)|(?:script|narration) (?:says|mentions|is wrong))\b/i;
+  if (rewrite.test(direction)) return "rewrite";
+  if (/\b(?:footage|visuals?|align\w*|shots?|(?:replace|change) (?:the )?scene|clips?|images?|b-roll)\b/i.test(direction)) return "visual";
+  if (/\b(?:voice(?:over)?|audio|silent|sound|crackl?\w*|narration is missing)\b/i.test(direction)) return "audio";
   return "rewrite";
+}
+
+export function footageSearches(scene: Scene, direction: string): string[] {
+  const subject = /\b(?:show(?:ing)?|use|feature|depict(?:ing)?|cut to|replace\s+(?:the\s+)?(?:footage|visuals?|shots?|clips?|(?:scene\s+\d+))\s+with)\s+([^.!?\n]+)/i.exec(direction)?.[1]
+    ?.replace(/^\s*(?:an?|the)\s+/i, "")
+    .replace(/\b(?:instead|to (?:match|align)|that (?:matches|aligns))\b.*$/i, "").trim();
+  const visualSubjects = [
+    [/\b(?:blood\s?spot|heel prick|blood sample|blood test)\b/i, "blood sample laboratory"],
+    [/\b(?:newborn|infant|baby)\b/i, "newborn hospital"],
+    [/\b(?:genetic|dna|methylation)\b/i, "laboratory pipette"],
+    [/\b(?:counsel\w*|parents|family|families)\b/i, "doctor consultation"],
+    [/\b(?:microscop\w*|specimen)\b/i, "laboratory microscope"],
+  ] as const;
+  const relevant = visualSubjects.flatMap(([pattern, query]) => pattern.test(scene.narration) ? [query] : []);
+  const terms = [
+    subject?.split(/\s+/).slice(0, 6).join(" "),
+    ...relevant.slice(0, 2),
+    ...scene.search_queries,
+  ].filter((term): term is string => !!term && !/^(?:more |better |different )?(?:relevant|aligned|matching|appropriate|different|better|new|related)(?:\s+(?:footage|visuals?|clips?))?$/i.test(term));
+  return [...new Set(terms.map((term) => term.trim().toLowerCase()))].slice(0, 5);
 }
 
 const stringOf = (v: unknown, fallback = "") => typeof v === "string" ? v : fallback;

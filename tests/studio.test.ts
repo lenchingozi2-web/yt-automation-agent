@@ -36,6 +36,16 @@ test("review instructions resolve one scene and protect against a mismatched sel
   assert.equal(revisionTarget(undefined, "Fix scene 2 and scene 3", 7), undefined);
 });
 
+test("the reported Scene 5 edit selects footage and uses the saved scene's subjects", async () => {
+  const { footageSearches, revisionMode, revisionTarget } = await import("../src/lib/studio.ts");
+  const direction = "Replace the footage to be more aligned with the scene/script";
+  const scene = { scene_number: 5, narration: "A newborn bloodspot sample can be examined in a laboratory.", search_queries: ["doctor consultation"] };
+  assert.equal(revisionTarget(5, direction, 5), 5);
+  assert.equal(revisionMode(undefined, direction), "visual");
+  assert.deepEqual(footageSearches(scene, direction), ["blood sample laboratory", "newborn hospital", "doctor consultation"]);
+  assert.equal(footageSearches(scene, "Replace the footage with a laboratory technician")[0], "laboratory technician");
+});
+
 test("revision metadata and logical scene times survive API normalization", () => {
   const video = normalizeVideo({ id: "child", status: "completed", scenes: [{
     narration: "Start here.", _studio: { revision: { parent_id: "parent", scene_number: 1, mode: "audio", original_media: true },

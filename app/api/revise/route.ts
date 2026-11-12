@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { normalizeDraft, normalizeVideo, revisionMode, revisionTarget } from "@/src/lib/studio";
-import { reviseFootage, rewriteScene } from "@/src/lib/studio-research";
+import { footageSearches, normalizeDraft, normalizeVideo, revisionMode, revisionTarget } from "@/src/lib/studio";
+import { rewriteScene } from "@/src/lib/studio-research";
 import { dispatchStudioWorker, errorResponse, findVideo, jobIdOf, quotaOf, requestObject, safeInsertVideo, statusFor, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 
 export const dynamic = "force-dynamic";
@@ -29,15 +29,17 @@ export async function POST(request: Request) {
     if (direction.length > 1600 || narration.length > 800 || manualQueries.length > 350) throw new StudioRequestError("Shorten your revision instructions.", 400);
     const sceneNumber = revisionTarget(body.scene, direction, draft.scenes.length);
     if (!sceneNumber) throw new StudioRequestError("Choose one scene to revise. Its number must match any scene named in the instructions.", 400);
-    const mode = narration ? "rewrite" : revisionMode(body.mode, manualQueries ? "change scene visuals" : direction);
+    const mode = narration ? "rewrite" : manualQueries ? "visual" : revisionMode(body.mode, direction);
     if (!direction && !narration && !manualQueries && mode !== "audio") throw new StudioRequestError("Describe what you want to change.", 400);
+    const originalMedia = Boolean(video.video_url && video.scene_times?.length === draft.scenes.length);
+    if (!originalMedia) throw new StudioRequestError("This video’s source preview or saved scene timings are unavailable for a targeted revision.", 409);
     const quota = await quotaOf(client);
     if (quota.used >= quota.limit) throw new StudioRequestError("Today’s render allowance is full. It resets at midnight WAT.", 429);
     const scene = draft.scenes[sceneNumber - 1];
     const queries = manualQueries ? [...new Set(manualQueries.split(",").map((term) => term.trim()).filter(Boolean))].slice(0, 5) : undefined;
     if (manualQueries && !queries?.length) throw new StudioRequestError("Enter at least one footage search term.", 400);
     if (mode === "visual") {
-      scene.search_queries = queries || await reviseFootage(draft, sceneNumber, direction);
+      scene.search_queries = queries || footageSearches(scene, direction);
     } else if (mode === "rewrite") {
       const result = await rewriteScene(draft, sceneNumber, direction, narration || undefined, queries);
       const all = [...(draft.sources || [])];
@@ -52,7 +54,6 @@ export async function POST(request: Request) {
       draft.sources = all;
       draft.scenes[sceneNumber - 1] = { ...result.scene, source_ids: result.scene.source_ids?.map((id) => ids.get(id)!) };
     }
-    const originalMedia = Boolean(video.video_url && video.scene_times?.length === draft.scenes.length);
     const saved = await safeInsertVideo(client, draft, userId, requestId, {
       parent_id: id, scene_number: sceneNumber, mode, original_media: originalMedia,
     });

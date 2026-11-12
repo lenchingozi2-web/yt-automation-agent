@@ -262,16 +262,3 @@ export async function rewriteScene(draft: Draft, sceneNumber: number, direction:
   if ((await audit([revised], evidence)).length) throw new Error("Studio could not verify the revised narration. Edit the claim or give a narrower direction.");
   return { scene: revised, sources: sourceList(evidence) };
 }
-
-export async function reviseFootage(draft: Draft, sceneNumber: number, direction: string) {
-  const scene = draft.scenes[sceneNumber - 1];
-  const result = await modelJson([
-    "Return JSON with search_queries containing 3 to 5 new Pixabay video queries. Each must describe a visible object, action or setting in 2 to 4 words.",
-    "Follow the direction while keeping the footage appropriate for the unchanged narration. Use alternatives with meaningfully different visuals from the previous queries. Avoid stock filler, logos and greenscreens.",
-    JSON.stringify({ title: draft.title, direction, narration: scene.narration, previous: scene.search_queries }),
-  ].join("\n"));
-  const old = new Set(scene.search_queries.map((query) => query.toLowerCase()));
-  const queries = normalizeDraft({ scenes: [result] }).scenes[0].search_queries.filter((query) => !old.has(query.toLowerCase()));
-  if (!queries.length) throw new Error("Studio did not find a new visual direction for this scene.");
-  return queries;
-}
