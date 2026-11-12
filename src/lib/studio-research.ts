@@ -24,9 +24,23 @@ const EDITORIAL = [
   "Visual search terms must be 2–4 words describing concrete visible actions, objects or settings. Give each scene an identifiable visual idea. Avoid green screens, brands, logos and generic filler.",
 ].join("\n");
 
+class ProviderHttpError extends Error {
+  readonly status: number;
+  readonly retrySeconds: number;
+
+  constructor(response: Response) {
+    super("HTTP " + response.status);
+    this.status = response.status;
+    const retry = response.headers.get("retry-after") || "";
+    const tokens = response.headers.get("x-ratelimit-reset-tokens") || "";
+    const match = /^(?:(\d+)m)?([\d.]+)s$/.exec(tokens);
+    this.retrySeconds = Math.max(Number(retry) || 0, match ? Number(match[1] || 0) * 60 + Number(match[2]) : 0);
+  }
+}
+
 async function fetchJson<T>(url: string, init: RequestInit = {}, timeout = 12000): Promise<T> {
   const response = await fetch(url, { ...init, cache: "no-store", signal: AbortSignal.timeout(timeout) });
-  if (!response.ok) throw new Error("HTTP " + response.status);
+  if (!response.ok) throw new ProviderHttpError(response);
   return await response.json() as T;
 }
 
@@ -36,15 +50,18 @@ async function modelJson(instruction: string, maxTokens = 1400, timeout = 16000)
   const groq = process.env.GROQ_API_KEY?.trim();
   const parse = (value: string) => object(JSON.parse(value.trim().replace(/^\x60{3}(?:json)?\s*|\s*\x60{3}$/gi, "")));
   const providers: { name: string; run: () => Promise<Json> }[] = [];
-  if (gemini) providers.push({ name: "Gemini", run: async () => {
-    const model = process.env.STUDIO_SCRIPT_MODEL || "gemini-flash-latest";
-    const data = await fetchJson<GeminiReply>(API + encodeURIComponent(model) + ":generateContent", {
-      method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": gemini },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: "application/json", maxOutputTokens: maxTokens, temperature: 0.35 } }),
-    }, timeout);
-    return parse(data.candidates?.[0]?.content?.parts?.filter((part) => !part.thought).map((part) => part.text || "").join("") || "");
-  } });
+  const configuredModel = process.env.STUDIO_SCRIPT_MODEL;
+  if (gemini) for (const model of configuredModel ? [configuredModel] : ["gemini-flash-latest", "gemini-2.5-flash"]) {
+    providers.push({ name: "Gemini " + model, run: async () => {
+      const data = await fetchJson<GeminiReply>(API + encodeURIComponent(model) + ":generateContent", {
+        method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": gemini },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json", maxOutputTokens: maxTokens, temperature: 0.35,
+            ...(model === "gemini-2.5-flash" ? { thinkingConfig: { thinkingBudget: 512 } } : {}) } }),
+      }, timeout);
+      return parse(data.candidates?.[0]?.content?.parts?.filter((part) => !part.thought).map((part) => part.text || "").join("") || "");
+    } });
+  }
   if (groq) providers.push({ name: "Groq", run: async () => {
     const data = await fetchJson<GroqReply>("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + groq },
@@ -53,18 +70,28 @@ async function modelJson(instruction: string, maxTokens = 1400, timeout = 16000)
     }, timeout);
     return parse(data.choices?.[0]?.message?.content || "");
   } });
-  if (process.env.STUDIO_PREFER_GROQ === "1") providers.reverse();
-  for (const provider of providers) {
-    const started = Date.now();
-    try {
-      const result = await provider.run();
-      if (Object.keys(result).length) return result;
-      trace(provider.name + " returned an empty object.");
-    } catch (error) {
-      const reason = error instanceof Error && /^HTTP \d+$/.test(error.message) ? error.message :
-        error instanceof Error ? error.name : "Unknown error";
-      trace(provider.name + " " + reason + " after " + (Date.now() - started) + "ms.");
+  const daily = process.env.STUDIO_PREFER_GROQ === "1";
+  if (daily && groq) providers.unshift(providers.pop()!);
+  for (let cycle = 0; cycle < (daily ? 3 : 1); cycle++) {
+    let retryIn = 0;
+    for (const provider of providers) {
+      const started = Date.now();
+      try {
+        const result = await provider.run();
+        if (Object.keys(result).length) return result;
+        trace(provider.name + " returned an empty object.");
+      } catch (error) {
+        const reason = error instanceof ProviderHttpError ? error.message : error instanceof Error ? error.name : "Unknown error";
+        trace(provider.name + " " + reason + " after " + (Date.now() - started) + "ms.");
+        if (error instanceof ProviderHttpError && (error.status === 429 || error.status >= 500)) {
+          retryIn = Math.max(retryIn, error.retrySeconds, error.status === 429 ? 24 : 8);
+        }
+      }
     }
+    if (!daily || !retryIn || cycle === 2) break;
+    const delay = Math.min(36, retryIn);
+    trace("Retrying the current step in " + delay + " seconds.");
+    await new Promise((resolve) => setTimeout(resolve, delay * 1000));
   }
   throw new Error("Studio’s writing model is unavailable. Check model access and quota, then try again.");
 }
@@ -122,7 +149,7 @@ export async function research(brief: string, recent: string[] = []) {
   }
   trace("Research found " + unique.size + " usable sources.");
   if (unique.size < 2) throw new Error("Studio found too little source material to verify this script. Try a more specific topic or try again later.");
-  const evidence = [...unique.values()].slice(0, 12).map((item, i) => ({ ...item, id: i + 1 }));
+  const evidence = [...unique.values()].slice(0, process.env.STUDIO_PREFER_GROQ === "1" ? 6 : 10).map((item, i) => ({ ...item, id: i + 1 }));
   return { angle, evidence };
 }
 

@@ -20,7 +20,7 @@ def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list
     result = subprocess.run(
         ["node", "--experimental-strip-types", "--no-warnings", str(command)],
         input=json.dumps({"brief": brief, "seconds": seconds, "ratio": ratio, "recent": recent}),
-        capture_output=True, text=True, timeout=220,
+        capture_output=True, text=True, timeout=320,
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip()[-1400:] or "Studio’s researched script failed.")
