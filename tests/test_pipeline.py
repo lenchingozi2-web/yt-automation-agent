@@ -159,7 +159,7 @@ class PipelineRegression(unittest.TestCase):
 
     def test_daily_generation_uses_shared_research_engine(self):
         from subprocess import CompletedProcess
-        with patch('studio_automation.subprocess.run', return_value=CompletedProcess([], 0, '{"title":"A researched topic"}')) as run:
+        with patch('studio_automation.subprocess.run', return_value=CompletedProcess([], 0, '{"title":"A researched topic"}', '')) as run:
             draft = generate_researched_draft('Study methods', 60, '9:16', ['Previous video'])
             self.assertEqual(draft['title'], 'A researched topic')
             args, kwargs = run.call_args
