@@ -2,6 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canRetryYouTubeThumbnail, normalizeVideo, normalizeDraft, youtubeStudioUrl } from '../src/lib/studio.ts';
 
+test('saved settings beat database defaults and measured geometry describes the finished preview', () => {
+  const row = { format: '16:9', duration_seconds: 180, scenes: [{ narration: 'Keep the selected settings.', _studio: {
+    aspect_ratio: '9:16', duration_seconds: 60,
+  } }] };
+  assert.equal(normalizeDraft(row).format, '9:16');
+  assert.equal(normalizeDraft(row).duration_seconds, 60);
+  assert.equal(normalizeVideo({ ...row, actual_format: '16:9' }).format, '16:9');
+});
+
 test('only a confirmed upload with a saved failed thumbnail can retry', () => {
   const video = normalizeVideo({ status: 'completed', scenes: [{ narration: 'A finished video.', _studio: {
     youtube_id: 'AbCdEf12345', publish_status: 'uploaded', publish_approved_at: '2026-11-12T17:00:00Z',

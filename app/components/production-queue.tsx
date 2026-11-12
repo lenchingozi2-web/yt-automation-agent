@@ -157,7 +157,10 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
         <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
       </details>}
       {youtubeEdit && <section className="revision-panel" aria-label="YouTube upload details">
-        <p className="review-note">After your video-review approval, new uploads request Public visibility. Check YouTube Studio to confirm; older uploads may remain private.</p>
+        <p className="review-note">Manage this video’s visibility in YouTube Studio.</p>
+        {["pending", "retry"].includes(video.thumbnail_publish_status ?? "") && <p className="review-note" role="status">
+          YouTube thumbnail is queued. Studio will retry if processing is delayed.
+        </p>}
         {thumbnailFailed && <div className="grid gap-2">
           <p className="review-note">{video.progress_note || "YouTube did not accept the custom thumbnail."}</p>
           {video.progress_note?.includes("HTTP 403") && <p className="review-note">
@@ -182,7 +185,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
       {!editing && attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
       {canApprove && !editing && <p className="review-note">
         {video.publish_status === "upload_uncertain" ? "Check YouTube Studio for an existing copy before approving another upload."
-          : watched ? "Approve to upload this video privately to YouTube." : "Watch the preview to the end to unlock approval."}
+          : watched ? "Approval queues this video for a public upload on YouTube." : "Watch the preview to the end to unlock approval."}
       </p>}
       <div className="preview-actions">
         {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
@@ -191,7 +194,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
           setEditing(!editing); setAttempted(false); if (!editing) player.current?.pause();
         }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
         {canApprove && !editing && <button className="button button-primary" disabled={!watched || failed || busy} onClick={() => void send()}>
-          {busy && <LoaderCircle size={16} className="spinner" />} Approve &amp; upload to YouTube
+          {busy && <LoaderCircle size={16} className="spinner" />} Approve &amp; publish on YouTube
         </button>}
       </div>
     </footer>

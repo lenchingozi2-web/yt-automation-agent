@@ -12,19 +12,20 @@ import unittest
 from unittest.mock import patch
 
 from googleapiclient.errors import HttpError
-from studio_audio import make_audio, phrase_cues, validate_audio, write_srt
+from studio_audio import make_audio, phrase_cues, retime_srt, validate_audio, write_srt
 from studio_automation import generate_researched_draft
-from worker import render_scene, stitch, video_details, safe_publish_error, save_fields, usable_footage, run
-from studio_publish import publication_due
+from worker import render_scene, scene_durations, stitch, verify_render_geometry, video_details, safe_publish_error, save_fields, usable_footage, run
+from studio_publish import publication_due, thumbnail_due
 from studio_revision import stitch_revision
 
 from studio_retry import retry_io
 
 
 class ThumbnailRetryRegression(unittest.TestCase):
+    @patch("worker.verify_thumbnail")
     @patch("worker.save_fields")
     @patch("worker.set_youtube_thumbnail")
-    def test_reports_thumbnail_error_separately_from_the_video_upload(self, set_thumbnail, save):
+    def test_reports_thumbnail_error_separately_from_the_video_upload(self, set_thumbnail, save, verify):
         from worker import apply_uploaded_thumbnail
         set_thumbnail.side_effect = HttpError(
             SimpleNamespace(status=403, reason="Forbidden"),
@@ -35,6 +36,25 @@ class ThumbnailRetryRegression(unittest.TestCase):
         self.assertEqual(save.call_args.kwargs["thumbnail_publish_status"], "failed")
         self.assertIn("HTTP 403 forbidden", save.call_args.kwargs["progress_note"])
         self.assertNotIn("publish_status", save.call_args.kwargs)
+
+    @patch("worker.verify_thumbnail")
+    @patch("worker.save_fields")
+    @patch("worker.set_youtube_thumbnail")
+    def test_processing_delay_schedules_only_thumbnail_retry(self, set_thumbnail, save, verify):
+        from datetime import datetime, timedelta, timezone
+        from worker import apply_uploaded_thumbnail
+        set_thumbnail.side_effect = HttpError(SimpleNamespace(status=404, reason="Not Found"),
+            b'{"error":{"message":"Not found","errors":[{"reason":"videoNotFound"}]}}')
+        now = datetime.now(timezone.utc)
+        row = {"id": "uploaded", "status": "completed", "scenes": [{"_studio": {
+            "publish_status": "uploaded", "publish_approved_at": now.isoformat(), "publish_approved_by": "owner",
+            "youtube_id": "AbCdEf12345", "thumbnail_url": "https://example.org/cover.jpg",
+        }}]}
+        self.assertFalse(apply_uploaded_thumbnail(row, object(), "AbCdEf12345", Path("cover.jpg")))
+        row["scenes"][0]["_studio"].update(save.call_args.kwargs)
+        self.assertFalse(thumbnail_due(row, "auth", now))
+        self.assertTrue(thumbnail_due(row, "auth", now + timedelta(minutes=5)))
+        self.assertFalse(publication_due(row, "auth", now + timedelta(minutes=5)))
 
 
 def ffmpeg(*args):
@@ -65,6 +85,26 @@ class ExternalRetryRegression(unittest.TestCase):
 
 
 class MediaRegression(unittest.TestCase):
+    def test_requested_runtime_retimes_audio_and_captions_in_both_formats(self):
+        self.assertEqual(sum(round(d * 30) for d in scene_durations([60.8, 61.9, 60.2], 180)), 5400)
+        self.assertEqual(sum(round(d * 30) for d in scene_durations([234.1, 239.9, 242.7], 720)), 21600)
+        with self.assertRaisesRegex(ValueError, "Adjust the script length"):
+            scene_durations([15], 720)
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source, audio, srt = directory/"footage.mp4", directory/"voice.wav", directory/"voice.srt"
+            ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=30", "-t", "1", "-c:v", "libx264", source)
+            ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2.4", audio)
+            write_srt([(0.6, 1.2, "This caption follows the voice.")], srt)
+            timed = retime_srt(srt, directory/"timed.srt", 1.2, 2)
+            self.assertIn("00:00:00,500 --> 00:00:01,000", timed.read_text())
+            for ratio, size in [("9:16", (144, 256)), ("16:9", (256, 144))]:
+                clip = render_scene({"scene_number": 1, "format": ratio}, source, audio, timed, directory,
+                                    duration=2, size=size, tempo=1.2)
+                final = stitch([clip], directory)
+                self.assertEqual(verify_render_geometry(final, size, 2), (ratio, 2.0))
+                self.assertGreater(energy(final, 440, start=1.45), energy(final, 880, start=1.45) * 10)
+
     def test_narration_beats_stock_audio_and_survives_all_cuts(self):
         with TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -231,6 +271,12 @@ class MediaRegression(unittest.TestCase):
 
 
 class PipelineRegression(unittest.TestCase):
+    def test_saved_settings_beat_conflicting_database_defaults(self):
+        _, ratio, details = video_details({"format": "16:9", "duration_seconds": 180, "scenes": [
+            {"narration": "Keep the selected settings.", "_studio": {"aspect_ratio": "9:16", "duration_seconds": 60}},
+        ]})
+        self.assertEqual(ratio, "9:16")
+        self.assertEqual(details["duration_seconds"], 60)
     def test_legacy_metadata_keeps_ratio_and_every_word(self):
         narration='This is a complete sentence. '*25
         scenes,ratio,details=video_details({'title':'Saved job','scenes':[{'narration':narration,

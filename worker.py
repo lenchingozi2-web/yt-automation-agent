@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -26,11 +27,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
-from studio_media import create_thumbnail
+from studio_media import create_thumbnail, verify_thumbnail
 from studio_thumbnail_art import make_prader_willi_thumbnail
-from studio_audio import make_audio, validate_audio, probe
+from studio_audio import make_audio, validate_audio, probe, retime_srt
 from studio_maintenance import metadata as stored_metadata
-from studio_publish import credential_version, has_approval, parse_timestamp, publication_due
+from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
 
@@ -208,6 +209,44 @@ def video_size(scene):
     return (1080, 1920) if scene.get("format") == "9:16" else (1920, 1080)
 
 
+def scene_durations(natural: list[float], target: float | None) -> list[float]:
+    if not natural or any(not math.isfinite(seconds) or seconds <= 0 for seconds in natural):
+        raise ValueError("Narration has invalid scene durations.")
+    if target is None:
+        return [math.ceil(seconds * 30) / 30 for seconds in natural]
+    natural_total = sum(natural)
+    tempo = natural_total / target
+    if not .80 <= tempo <= 1.25:
+        raise ValueError(f"The narration is about {natural_total:.0f}s at normal speed, too far from the "
+                         f"{target:g}s target. Adjust the script length or choose a closer target duration.")
+    target_frames = round(target * 30)
+    boundaries = [0]
+    elapsed = 0.0
+    for seconds in natural[:-1]:
+        elapsed += seconds
+        boundaries.append(round(elapsed / natural_total * target_frames))
+    boundaries.append(target_frames)
+    return [(right - left) / 30 for left, right in zip(boundaries, boundaries[1:])]
+
+
+def verify_render_geometry(path: Path, size: tuple[int, int] | None = None, seconds: float | None = None) -> tuple[str, float]:
+    info = probe(path)
+    picture = next(stream for stream in info["streams"] if stream["codec_type"] == "video")
+    width, height = int(picture["width"]), int(picture["height"])
+    if size and (width, height) != size:
+        raise ValueError(f"Rendered picture has unexpected dimensions ({width}×{height}).")
+    if picture.get("sample_aspect_ratio") not in (None, "N/A", "1:1"):
+        raise ValueError("Rendered picture has non-square pixels.")
+    duration = float(info["format"]["duration"])
+    if seconds is not None:
+        expected_frames = round(seconds * 30)
+        if int(picture.get("nb_frames") or 0) != expected_frames or abs(duration - seconds) > 1 / 30:
+            raise ValueError(f"Rendered duration is {duration:.3f}s; expected {seconds:.3f}s.")
+        if height > width and seconds <= 180 < duration:
+            raise ValueError("The portrait render exceeds the Shorts duration limit.")
+    return ("9:16" if height > width else "16:9"), duration
+
+
 def video_encoder():
     return ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
             "-bf", "0", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
@@ -218,7 +257,7 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
     if normalize:
         filters += ["highpass=f=65", "equalizer=f=3200:t=q:w=1.3:g=-1",
                     "loudnorm=I=-17:TP=-2:LRA=8"]
-    if abs(tempo - 1) > .005:
+    if abs(tempo - 1) > .0001:
         while tempo > 2:
             filters.append("atempo=2")
             tempo /= 2
@@ -235,14 +274,14 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
 
 
 def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path,
-                 *, duration: float | None = None, normalized_audio=False, size=None, bitrate=None) -> Path:
+                 *, duration: float | None = None, normalized_audio=False, size=None, bitrate=None, tempo=1) -> Path:
     output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     width, height = size or video_size(scene)
     source_duration = validate_audio(audio)
     duration = duration or math.ceil(source_duration * 30) / 30
     pcm = output.with_suffix(".wav")
-    prepare_scene_audio(audio, pcm, duration, normalize=not normalized_audio)
+    prepare_scene_audio(audio, pcm, duration, normalize=not normalized_audio, tempo=tempo)
     sources = raw if isinstance(raw, list) else [raw]
     command = ["ffmpeg", "-y", "-v", "error"]
     filters = []
@@ -297,8 +336,12 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
     inputs = ["ffmpeg", "-y", "-v", "error", "-xerror", "-f", "concat", "-safe", "0", "-i", str(concat),
               "-i", str(narration), "-map", "0:v:0", "-map", "1:a:0"]
     output = ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(final)]
+    picture_clock = [] if picture_track(rendered[0]).get("has_b_frames") else [
+        "-bsf:v", "setts=pts=N*3000:dts=N*3000:duration=3000:time_base=1/90000",
+        "-video_track_timescale", "90000",
+    ]
     try:
-        run([*inputs, "-c:v", "copy", *output], timeout=600)
+        run([*inputs, "-c:v", "copy", *picture_clock, *output], timeout=600)
     except RuntimeError as error:
         if "non-monoton" not in str(error).lower():
             raise
@@ -337,7 +380,7 @@ def youtube_credentials() -> Credentials:
     return credentials
 
 
-def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
+def upload_youtube(video: dict[str, Any], file_path: Path) -> tuple[str, str | None]:
     youtube = build("youtube", "v3", credentials=youtube_credentials())
     request = youtube.videos().insert(part="snippet,status", body={"snippet": {
         "title": str(video["title"])[:100], "description": str(video.get("description", "")),
@@ -356,27 +399,21 @@ def upload_youtube(video: dict[str, Any], file_path: Path) -> str:
                 raise
             time.sleep(2 ** failures)
             failures += 1
-    return response["id"]
+    return response["id"], response.get("status", {}).get("privacyStatus")
 
 
 def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
     """Apply the custom JPEG to the uploaded YouTube video if the channel permits it."""
     youtube = build("youtube", "v3", credentials=youtube_credentials())
-    for delay in (0, 3, 8):
-        if delay:
-            time.sleep(delay)
-        try:
-            youtube.thumbnails().set(
-                videoId=video_id,
-                media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
-            ).execute()
-            return
-        except HttpError as error:
-            if delay == 8 or error.resp.status not in (404, 429, 500, 502, 503, 504):
-                raise
+    youtube.thumbnails().set(
+        videoId=video_id,
+        media_body=MediaFileUpload(str(image_path), mimetype="image/jpeg", resumable=False),
+    ).execute()
 
 
 def apply_uploaded_thumbnail(video, client, youtube_id, thumbnail=None) -> bool:
+    details = stored_metadata(video)
+    attempts = int(details.get("thumbnail_publish_attempts") or 0) + 1
     try:
         if thumbnail is None:
             directory = ROOT / str(video["id"])
@@ -384,23 +421,31 @@ def apply_uploaded_thumbnail(video, client, youtube_id, thumbnail=None) -> bool:
             thumbnail = directory / "thumbnail.jpg"
             thumbnail.write_bytes(client.storage.from_(
                 os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(str(video["id"]) + ".jpg"))
+        verify_thumbnail(thumbnail, details.get("actual_format"))
         set_youtube_thumbnail(youtube_id, thumbnail)
     except Exception as error:
         detail = type(error).__name__
+        retryable = transient(error)
         if isinstance(error, HttpError):
             try:
                 reason = json.loads(error.content)["error"]["errors"][0]["reason"]
             except (ValueError, KeyError, IndexError, TypeError):
                 reason = ""
             detail = f"HTTP {error.resp.status}"
+            retryable = error.resp.status in (404, 429, 500, 502, 503, 504)
             if isinstance(reason, str) and re.fullmatch(r"[a-zA-Z0-9_]{1,50}", reason):
                 detail += " " + reason
-        note = "Video uploaded. YouTube thumbnail could not be applied (" + detail + ")."
-        save_fields(client, video, thumbnail_publish_status="failed", progress_note=note)
+        waiting = retryable and attempts < 5
+        note = ("YouTube thumbnail will retry automatically" if waiting else "Video uploaded. YouTube thumbnail could not be applied") + " (" + detail + ")."
+        save_fields(client, video, thumbnail_publish_status="retry" if waiting else "failed",
+                    thumbnail_publish_attempts=attempts,
+                    thumbnail_retry_at=(datetime.fromtimestamp(time.time() + min(3600, 60 * 2 ** attempts), timezone.utc).isoformat()
+                                        if waiting else None),
+                    progress_note=note)
         print("[youtube]", note, flush=True)
         return False
-    save_fields(client, video, thumbnail_publish_status="uploaded",
-                progress_note="YouTube upload and custom thumbnail accepted. Confirm public visibility in YouTube Studio.")
+    save_fields(client, video, thumbnail_publish_status="uploaded", thumbnail_publish_attempts=attempts,
+                thumbnail_retry_at=None, progress_note="YouTube accepted the custom thumbnail.")
     print("[youtube] Custom thumbnail confirmed:", video["id"], flush=True)
     return True
 
@@ -426,11 +471,19 @@ def redesign_uploaded_thumbnail(video_id: str, client) -> None:
         raise ValueError("Only an already-approved and successfully uploaded video can change thumbnails")
     directory = ROOT / video_id
     directory.mkdir(parents=True, exist_ok=True)
-    path = make_prader_willi_thumbnail(directory / "thumbnail.jpg")
+    ratio = details.get("actual_format")
+    if ratio not in ("9:16", "16:9"):
+        # Older jobs didn't record measured geometry. Read the same preview that went to YouTube.
+        saved_video = directory / "thumbnail_source.mp4"
+        saved_video.write_bytes(client.storage.from_(
+            os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4"))
+        ratio, _ = verify_render_geometry(saved_video)
+    path = make_prader_willi_thumbnail(directory / "thumbnail.jpg", ratio=ratio)
     # Keep Studio's saved thumbnail in sync so later retries restore the NEW image.
     new_url = upload_thumbnail(client, path, video_id)
     save_fields(client, video, thumbnail_url=new_url,
-                thumbnail_publish_status="pending", progress_note="Replacing custom YouTube thumbnail")
+                thumbnail_publish_status="pending", thumbnail_publish_attempts=0, thumbnail_retry_at=None,
+                progress_note="Replacing custom YouTube thumbnail")
     if not apply_uploaded_thumbnail(video, client, youtube_id, path):
         raise RuntimeError("New design saved but YouTube rejected the thumbnail; retry from Studio")
     print("[thumbnail] Redesigned original Prader-Willi video:", video_id, flush=True)
@@ -462,8 +515,15 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
         raise ValueError("This video has no scenes; submit it from Scene Editor.")
     first_metadata = decode(scenes[0].get("_studio")) if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
     merged = {**first_metadata, **metadata, **script, **{k: v for k, v in row.items() if v is not None and v != ""}}
-    ratio = merged.get("aspect_ratio") or merged.get("format") or "16:9"
-    ratio = "9:16" if ratio == "9:16" else "16:9"
+    ratios = (first_metadata.get("format"), first_metadata.get("aspect_ratio"),
+              merged.get("format"), merged.get("aspect_ratio"), decode(scenes[0]).get("format"))
+    ratio = next((value for value in ratios if value in ("16:9", "9:16")), "16:9")
+    target = first_metadata.get("duration_seconds") or first_metadata.get("duration") or merged.get("duration_seconds") or merged.get("duration")
+    if target is not None:
+        seconds = float(target)
+        if not math.isfinite(seconds) or seconds <= 0 or seconds > 720:
+            raise ValueError("The saved video duration is invalid.")
+        merged["duration_seconds"] = seconds
     result = []
     for i, raw in enumerate(scenes):
         item = raw if isinstance(raw, dict) else {"narration": str(raw)}
@@ -545,7 +605,7 @@ def storage_preview(path: Path, timeline=(), *, preserve_picture=False) -> Path:
     width, height = [int(v) for v in probe.stdout.strip().split(",")[:2]]
     portrait = height > width
     # Long-form: favor a crisp and small 480p preview over a 1080p upload rejection.
-    target_width, target_height = (480, 854) if portrait else (854, 480)
+    target_width, target_height = (486, 864) if portrait else (864, 486)
     if seconds < 300:
         target_width, target_height = ((720, 1280) if portrait else (1280, 720))
     preview = path.with_name("stream_preview.mp4")
@@ -553,7 +613,7 @@ def storage_preview(path: Path, timeline=(), *, preserve_picture=False) -> Path:
     for shrink in (1.0, 0.70, 0.50):
         bitrate = max(120, min(3200, int(nominal_kbps * shrink)))
         run(["ffmpeg", "-y", "-i", str(path),
-             "-vf", f"scale={target_width}:{target_height}:flags=lanczos",
+             "-vf", f"scale={target_width}:{target_height}:flags=lanczos,setsar=1",
              "-c:v", "libx264", "-preset", "veryfast",
              "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
              "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p", "-bf", "0",
@@ -561,6 +621,8 @@ def storage_preview(path: Path, timeline=(), *, preserve_picture=False) -> Path:
              "-c:a", "copy",
              "-movflags", "+faststart", str(preview)], timeout=1200)
         if preview.stat().st_size < maximum:
+            verify_render_geometry(preview, (target_width, target_height),
+                                   sum(item["duration"] for item in timeline) or None)
             print(f"[storage] preview {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
             return preview
     raise RuntimeError("Preview could not fit under the 50 MB Supabase Free file limit. The master MP4 is saved as a GitHub Actions artifact.")
@@ -584,6 +646,7 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, preserve_pictu
 
 
 def upload_thumbnail(client, path: Path, video_id: str) -> str:
+    verify_thumbnail(path)
     bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
     try:
         client.storage.get_bucket(bucket)
@@ -596,7 +659,8 @@ def upload_thumbnail(client, path: Path, video_id: str) -> str:
     data = path.read_bytes()
     retry_io(lambda: client.storage.from_(bucket).upload(name, data,
         file_options={"content-type": "image/jpeg", "upsert": "true"}), "save thumbnail")
-    return client.storage.from_(bucket).get_public_url(name) + "?v=" + str(int(time.time()))
+    url = client.storage.from_(bucket).get_public_url(name).rstrip("?")
+    return url + ("&" if "?" in url else "?") + "v=" + hashlib.sha256(data).hexdigest()[:12]
 
 
 def process(video: dict[str, Any], supabase) -> None:
@@ -613,6 +677,9 @@ def process(video: dict[str, Any], supabase) -> None:
     originals = original_scenes.get(target_scene, [])
     size = None
     bitrate = None
+    target = details.get("duration_seconds")
+    audio_plan = []
+    thumbnail_candidates = []
     if parent:
         if not originals or not selected or mode not in ("audio", "visual", "rewrite"):
             raise ValueError("The selected scene has no saved edit points.")
@@ -620,10 +687,18 @@ def process(video: dict[str, Any], supabase) -> None:
             raise ValueError("Saved edit points no longer match the selected scene.")
         source = picture_track(parent)
         size = (int(source["width"]), int(source["height"]))
+        if mode == "rewrite":
+            target = sum(round(float(item["duration"]) * 30) for item in originals) / 30
         if parent.stat().st_size > 36_000_000:
             available = max(0, 46_000_000 - parent.stat().st_size)
             bitrate = max(180, int(available * 8 / sum(item["duration"] for item in originals) / 1000))
         print(f"[revision] scene {target_scene}: {mode}; reusing {len(original_scenes) - 1} other scenes", flush=True)
+    if not parent or mode == "rewrite":
+        for index, scene in enumerate(selected):
+            save_fields(supabase, video, progress_note=f"Preparing narration {index + 1} of {len(selected)}")
+            audio, srt = make_audio(scene, directory)
+            audio_plan.append((audio, srt, ffprobe_duration(audio)))
+        durations = scene_durations([item[2] for item in audio_plan], target)
     recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
     catalog = {}
     rendered = []
@@ -649,8 +724,11 @@ def process(video: dict[str, Any], supabase) -> None:
             extract_audio(parent, entry, audio)
             srt.write_text(entry["captions"], encoding="utf-8")
         else:
-            audio, srt = make_audio(scene, directory)
-        seconds = ffprobe_duration(audio)
+            audio, srt, natural = audio_plan[index]
+        seconds = float(entry["duration"]) if keep_audio else durations[index]
+        tempo = natural / seconds if not keep_audio and target is not None else 1
+        if not keep_audio and abs(tempo - 1) > .0001:
+            srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
         count = max(1, math.ceil(seconds / SHOT_SECONDS))
         raw, clip_ids = [], []
         for shot in range(count):
@@ -669,14 +747,14 @@ def process(video: dict[str, Any], supabase) -> None:
             clip_ids.append(clip_id)
         if not raw:
             raise ValueError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
-        clip = render_scene(scene, raw, audio, srt, directory,
-                            duration=float(entry["duration"]) if keep_audio else None,
-                            normalized_audio=keep_audio, size=size, bitrate=bitrate)
-        if not parent:
-            for source in raw:
-                if source.name != "raw_01_00.mp4":
-                    source.unlink(missing_ok=True)
-                    source.with_suffix(".pixabay").unlink(missing_ok=True)
+        clip = render_scene(scene, raw, audio, srt, directory, duration=seconds,
+                            normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo)
+        for footage in raw:
+            if len(thumbnail_candidates) < 3:
+                thumbnail_candidates.append(footage)
+            elif not parent:
+                footage.unlink(missing_ok=True)
+                footage.with_suffix(".pixabay").unlink(missing_ok=True)
         rendered.append(clip)
         voice = clip.with_suffix(".wav")
         voices.append(voice)
@@ -700,35 +778,42 @@ def process(video: dict[str, Any], supabase) -> None:
     for entry in entries:
         timeline.append({**entry, "start": round(cursor / 30, 6)})
         cursor += round(entry["duration"] * 30)
+    expected_size = size if parent else video_size({"format": ratio})
+    expected_seconds = int(picture_track(parent)["nb_frames"]) / 30 if parent else target or cursor / 30
+    actual_ratio, actual_seconds = verify_render_geometry(final, expected_size, expected_seconds)
+    if cursor != round(expected_seconds * 30):
+        raise ValueError("The saved scene timeline does not match the video duration.")
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     thumbnail_path = directory / "thumbnail.jpg"
-    thumbnail_source = directory / "raw_01_00.mp4"
-    if "prader" in headline.lower() and "willi" in headline.lower():
-        make_prader_willi_thumbnail(thumbnail_path)
-    elif parent and (target_scene != 1 or mode == "audio"):
+    if parent and (target_scene != 1 or mode == "audio"):
         try:
             thumbnail_path.write_bytes(supabase.storage.from_(
                 os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(revision["parent_id"] + ".jpg"))
-        except Exception:
-            create_thumbnail(parent, headline, thumbnail_path)
+            verify_thumbnail(thumbnail_path, actual_ratio)
+        except (OSError, ValueError):
+            thumbnail_path.unlink(missing_ok=True)
+        except Exception as error:
+            if transient(error):
+                raise
+            thumbnail_path.unlink(missing_ok=True)
     else:
-        create_thumbnail(thumbnail_source, headline, thumbnail_path)
-    thumbnail_url, thumbnail_error = "", ""
-    try:
-        thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
-    except Exception as error:
-        thumbnail_error = f"Thumbnail storage: {str(error)[:180]}"
-        print(f"[thumbnail] {thumbnail_error}", flush=True)
+        thumbnail_path.unlink(missing_ok=True)
+    if not thumbnail_path.is_file():
+        if "prader" in headline.lower() and "willi" in headline.lower():
+            make_prader_willi_thumbnail(thumbnail_path, ratio=actual_ratio)
+        else:
+            create_thumbnail(thumbnail_candidates or [final], headline, thumbnail_path, ratio=actual_ratio,
+                             timestamps=(.2, 1.4) if thumbnail_candidates else (0,))
+    thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
 
     save_fields(supabase, video, progress_note="Saving MP4 preview")
     storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
-    warnings = [thumbnail_error] if thumbnail_error else []
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
-                thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v6", scene_timeline=timeline,
+                thumbnail_url=thumbnail_url, actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
-                progress_note="MP4 ready for review. " + " ".join(warnings), error_message=None)
+                progress_note="MP4 and thumbnail ready for review.", error_message=None)
     print(f"[completed] {video_id}", flush=True)
 
 
@@ -765,7 +850,7 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
             content = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(str(video["id"]) + ".mp4")
             master.write_bytes(content)
         validate_audio(master)
-        youtube_id = upload_youtube(details, master)
+        youtube_id, actual_visibility = upload_youtube(details, master)
     except Exception as error:
         state, message = safe_publish_error(error)
         save_fields(supabase, video, publish_status=state, publish_error=message,
@@ -777,8 +862,10 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
     save_fields(supabase, video, youtube_id=youtube_id,
                 youtube_url="https://www.youtube.com/watch?v=" + youtube_id,
                 publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
-                publish_error=None, progress_note="MP4 ready. Uploaded to YouTube (public visibility requested).")
-    print("[youtube] Upload confirmed (public visibility requested):", video["id"], flush=True)
+                thumbnail_publish_status="pending", thumbnail_publish_attempts=0, thumbnail_retry_at=None,
+                publish_error=None, youtube_visibility_at_upload=actual_visibility,
+                progress_note="MP4 ready. Uploaded to YouTube.")
+    print("[youtube] Upload confirmed:", video["id"], "visibility:", actual_visibility or "unreported", flush=True)
     apply_uploaded_thumbnail(video, supabase, youtube_id, thumbnail)
 
 
@@ -789,6 +876,9 @@ def publish_due(client, limit: int = 3) -> None:
     rows = client.table("videos").select("*").eq("status", "completed").order("created_at", desc=True).limit(100).execute().data or []
     rows.sort(key=lambda row: not stored_metadata(row).get("publish_requested"))
     now = datetime.now(timezone.utc)
+    for row in [row for row in rows if thumbnail_due(row, version, now)][:limit]:
+        details = stored_metadata(row)
+        apply_uploaded_thumbnail(row, client, details.get("youtube_id") or details.get("youtube_video_id"))
     done = 0
     for row in rows:
         if not publication_due(row, version, now):
@@ -855,6 +945,7 @@ def main(argv: list[str] | None = None) -> None:
         youtube_id = details.get("youtube_id") or details.get("youtube_video_id")
         if not has_approval(details) or details.get("publish_status") != "uploaded" or not isinstance(youtube_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", youtube_id):
             parser.error("Select a Studio video with a confirmed, approved YouTube upload")
+        save_fields(supabase, rows[0], thumbnail_publish_attempts=0)
         if not apply_uploaded_thumbnail(rows[0], supabase, youtube_id):
             raise SystemExit(1)
         return

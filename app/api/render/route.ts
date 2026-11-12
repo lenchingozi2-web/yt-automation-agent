@@ -79,7 +79,7 @@ export async function POST(request: Request) {
     }
     const dispatch = await dispatchStudioWorker();
     return NextResponse.json({
-      ok: true, message: publishing ? "Approved. The worker will upload the saved MP4 privately to YouTube." : "Video queued for rendering.",
+      ok: true, message: publishing ? "Approved. The saved MP4 is queued for a public YouTube upload." : "Video queued for rendering.",
       video: normalizeVideo(saved), workerDispatched: dispatch.dispatched, note: dispatch.note,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

@@ -39,6 +39,18 @@ def has_approval(data: dict[str, Any]) -> bool:
     return bool(parse_timestamp(data.get("publish_approved_at")) and data.get("publish_approved_by"))
 
 
+def thumbnail_due(row: dict[str, Any], version: str, now: datetime) -> bool:
+    if row.get("status") != "completed" or not version:
+        return False
+    data = metadata(row)
+    if (data.get("publish_status") != "uploaded" or not has_approval(data)
+            or not data.get("thumbnail_url") or not (data.get("youtube_id") or data.get("youtube_video_id"))
+            or data.get("thumbnail_publish_status") not in ("pending", "retry")):
+        return False
+    due = parse_timestamp(data.get("thumbnail_retry_at"))
+    return due is None or due <= now
+
+
 def publication_due(row: dict[str, Any], version: str, now: datetime) -> bool:
     if row.get("status") != "completed" or not version:
         return False

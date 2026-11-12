@@ -41,14 +41,32 @@ def validate_audio(path: Path, expected: float | None = None, words: int = 0) ->
     return seconds
 
 
+def srt_stamp(seconds: float) -> str:
+    millis = round(max(0, seconds) * 1000)
+    return f"{millis // 3600000:02d}:{millis // 60000 % 60:02d}:{millis // 1000 % 60:02d},{millis % 1000:03d}"
+
+
 def write_srt(cues: list[tuple[float, float, str]], path: Path) -> None:
-    def stamp(seconds: float) -> str:
-        millis = round(max(0, seconds) * 1000)
-        return f"{millis // 3600000:02d}:{millis // 60000 % 60:02d}:{millis // 1000 % 60:02d},{millis % 1000:03d}"
     lines = []
     for i, (start, end, text) in enumerate(cues, 1):
-        lines += [str(i), f"{stamp(start)} --> {stamp(max(start + .08, end))}", text.strip(), ""]
+        lines += [str(i), f"{srt_stamp(start)} --> {srt_stamp(max(start + .08, end))}", text.strip(), ""]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Path:
+    def seconds(stamp: str) -> float:
+        hours, minutes, seconds, millis = map(int, re.split("[:,]", stamp))
+        return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+    def retime(match: re.Match) -> str:
+        start = min(seconds(match[1]) / tempo, duration - .001)
+        end = min(max(start + .001, seconds(match[2]) / tempo), duration)
+        return f"{srt_stamp(start)} --> {srt_stamp(end)}"
+
+    stamp = r"\d{2}:\d{2}:\d{2},\d{3}"
+    target.write_text(re.sub(rf"^({stamp}) --> ({stamp})$", retime, source.read_text(encoding="utf-8"),
+                             flags=re.MULTILINE), encoding="utf-8")
+    return target
 
 
 async def synthesize(text: str, path: Path) -> list[tuple[float, float, str]]:

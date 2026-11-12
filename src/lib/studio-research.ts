@@ -251,7 +251,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     const raw = await modelJson(prompt + correction, Math.max(3200, Math.ceil(duration * 18)), duration > 360 ? 36000 : 24000);
     prior = raw;
     let checkedClaims = false;
-    const draft = normalizeDraft({ ...raw, format, duration_seconds: duration, sources: sourceList(evidence) });
+    const draft = { ...normalizeDraft({ ...raw, sources: sourceList(evidence) }), format, duration_seconds: duration };
     try {
       if (!text(raw.title) || draft.scenes.length < 3 || draft.scenes.length > 60) throw new Error("The script has an invalid title or scene count.");
       if (AUTOPICK.test(brief) && recent.some((title) => title.trim().toLowerCase() === draft.title.trim().toLowerCase())) {

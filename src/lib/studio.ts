@@ -85,7 +85,8 @@ export function normalizeDraft(value: unknown): Draft {
   let rawScenes = outer.scenes;
   if (typeof rawScenes === "string") { try { rawScenes = JSON.parse(rawScenes) as unknown; } catch { rawScenes = undefined; } }
   const firstRaw = Array.isArray(rawScenes) ? objectOf(rawScenes[0]) : {};
-  const source = { ...objectOf(firstRaw._studio), ...metadata, ...packed, ...Object.fromEntries(Object.entries(outer).filter(([,v]) => v != null && v !== "")) };
+  const savedSettings = objectOf(firstRaw._studio);
+  const source = { ...savedSettings, ...metadata, ...packed, ...Object.fromEntries(Object.entries(outer).filter(([,v]) => v != null && v !== "")) };
   const nested = objectOf(rawScenes || source.scenes);
   const entries = Array.isArray(rawScenes) ? rawScenes : Array.isArray(source.scenes) ? source.scenes : Array.isArray(nested.scenes) ? nested.scenes : Array.isArray(outer.script) ? outer.script : [];
   const scenes: Scene[] = entries.map((raw: unknown, index: number) => {
@@ -96,9 +97,11 @@ export function normalizeDraft(value: unknown): Draft {
       source_ids: Array.isArray(r.source_ids) ? [...new Set(r.source_ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))].slice(0, 12) : [] };
   });
   const first = entries.length > 0 ? objectOf(entries[0]) : {};
-  const ratio = source.aspect_ratio || source.aspectRatio || source.format || nested.aspect_ratio || nested.format || first.format;
+  const ratio = [savedSettings.format, savedSettings.aspect_ratio, source.format, source.aspect_ratio,
+    source.aspectRatio, nested.format, nested.aspect_ratio, first.format].find((candidate) => candidate === "9:16" || candidate === "16:9");
   const minutes = Number(source.durationMinutes);
-  const duration = Number(source.duration_seconds || source.duration || nested.duration_seconds || nested.duration || (minutes > 0 ? minutes * 60 : 0));
+  const duration = [savedSettings.duration_seconds, savedSettings.duration, source.duration_seconds,
+    source.duration, nested.duration_seconds, nested.duration, minutes * 60].map(Number).find((candidate) => Number.isFinite(candidate) && candidate > 0);
   const sources = (Array.isArray(source.sources) ? source.sources : []).flatMap((item) => {
     const raw = objectOf(item);
     const url = stringOf(raw.url);
@@ -109,7 +112,7 @@ export function normalizeDraft(value: unknown): Draft {
   return { title: stringOf(source.title, "Untitled production"), description: stringOf(source.description || nested.description),
     tags: (Array.isArray(source.tags) ? source.tags : Array.isArray(nested.tags) ? nested.tags : stringOf(source.tags).split(",")).filter((t: unknown): t is string => typeof t === "string" && !!t.trim()),
     format: ratio === "9:16" ? "9:16" : "16:9",
-    duration_seconds: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 180, scenes, sources,
+    duration_seconds: Math.round(duration ?? 180), scenes, sources,
     thumbnail_title: stringOf(source.thumbnail_title || nested.thumbnail_title || source.thumbnailTitle || source.title, "New story") };
 }
 export function normalizeVideo(raw: unknown): StudioVideo {
@@ -132,7 +135,8 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     const { scene_number, start } = objectOf(entry);
     return Number.isInteger(scene_number) && typeof start === "number" && start >= 0 ? [{ scene_number: Number(scene_number), start }] : [];
   }).filter((entry, i, items) => i === 0 || items[i - 1].scene_number !== entry.scene_number) : [];
-  return { ...draft, revision: revisionDetails, scene_times: sceneTimes, id: stringOf(meta.id), status: stringOf(meta.status, "pending").toLowerCase(),
+  const format = meta.actual_format === "9:16" || meta.actual_format === "16:9" ? meta.actual_format : draft.format;
+  return { ...draft, format, revision: revisionDetails, scene_times: sceneTimes, id: stringOf(meta.id), status: stringOf(meta.status, "pending").toLowerCase(),
     video_url: meta.preview_expired_at ? "" : stringOf(meta.video_url || meta.storage_url),
     youtube_url: stringOf(meta.youtube_url) || (youtubeId ? "https://www.youtube.com/watch?v=" + encodeURIComponent(youtubeId) : ""),
     youtube_id: youtubeId, created_at: stringOf(meta.created_at),

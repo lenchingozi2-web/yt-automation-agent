@@ -14,9 +14,10 @@ from pathlib import Path
 
 from supabase import create_client
 from studio_maintenance import metadata
+from studio_media import verify_thumbnail
 from studio_publish import has_approval
 from studio_retry import TemporaryRenderError
-from worker import ROOT, fetch_broll, process, render_job
+from worker import ROOT, fetch_broll, process, render_job, verify_render_geometry
 # Verify multi-scene neural narration, montage, final audio and real storage.
 
 
@@ -39,7 +40,7 @@ def main() -> int:
     draft = [{
         "scene_number": 1, "narration": "This is a short system verification video for Studio.",
         "search_queries": ["ocean waves"], "format": "16:9",
-        "_studio": {"aspect_ratio": "16:9", "thumbnail_title": "STUDIO VIDEO TEST", "duration_seconds": 8},
+        "_studio": {"aspect_ratio": "16:9", "thumbnail_title": "STUDIO VIDEO TEST", "duration_seconds": 10},
     }, {
         "scene_number": 2, "narration": "The second scene checks that narration continues after the video cut.",
         "search_queries": ["forest", "nature"], "format": "16:9",
@@ -71,7 +72,7 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
-        assert stored.get("render_version") == "studio-v6"
+        assert stored.get("render_version") == "studio-v7"
         assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
         from studio_audio import validate_audio
         for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
@@ -81,6 +82,24 @@ def main() -> int:
         jpg = client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(video_id + ".jpg")
         assert len(mp4) > 10000 and b"ftyp" in mp4[:64], "MP4 not playable"
         assert jpg[:2] == bytes.fromhex("ffd8"), "invalid JPEG thumbnail"
+        for ratio, target, size in [("16:9", 10, (1920, 1080)), ("9:16", 10, (1080, 1920))]:
+            render_id = video_id
+            if ratio == "9:16":
+                portrait_draft = deepcopy(draft)
+                portrait_draft[0]["_studio"]["aspect_ratio"] = ratio
+                portrait_draft[0]["_studio"]["duration_seconds"] = target
+                portrait = client.table("videos").insert({**base, **({"user_id": row["user_id"]} if row.get("user_id") else {}),
+                                                            "scenes": portrait_draft}).execute().data[0]
+                render_id = str(portrait["id"])
+                disposable_ids.append(render_id)
+                process(portrait, client)
+            path = ROOT / render_id / "preview_from_storage.mp4"
+            path.write_bytes(client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(render_id + ".mp4"))
+            poster = path.with_suffix(".jpg")
+            poster.write_bytes(client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(render_id + ".jpg"))
+            verify_thumbnail(poster, ratio)
+            measured_ratio, measured_seconds = verify_render_geometry(path, size, target)
+            print(f"PASS: Stored {measured_ratio} MP4, {size[0]}×{size[1]}, {measured_seconds:.3f}s, and matching thumbnail.")
         revised_draft = deepcopy(draft)
         revised_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
                                                      "mode": "audio", "original_media": True}

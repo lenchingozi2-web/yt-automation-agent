@@ -14,7 +14,7 @@ on:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_media.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '2-57/5 * * * *'
 permissions:
@@ -44,7 +44,7 @@ jobs:
           import os
           from datetime import datetime, timezone
           from urllib.request import Request, urlopen
-          from studio_publish import credential_version, publication_due
+          from studio_publish import credential_version, publication_due, thumbnail_due
 
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
@@ -62,7 +62,7 @@ jobs:
                   if not work and version:
                       now = datetime.now(timezone.utc)
                       completed = read("select=*&status=eq.completed&order=created_at.desc&limit=100")
-                      work = any(publication_due(row, version, now) for row in completed)
+                      work = any(publication_due(row, version, now) or thumbnail_due(row, version, now) for row in completed)
               except Exception as error:
                   print("Queue probe unavailable; running worker:", type(error).__name__)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -87,7 +87,7 @@ jobs:
         if: steps.queue.outputs.work == 'true'
         run: pip install -r requirements.txt
       - name: Drain queued videos and retry pending uploads
-        if: steps.queue.outputs.work == 'true'
+        if: steps.queue.outputs.work == 'true' && !((github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '')
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
