@@ -1,10 +1,13 @@
 import copy
+import json
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
+from google.genai.errors import ClientError
 
-from research_fetcher import Source, search, validate_batch, write_briefing
+from research_fetcher import Source, ask, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -39,6 +42,18 @@ class ResearchBriefingTest(unittest.TestCase):
 
         with httpx.Client(transport=httpx.MockTransport(respond)) as client:
             self.assertEqual(search(client, "malaria", 1, newest=True)[0].publisher, "Example Journal")
+
+    @patch.dict(os.environ, {"GROQ_API_KEY": "test", "GEMINI_RESEARCH_MODEL": ""})
+    @patch("research_fetcher.httpx.post")
+    def test_model_unavailability_uses_fallback_with_same_evidence(self, post):
+        gemini = Mock()
+        gemini.models.generate_content.side_effect = ClientError(404, {"error": {"message": "Unavailable"}})
+        payload = {"reports": [{"pmid": "123"}]}
+        content = json.dumps({"items": [{"pmid": "123"}]})
+        post.return_value = httpx.Response(200, json={"choices": [{"message": {"content": content}}]},
+                                           request=httpx.Request("POST", "https://example.org"))
+        self.assertEqual(ask(gemini, "Select a report.", payload), [{"pmid": "123"}])
+        self.assertIn(json.dumps(payload), post.call_args.kwargs["json"]["messages"][0]["content"])
 
     def test_rejects_invented_url_duplicate_lead_and_copied_phrasing(self):
         for key, value in (

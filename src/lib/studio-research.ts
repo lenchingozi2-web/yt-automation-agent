@@ -172,7 +172,7 @@ async function briefingEvidence(briefing: BriefingEvidence): Promise<Evidence[]>
     const record = response.resultList?.result?.find((hit) => text(hit.pmid || hit.id) === id);
     const title = clean(record?.title, 220);
     const abstract = clean(record?.abstractText, 8000);
-    const publisher = clean(record?.journalTitle, 120);
+    const publisher = clean(record?.journalTitle || object(object(record?.journalInfo).journal).title, 120);
     if (!title || !publisher || abstract.length < 200) throw new Error("A briefing source could not be verified. Try again later.");
     const excerpt = abstract.length <= 2200 ? abstract : abstract.slice(0, 1100) + " […] " + abstract.slice(-1100);
     return { id: index + 1, title, url: briefing.references[index], publisher, year: text(record?.pubYear), text: excerpt };

@@ -145,7 +145,7 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
       lookups++;
       assert.match(new URL(input).searchParams.get("query") || "", /EXT_ID:901 OR EXT_ID:902/);
       return Response.json({ resultList: { result: ["902", "901"].map((pmid) => ({ pmid, title: `Report ${pmid}`,
-        journalTitle: "Example Journal", abstractText: "Source evidence. ".repeat(18) })) } });
+        journalInfo: { journal: { title: "Example Journal" } }, abstractText: "Source evidence. ".repeat(18) })) } });
     }
     const instruction = JSON.parse(String(init?.body)).contents[0].parts[0].text as string;
     assert.ok(!instruction.startsWith("Plan research"));
