@@ -135,7 +135,8 @@ class MediaRegression(unittest.TestCase):
             for number, count in enumerate(frames):
                 clip = directory / f'clip{number}.mp4'
                 ffmpeg('-f', 'lavfi', '-i', 'color=blue:s=320x180:r=30', '-frames:v', count,
-                       '-an', '-c:v', 'libx264', '-video_track_timescale', '90000', clip)
+                       '-an', '-c:v', 'libx264', '-colorspace', ('bt709' if number % 2 else 'bt470bg'),
+                       '-video_track_timescale', '90000', clip)
                 ffmpeg('-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
                        '-t', f'{count / 30:.6f}', '-ac', '2', clip.with_suffix('.wav'))
                 clips.append(clip)

@@ -268,8 +268,18 @@ def stitch(rendered: list[Path], directory: Path) -> Path:
             raise
         # Mixed encoder timestamps can cross a cut. Rebuild the picture timestamps
         # from frame order while retaining the separate, sample-accurate narration.
-        print("[stitch] rebuilding video timestamps at scene cuts", flush=True)
-        run([*inputs, "-vf", "setpts=N/(30*TB)", "-fps_mode", "passthrough",
+        print("[stitch] rebuilding video timestamps from independent scene streams", flush=True)
+        independent = ["ffmpeg", "-y", "-v", "error", "-xerror"]
+        filters = []
+        for index, (clip, length) in enumerate(zip(rendered, lengths)):
+            independent += ["-threads", "1", "-i", str(clip)]
+            filters.append(f"[{index}:v:0]fps=30,tpad=stop_mode=clone:stop_duration=0.2,"
+                           f"trim=end_frame={round(length * 30)},setpts=N/(30*TB),"
+                           f"setsar=1,format=yuv420p[v{index}]")
+        labels = "".join(f"[v{index}]" for index in range(len(rendered)))
+        filters.append(labels + f"concat=n={len(rendered)}:v=1:a=0,setpts=N/(30*TB)[picture]")
+        run([*independent, "-i", str(narration), "-filter_complex_threads", "1", "-filter_complex", ";".join(filters),
+             "-map", "[picture]", "-map", f"{len(rendered)}:a:0", "-r", "30", "-fps_mode", "cfr",
              *video_encoder(), *output], timeout=max(600, round(sum(lengths) * 5)))
     validate_audio(final, expected=sum(lengths))
     media = probe(final)
