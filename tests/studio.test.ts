@@ -1,6 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeVideo, normalizeDraft } from '../src/lib/studio.ts';
+import { canRetryYouTubeThumbnail, normalizeVideo, normalizeDraft, youtubeStudioUrl } from '../src/lib/studio.ts';
+
+test('only a confirmed upload with a saved failed thumbnail can retry', () => {
+  const video = normalizeVideo({ status: 'completed', scenes: [{ narration: 'A finished video.', _studio: {
+    youtube_id: 'AbCdEf12345', publish_status: 'uploaded', publish_approved_at: '2026-11-12T17:00:00Z',
+    thumbnail_publish_status: 'failed', thumbnail_url: 'https://example.org/thumbnail.jpg',
+  } }] });
+  assert.equal(youtubeStudioUrl(video), 'https://studio.youtube.com/video/AbCdEf12345/edit');
+  assert.equal(canRetryYouTubeThumbnail(video), true);
+  assert.equal(canRetryYouTubeThumbnail({ ...video, publish_status: 'pending' }), false);
+  assert.equal(canRetryYouTubeThumbnail({ ...video, youtube_id: 'https://example.org' }), false);
+  assert.equal(canRetryYouTubeThumbnail({ ...video, thumbnail_publish_status: 'uploaded' }), false);
+});
 
 test('actual production schema retains portrait, timing, tags and publish state through API/client normalization', () => {
   const row = { id: 'video', title: 'Test', status: 'completed', scenes: [

@@ -205,6 +205,14 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     });
   }
 
+  async function retryThumbnail(video: StudioVideo) {
+    return action(video.id, async () => {
+      const result = await post<RenderResult>("/api/render", { id: video.id, action: "retry_thumbnail" });
+      setFeedback({ kind: "success", message: result.message });
+      void refresh(true);
+    });
+  }
+
   return (
     <div className="studio">
       <a className="skip-link" href="#workspace">Skip to workspace</a>
@@ -253,7 +261,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} revise={revise} feedback={feedback} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
+          busy={busy} retry={retry} retryThumbnail={retryThumbnail} revise={revise} feedback={feedback} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>

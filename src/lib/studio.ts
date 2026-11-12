@@ -9,6 +9,15 @@ export function isBriefingSource(url: string) {
 export type RevisionMode = "audio" | "visual" | "rewrite";
 export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
 export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
+export function youtubeStudioUrl(video: StudioVideo) {
+  return /^[A-Za-z0-9_-]{11}$/.test(video.youtube_id ?? "") ? `https://studio.youtube.com/video/${video.youtube_id}/edit` : "";
+}
+
+export function canRetryYouTubeThumbnail(video: StudioVideo) {
+  return video.status === "completed" && video.publish_status === "uploaded" && !!video.publish_approved_at &&
+    video.thumbnail_publish_status === "failed" && !!video.thumbnail_url && !!youtubeStudioUrl(video);
+}
+
 export function toSafeMessage(input: unknown, fallback = "Action completed."): string {
   const seen = new WeakSet<object>();
   function read(value: unknown, depth: number): string {

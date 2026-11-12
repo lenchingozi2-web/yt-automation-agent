@@ -1,7 +1,7 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
-import { groupProductions, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
+import { canRetryYouTubeThumbnail, groupProductions, youtubeStudioUrl, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
 const FILTERS = ["All", "In progress", "Ready", "Needs attention"] as const;
@@ -24,7 +24,10 @@ function videoState(video: StudioVideo) {
   if (video.status === "failed") return { label: video.revision ? "Revision failed" : "Render failed", tone: "error", filter: "Needs attention" };
   if (video.status === "rendering") return { label: video.revision ? "Rendering revision" : "Rendering", tone: "active", filter: "In progress" };
   if (video.status === "pending") return { label: video.revision ? "Revision queued" : "Queued", tone: "muted", filter: "In progress" };
-  if (video.youtube_url) return { label: "Uploaded privately", tone: "success", filter: "Ready" };
+  if (video.youtube_url && video.thumbnail_publish_status === "failed") {
+    return { label: "Thumbnail needs attention", tone: "error", filter: "Needs attention" };
+  }
+  if (video.youtube_url) return { label: "Uploaded to YouTube", tone: "success", filter: "Ready" };
   if (video.video_url && !video.publish_approved_at) return { label: "Ready for review", tone: "success", filter: "Ready" };
   if (video.publish_status === "uploading") return { label: "Uploading to YouTube", tone: "active", filter: "In progress" };
   if (video.publish_status === "pending") return { label: "Upload queued", tone: "active", filter: "In progress" };
@@ -114,16 +117,18 @@ function RevisionForm({ video, busy, submit }: {
   </form>;
 }
 
-function Preview({ video, close, approve, revise, busy, feedback, latest, editable }: {
+function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback, latest, editable }: {
   video: StudioVideo; close: () => void; approve: () => Promise<boolean>;
-  revise: (input: RevisionInput) => Promise<boolean>; busy: boolean; feedback: Feedback | null;
+  revise: (input: RevisionInput) => Promise<boolean>; retryThumbnail: () => Promise<boolean>; busy: boolean; feedback: Feedback | null;
   latest: boolean; editable: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   const [watched, setWatched] = useState(false);
-  const [editing, setEditing] = useState(!video.video_url);
+  const [editing, setEditing] = useState(!video.video_url && !video.youtube_url);
   const [attempted, setAttempted] = useState(false);
   const player = useRef<HTMLVideoElement>(null);
+  const youtubeEdit = youtubeStudioUrl(video);
+  const thumbnailFailed = video.thumbnail_publish_status === "failed";
   const canApprove = !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
     ["auth_required", "retry", "upload_uncertain", "not_configured"].includes(video.publish_status ?? ""));
   async function send() {
@@ -132,7 +137,7 @@ function Preview({ video, close, approve, revise, busy, feedback, latest, editab
   }
   return <Modal titleId="preview-title" close={close} className="preview-dialog">
     <header className="dialog-header">
-      <div><p>{video.revision ? "Scene " + video.revision.scene_number + " revision" : video.video_url ? "Video preview" : "Revise render"}</p>
+      <div><p>{video.revision ? "Scene " + video.revision.scene_number + " revision" : video.video_url ? "Video preview" : "YouTube upload"}</p>
         <h2 id="preview-title">{video.title}</h2></div>
       <button className="icon-button" aria-label="Close preview" onClick={close}><X size={20} /></button>
     </header>
@@ -151,6 +156,19 @@ function Preview({ video, close, approve, revise, busy, feedback, latest, editab
         <summary>Research sources</summary>
         <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
       </details>}
+      {youtubeEdit && <section className="revision-panel" aria-label="YouTube upload details">
+        <p className="review-note">Studio uploads start private. Manage visibility in YouTube Studio.</p>
+        {thumbnailFailed && <div className="grid gap-2">
+          <p className="review-note">{video.progress_note || "YouTube did not accept the custom thumbnail."}</p>
+          {video.progress_note?.includes("HTTP 403") && <p className="review-note">
+            Custom thumbnails require channel verification. <a className="text-button" href="https://www.youtube.com/verify" target="_blank" rel="noreferrer">Verify on YouTube</a>
+          </p>}
+          {canRetryYouTubeThumbnail(video) && <button type="button" className="button button-secondary justify-self-start" disabled={busy}
+            onClick={async () => { setAttempted(true); if (await retryThumbnail()) close(); }}>
+            <RefreshCw size={16} /> Retry thumbnail
+          </button>}
+        </div>}
+      </section>}
       {editing && <div className="revision-panel">
         {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
         <p className="review-note">{video.scene_times?.length && video.video_url
@@ -168,7 +186,7 @@ function Preview({ video, close, approve, revise, busy, feedback, latest, editab
       </p>}
       <div className="preview-actions">
         {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
-        {video.youtube_url && <a className="button button-secondary" href={video.youtube_url} target="_blank" rel="noreferrer">Open YouTube <ArrowUpRight size={17} /></a>}
+        {youtubeEdit && <a className="button button-secondary" href={youtubeEdit} target="_blank" rel="noreferrer">YouTube Studio <ArrowUpRight size={17} /></a>}
         {editable && !!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
           setEditing(!editing); setAttempted(false); if (!editing) player.current?.pause();
         }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
@@ -180,9 +198,10 @@ function Preview({ video, close, approve, revise, busy, feedback, latest, editab
   </Modal>;
 }
 
-export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, feedback, reuse }: {
+export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, feedback, reuse }: {
   videos: StudioVideo[]; loading: boolean; error: string; refreshing: boolean; refresh: () => void;
   busy: string | null; retry: (video: StudioVideo, publish?: boolean) => Promise<boolean>; feedback: Feedback | null;
+  retryThumbnail: (video: StudioVideo) => Promise<boolean>;
   revise: (video: StudioVideo, input: RevisionInput) => Promise<boolean>;
   reuse: (video: StudioVideo) => void;
 }) {
@@ -194,7 +213,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
   const records = useMemo(() => groupProductions(videos).map((production) => ({ ...production, state: videoState(production.latest) })), [videos]);
   const filtered = records.filter(({ latest, state }) => (filter === "All" || state.filter === filter) && (!query || latest.title.toLowerCase().includes(query)));
   const previewGroup = records.find(({ versions }) => versions.some((version) => version.id === previewId));
-  const preview = previewGroup?.versions.find((version) => version.id === previewId && version.status === "completed" && version.video_url);
+  const preview = previewGroup?.versions.find((version) => version.id === previewId && version.status === "completed" && (version.video_url || version.youtube_url));
   const dateOf = (date?: string) => date && Number.isFinite(Date.parse(date)) ? dateFormat.format(new Date(date)) : "";
 
   return <section className="panel queue" id="queue" aria-labelledby="queue-title">
@@ -247,7 +266,9 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
               <Play size={15} /> {playable.id !== latest.id ? "Preview previous version"
                 : playable.youtube_url || playable.publish_approved_at ? "Preview" : latest.revision ? "Review revision" : "Review video"}
             </button>}
-            {latest.youtube_url && <a className="button button-secondary" href={latest.youtube_url} target="_blank" rel="noreferrer">YouTube <ArrowUpRight size={16} /></a>}
+            {latest.youtube_url && !playable && <button className="button button-secondary" onClick={() => setPreviewId(latest.id)}>
+              YouTube details
+            </button>}
             {latest.status === "failed" && <button className="button button-secondary" disabled={!!busy} onClick={() => void retry(latest)}>
               {busy === latest.id && <LoaderCircle className="spinner" size={16} />} Retry {latest.revision ? "revision" : "render"}
             </button>}
@@ -259,8 +280,9 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
               <span>{version.revision ? "Scene " + version.revision.scene_number + " revision" : "Original"}
                 {version.id === latest.id && " · Latest"} <small>{videoState(version).label}</small>
               </span>
-              {version.status === "completed" && version.video_url && <button type="button" className="text-button" onClick={() => setPreviewId(version.id)}>Preview</button>}
-              {version.youtube_url && <a className="text-button" href={version.youtube_url} target="_blank" rel="noreferrer">YouTube</a>}
+              {version.status === "completed" && (version.video_url || version.youtube_url) && <button type="button" className="text-button" onClick={() => setPreviewId(version.id)}>
+                {version.video_url ? "Preview" : "YouTube details"}
+              </button>}
             </li>)}</ul>
           </details>}
         </li>;
@@ -269,6 +291,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
     {preview && previewGroup && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
       latest={preview.id === previewGroup.latest.id}
       editable={preview.id === previewGroup.latest.id || (previewGroup.latest.status === "failed" && preview.id === previewGroup.playable?.id)}
-      approve={() => retry(preview, true)} revise={(input) => revise(preview, input)} busy={busy !== null} feedback={feedback} />}
+      approve={() => retry(preview, true)} revise={(input) => revise(preview, input)}
+      retryThumbnail={() => retryThumbnail(preview)} busy={busy !== null} feedback={feedback} />}
   </section>;
 }

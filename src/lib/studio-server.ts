@@ -126,14 +126,15 @@ export async function quotaOf(client: SupabaseClient) {
   return { used: count ?? 0, limit: STUDIO_DAILY_LIMIT, timezone: "Africa/Lagos" };
 }
 
-export async function dispatchStudioWorker() {
+export async function dispatchStudioWorker(thumbnailVideoId?: string) {
   const token = process.env.STUDIO_GITHUB_DISPATCH_TOKEN?.trim() || process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
   if (!token) return { dispatched: false, note: "The automatic render worker checks the queue on a schedule. Processing may be delayed." };
   try {
     const response = await fetch("https://api.github.com/repos/lenchingozi2-web/yt-automation-agent/actions/workflows/studio_worker.yml/dispatches", {
       method: "POST",
       headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: "main" }), cache: "no-store", signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ ref: "main", ...(thumbnailVideoId ? { inputs: { thumbnail_video_id: thumbnailVideoId } } : {}) }),
+      cache: "no-store", signal: AbortSignal.timeout(8000),
     });
     return response.ok ? { dispatched: true, note: "Worker dispatched." } :
       { dispatched: false, note: "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable (" + response.status + ")." };

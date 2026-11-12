@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { normalizeVideo } from "@/src/lib/studio";
+import { canRetryYouTubeThumbnail, normalizeVideo } from "@/src/lib/studio";
 import { dispatchStudioWorker, errorResponse, findVideo, jobIdOf, quotaOf, requestObject, safeInsertVideo, statusFor, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 
 export const dynamic = "force-dynamic";
@@ -10,11 +10,19 @@ export async function POST(request: Request) {
     const body = await requestObject(request);
     const publishing = body.action === "publish";
     let saved: Record<string, unknown>;
-    if (body.id !== undefined || publishing) {
+    if (body.id !== undefined || publishing || body.action === "retry_thumbnail") {
       const id = jobIdOf(body.id);
       if (!id) throw new StudioRequestError("Choose a valid video.", 400);
       const original = await findVideo(client, id);
       if (!original) throw new StudioRequestError("Video not found.", 404);
+      if (body.action === "retry_thumbnail") {
+        if (!canRetryYouTubeThumbnail(normalizeVideo(original))) {
+          throw new StudioRequestError("This upload has no saved thumbnail to retry.", 409);
+        }
+        const dispatch = await dispatchStudioWorker(id);
+        if (!dispatch.dispatched) throw new StudioRequestError("The thumbnail retry could not start. Try again or use YouTube Studio.", 503);
+        return NextResponse.json({ ok: true, message: "Thumbnail retry started." }, { headers: { "Cache-Control": "no-store" } });
+      }
       const scenes = Array.isArray(original.scenes) ? original.scenes.map((scene: Record<string, unknown>) => ({ ...scene })) : [];
       if (!scenes.length) throw new StudioRequestError("This video has no editable scenes.", 409);
       const first = scenes[0];
