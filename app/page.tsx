@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
-import { Film, HardDrive, LoaderCircle, Plus, Workflow } from "lucide-react";
+import Link from "next/link";
+import { Film, HardDrive, LoaderCircle, Newspaper, Plus, Workflow } from "lucide-react";
 import { getSupabaseClient } from "@/src/lib/supabase";
 import { normalizeDraft, normalizeVideo, toSafeMessage, type Draft, type StudioVideo } from "@/src/lib/studio";
 import { Brand, Notice, PolicyLinks, SignIn, type Feedback } from "./components/studio-shell";
@@ -212,6 +213,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <nav aria-label="Workspace">
             <a href="#compose">Create</a>
             <a href="#queue">Production queue</a>
+            <Link href="/briefing">Daily Briefing</Link>
           </nav>
           <div className="account">
             {install && <button className="button button-quiet install-button" onClick={install}>Install app</button>}
@@ -224,6 +226,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <div><h1>Production Studio</h1><p>Create videos, watch the finished MP4, and approve each YouTube upload.</p></div>
           <a className="button button-primary" href="#compose"><Plus size={17} /> New production</a>
         </section>
+        <Link className="button button-secondary self-start min-[651px]:hidden" href="/briefing"><Newspaper size={16} /> Daily Briefing</Link>
 
         <section className="metrics" aria-label="Studio overview">
           <article className="metric">

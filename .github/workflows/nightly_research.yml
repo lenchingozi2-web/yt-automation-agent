@@ -1,0 +1,32 @@
+name: LenxiQ Daily Briefing
+on:
+  schedule:
+    - cron: '0 3 * * *'
+    - cron: '27 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: studio-daily-briefing
+  cancel-in-progress: false
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-research.txt
+      - run: python -m pip install -r requirements-research.txt
+      - run: python -m unittest discover -s tests -p test_research_fetcher.py
+      - name: Verify and rotate the briefing
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
+          GEMINI_RESEARCH_MODEL: ${{ vars.GEMINI_RESEARCH_MODEL }}
+          RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
+        run: python research_fetcher.py

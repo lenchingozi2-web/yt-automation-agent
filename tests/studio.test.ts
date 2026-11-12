@@ -121,3 +121,43 @@ test("researched drafting revises an unsupported claim and keeps cited source re
   assert.equal(referenceReads, 2);
   assert.deepEqual(draft.sources?.map(({ id }) => id), [1]);
 });
+
+test("a briefing draft rechecks its selected reports and keeps all exact links in the description", async (context) => {
+  const { researchedDraft } = await import("../src/lib/studio-research.ts");
+  const original = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "fixture";
+  context.after(() => {
+    if (original === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = original;
+  });
+  const references = ["https://pubmed.ncbi.nlm.nih.gov/901/", "https://pubmed.ncbi.nlm.nih.gov/902/"];
+  const narration = [
+    "A team writing in the Example Journal looked at a hospital's new handover process. The team wanted to see where details went missing between shifts.",
+    "The case study describes how staff agreed on a simple list of items for handover. Each item was assigned a place in the conversation.",
+    "Here's what that can look like in practice. Imagine handing over a task to a colleague just as the next shift walks in the door.",
+    "A second paper examined checklists in another setting. The results describe each team separately, and neither paper says every hospital should follow the same steps.",
+  ];
+  const draftInput = { title: "The missing detail between shifts", description: "Two teams studied how staff hand over their work.",
+    scenes: narration.map((line, index) => ({ narration: line, search_queries: ["hospital staff handover"], source_ids: index < 2 ? [1] : index === 3 ? [2] : [] })) };
+  let lookups = 0;
+  context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
+    if (input.includes("europepmc")) {
+      lookups++;
+      assert.match(new URL(input).searchParams.get("query") || "", /EXT_ID:901 OR EXT_ID:902/);
+      return Response.json({ resultList: { result: ["902", "901"].map((pmid) => ({ pmid, title: `Report ${pmid}`,
+        journalTitle: "Example Journal", abstractText: "Source evidence. ".repeat(18) })) } });
+    }
+    const instruction = JSON.parse(String(init?.body)).contents[0].parts[0].text as string;
+    assert.ok(!instruction.startsWith("Plan research"));
+    const audit = instruction.startsWith("You are an independent fact checker");
+    assert.match(instruction, audit ? /voiceover must naturally name/ : /Naturally name a cited journal/);
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(audit ? { issues: [] } : draftInput) }] } }] });
+  });
+  const draft = await researchedDraft("Create a video from this briefing", 60, "9:16", [], {
+    title: "The missing detail between shifts", hook_summary: "Two papers about handover checks", references,
+  });
+  assert.equal(lookups, 1);
+  assert.match(draft.scenes[0].narration, /Example Journal/);
+  assert.deepEqual(draft.sources?.map((source) => source.url), references);
+  assert.ok(draft.description.endsWith(references.join("\n")));
+});
