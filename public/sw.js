@@ -1,21 +1,24 @@
-const CACHE = "studio-v4";
-self.addEventListener("install", event => { self.skipWaiting(); event.waitUntil(caches.open(CACHE)); });
-self.addEventListener("activate", event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim()));
+const CACHE = "studio-v5";
+const ASSETS = new Set(["/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/lenxiq.jpg"]);
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(self.skipWaiting());
 });
-self.addEventListener("fetch", event => {
+self.addEventListener("activate", (event) => {
+  event.waitUntil(caches.keys().then((keys) => Promise.all(
+    keys.filter((key) => key.startsWith("studio-") && key !== CACHE).map((key) => caches.delete(key)),
+  )).then(() => self.clients.claim()));
+});
+self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") return;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/auth/") || url.pathname.startsWith("/_next/")) return;
-  if (request.mode === "navigate" || request.destination === "document" || request.destination === "script") {
-    event.respondWith(fetch(request).catch(() => new Response("Network unavailable. Reconnect and refresh.", { status: 503 })));
-    return;
-  }
-  if (request.destination === "image" || request.destination === "style") {
-    event.respondWith(fetch(request).then(response => {
-      if (response.ok) { const copy = response.clone(); event.waitUntil(caches.open(CACHE).then(c => c.put(request, copy))); }
-      return response;
-    }).catch(() => caches.match(request)));
-  }
+  if (request.method !== "GET" || url.origin !== self.location.origin || !ASSETS.has(url.pathname)) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const existing = await cache.match(request);
+    if (existing) return existing;
+    const response = await fetch(request);
+    if (response.ok) await cache.put(request, response.clone());
+    return response;
+  })());
 });
