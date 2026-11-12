@@ -53,22 +53,21 @@ def clean(value: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", value).split())
 
 
-def search(client: httpx.Client, query: str, count: int, sort: str | None = None) -> list[Source]:
+def search(client: httpx.Client, query: str, count: int, newest: bool = False) -> list[Source]:
     params = {
-        "query": f'SRC:MED AND NOT PUB_TYPE:"retracted publication" AND ({query})',
+        "query": f'SRC:MED AND ({query}) NOT PUB_TYPE:"retracted publication"' + (" sort_date:y" if newest else ""),
         "resultType": "core",
         "format": "json",
         "pageSize": str(count),
     }
-    if sort:
-        params["sort"] = sort
     response = client.get(EUROPE_PMC, params=params)
     response.raise_for_status()
     sources = []
     for hit in response.json().get("resultList", {}).get("result", []):
         pmid = str(hit.get("pmid", ""))
         title = clean(hit.get("title") or "")
-        publisher = clean(hit.get("journalTitle") or "")
+        journal = (hit.get("journalInfo") or {}).get("journal") or {}
+        publisher = clean(hit.get("journalTitle") or journal.get("title") or "")
         abstract = clean(hit.get("abstractText") or "")
         published = hit.get("firstPublicationDate") or ""
         if re.fullmatch(r"[0-9]+", pmid) and title and publisher and published and len(abstract) >= 200:
@@ -76,15 +75,16 @@ def search(client: httpx.Client, query: str, count: int, sort: str | None = None
     return sources
 
 
-def search_safely(client: httpx.Client, query: str, count: int, sort: str | None = None) -> list[Source]:
+def search_safely(client: httpx.Client, query: str, count: int, newest: bool = False) -> list[Source]:
     for attempt in range(2):
         try:
-            return search(client, query, count, sort)
+            return search(client, query, count, newest)
         except (httpx.HTTPError, ValueError) as error:
             if attempt == 0:
                 time.sleep(2)
             else:
-                print(f"A source search was unavailable ({type(error).__name__}).", flush=True)
+                reason = f"HTTP {error.response.status_code}" if isinstance(error, httpx.HTTPStatusError) else type(error).__name__
+                print(f"A source search was unavailable ({reason}).", flush=True)
     return []
 
 
@@ -118,7 +118,7 @@ def ask(gemini: genai.Client, instruction: str, payload: object) -> list:
 def discover(client: httpx.Client, gemini: genai.Client, today: date, used: set[str]) -> dict[str, list[Source]]:
     window = f"FIRST_PDATE:[{today - timedelta(days=90)} TO {today}]"
     with ThreadPoolExecutor(max_workers=4) as pool:
-        searches = [pool.submit(search_safely, client, f"{window} AND ({query})", 18, "FIRST_PDATE desc") for query in SEARCHES]
+        searches = [pool.submit(search_safely, client, f"{window} AND ({query})", 18, True) for query in SEARCHES]
         candidates = {
             source.pmid: source for result in searches for source in result.result()
             if source.pmid not in used

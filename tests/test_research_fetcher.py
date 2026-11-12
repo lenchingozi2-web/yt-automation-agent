@@ -2,7 +2,9 @@ import copy
 import unittest
 from unittest.mock import patch
 
-from research_fetcher import Source, validate_batch, write_briefing
+import httpx
+
+from research_fetcher import Source, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -22,6 +24,21 @@ class ResearchBriefingTest(unittest.TestCase):
 
     def test_validated_story_preserves_exact_urls_and_order(self):
         self.assertEqual(validate_batch(self.stories, self.groups), self.stories)
+
+    def test_recent_search_uses_supported_sort_and_reads_core_journal_metadata(self):
+        record = {
+            "pmid": "42", "title": "A case study", "firstPublicationDate": "2026-11-11",
+            "abstractText": "The published abstract describes the case in detail. " * 5,
+            "journalInfo": {"journal": {"title": "Example Journal"}},
+        }
+
+        def respond(request):
+            self.assertTrue(request.url.params["query"].endswith(" sort_date:y"))
+            self.assertNotIn("sort", request.url.params)
+            return httpx.Response(200, json={"resultList": {"result": [record]}})
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            self.assertEqual(search(client, "malaria", 1, newest=True)[0].publisher, "Example Journal")
 
     def test_rejects_invented_url_duplicate_lead_and_copied_phrasing(self):
         for key, value in (
