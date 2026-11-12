@@ -5,9 +5,9 @@ on:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, studio_revision.py, studio_publish.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, .github/workflows/studio_worker.yml]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '2-57/5 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -39,15 +39,19 @@ jobs:
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
           work = True
           if url and key:
-              request = Request(url + "/rest/v1/videos?select=*&status=in.(pending,rendering,completed)&order=created_at.desc&limit=100",
-                                headers={"apikey": key, "Authorization": "Bearer " + key})
-              try:
+              headers = {"apikey": key, "Authorization": "Bearer " + key}
+              def read(query):
+                  request = Request(url + "/rest/v1/videos?" + query, headers=headers)
                   with urlopen(request, timeout=15) as response:
-                      rows = json.load(response)
+                      return json.load(response)
+
+              try:
+                  work = bool(read("select=id&status=in.(pending,rendering)&limit=1"))
                   version = credential_version()
-                  now = datetime.now(timezone.utc)
-                  work = any(row.get("status") in ("pending", "rendering") or publication_due(row, version, now)
-                             for row in rows)
+                  if not work and version:
+                      now = datetime.now(timezone.utc)
+                      completed = read("select=*&status=eq.completed&order=created_at.desc&limit=100")
+                      work = any(publication_due(row, version, now) for row in completed)
               except Exception as error:
                   print("Queue probe unavailable; running worker:", type(error).__name__)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from studio_audio import validate_audio
 from studio_maintenance import metadata
+from studio_retry import retry_io
 
 
 def footage_history(client, video_id):
@@ -52,8 +53,12 @@ def prepare_revision(client, video, details, directory: Path):
         footage.update(str(clip) for clip in entry.get("footage", []))
         previous_end = start + duration
     path = directory / "source_preview.mp4"
-    bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
-    path.write_bytes(bucket.download(parent_id + ".mp4"))
+    if not path.is_file():
+        bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
+        contents = retry_io(lambda: bucket.download(parent_id + ".mp4"), "download source preview")
+        temporary = path.with_suffix(".part")
+        temporary.write_bytes(contents)
+        temporary.replace(path)
     return path, by_scene, footage
 
 

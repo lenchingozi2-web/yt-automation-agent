@@ -127,7 +127,7 @@ export async function quotaOf(client: SupabaseClient) {
 }
 
 export async function dispatchStudioWorker() {
-  const token = process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
+  const token = process.env.STUDIO_GITHUB_DISPATCH_TOKEN?.trim() || process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
   if (!token) return { dispatched: false, note: "The automatic render worker checks the queue on a schedule. Processing may be delayed." };
   try {
     const response = await fetch("https://api.github.com/repos/lenchingozi2-web/yt-automation-agent/actions/workflows/studio_worker.yml/dispatches", {

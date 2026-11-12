@@ -20,7 +20,8 @@ export async function POST(request: Request) {
     if (existing) {
       const saved = normalizeVideo(existing);
       if (existing.user_id !== userId || saved.revision?.parent_id !== id) throw new StudioRequestError("Start a new revision.", 409);
-      return NextResponse.json({ ok: true, message: "This revision is already queued.", video: saved });
+      const dispatch = saved.status === "pending" ? await dispatchStudioWorker() : null;
+      return NextResponse.json({ ok: true, message: "This revision is already saved.", video: saved, note: dispatch?.note });
     }
     const draft = normalizeDraft(original);
     const direction = typeof body.direction === "string" ? body.direction.trim() : "";

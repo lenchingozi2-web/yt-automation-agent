@@ -15,7 +15,8 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from studio_publish import has_approval
-from worker import ROOT, fetch_broll, process
+from studio_retry import TemporaryRenderError
+from worker import ROOT, fetch_broll, process, render_job
 # Verify multi-scene neural narration, montage, final audio and real storage.
 
 
@@ -103,18 +104,23 @@ def main() -> int:
         visual_row = client.table("videos").insert({**payload, "scenes": visual_draft}).execute().data[0]
         visual_id = str(visual_row["id"])
         disposable_ids.append(visual_id)
+        def intermittent_footage(*args):
+            if footage.call_count == 1:
+                raise TemporaryRenderError("Injected provider timeout for the retry check.")
+            return fetch_broll(*args)
+
         with (
             patch("worker.make_audio", side_effect=AssertionError("Footage-only edits must reuse narration")),
-            patch("worker.fetch_broll", wraps=fetch_broll) as footage,
+            patch("worker.fetch_broll", side_effect=intermittent_footage) as footage,
         ):
-            process(visual_row, client)
-            assert footage.call_count and all(call.args[0]["logical_scene"] == 2 for call in footage.call_args_list)
+            assert render_job(visual_row, client), "worker did not recover the footage-only revision"
+            assert footage.call_count >= 2 and all(call.args[0]["logical_scene"] == 2 for call in footage.call_args_list)
         visual_meta = metadata(client.table("videos").select("*").eq("id", visual_id).single().execute().data)
         assert visual_meta["status"] == "completed" and visual_meta["publish_status"] == "awaiting_review"
         assert visual_meta["scene_timeline"][0] == stored["scene_timeline"][0]
         assert not has_approval(visual_meta) and not visual_meta.get("youtube_url")
         assert visual_meta["scene_timeline"][1]["footage"] != stored["scene_timeline"][1]["footage"]
-        print("PASS: Real footage-only edit changed scene 2 with zero narration generation and reused scene 1.")
+        print("PASS: Footage-only edit recovered within one worker run, changed scene 2, and reused the original narration and scene 1.")
         print("PASS: Real MP4, thumbnail and targeted voice repair saved and validated without YouTube approval.")
         return 0
     except Exception as error:

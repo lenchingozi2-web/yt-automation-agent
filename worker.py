@@ -28,8 +28,9 @@ from supabase import create_client
 from studio_media import create_thumbnail
 from studio_audio import make_audio, validate_audio, probe
 from studio_maintenance import metadata as stored_metadata
-from studio_publish import credential_version, has_approval, publication_due
+from studio_publish import credential_version, has_approval, parse_timestamp, publication_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
+from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
 
 load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -79,7 +80,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key:
-        return None
+        raise ValueError("Pixabay access is missing from the render worker.")
     portrait = str(scene.get("format", "16:9")) == "9:16"
     queries = list(scene.get("search_queries", []))
     context = str(scene.get("visual_context", scene.get("narration", ""))).lower()
@@ -89,20 +90,34 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
         queries = [q for q in queries if not re.search(r"nature|landscape|river|subscribe|green.?screen", q, re.I)]
     if not queries:
         queries = [str(scene.get("visual_context") or scene.get("narration") or "").strip()[:70]]
-    async with httpx.AsyncClient(timeout=22, follow_redirects=True) as client:
+    interrupted = False
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5), follow_redirects=True) as client:
         for query in queries:
             if query not in catalog:
-                response = await client.get("https://pixabay.com/api/videos/", params={
-                    "key": key, "q": query[:100], "video_type": "all",
-                    "safesearch": "true", "per_page": 25,
-                })
-                if response.status_code != 200:
+                try:
+                    response = await client.get("https://pixabay.com/api/videos/", params={
+                        "key": key, "q": query[:100], "video_type": "all",
+                        "safesearch": "true", "per_page": 25,
+                    })
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
+                        raise ValueError("Invalid Pixabay search response.")
+                    catalog[query] = payload["hits"]
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code in (401, 403):
+                        raise ValueError("Pixabay rejected the render worker’s credentials.") from None
+                    interrupted |= transient(error)
                     continue
-                catalog[query] = response.json().get("hits", [])
+                except (httpx.TransportError, ValueError):
+                    interrupted = True
+                    continue
             query_words = set(re.findall(r"[a-z]{3,}", query.lower()))
             preferred = []
             fallback = []
             for hit in catalog[query]:
+                if not isinstance(hit, dict):
+                    continue
                 tags = str(hit.get("tags", "")).lower()
                 if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|intro|outro", tags):
                     continue
@@ -145,35 +160,45 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     break
                 seen.add(clip_id)
                 count = 0
+                usable = False
                 try:
                     async with client.stream("GET", variant["url"]) as download:
-                        if download.status_code != 200:
-                            continue
+                        download.raise_for_status()
                         with target.open("wb") as handle:
                             async for chunk in download.aiter_bytes(chunk_size=262144):
                                 count += len(chunk)
                                 if count > 60_000_000:
                                     raise ValueError("Pixabay footage exceeds 60 MB safety limit")
                                 handle.write(chunk)
-                    if count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target):
+                    usable = count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target)
+                    if usable:
                         return clip_id
                 except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
-                    print(f"[b-roll] skipping unusable Pixabay clip: {str(error)[:180]}")
+                    interrupted |= transient(error)
+                    print(f"[b-roll] skipping unusable clip ({type(error).__name__})", flush=True)
                 finally:
-                    if target.exists() and target.stat().st_size <= 10000:
+                    if not usable:
                         target.unlink(missing_ok=True)
+    if interrupted:
+        raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
 
 
 def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: set[str], catalog: dict, shot: int):
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
-    # A previous attempt can have left assets for another revision or a partial download.
+    receipt = target.with_suffix(".pixabay")
+    if target.is_file() and receipt.is_file():
+        cached = receipt.read_text().strip()
+        if cached.isdigit() and cached not in used:
+            used.add(cached)
+            return target, cached
+    receipt.unlink(missing_ok=True)
     target.unlink(missing_ok=True)
     clip_id = asyncio.run(fetch_pixabay(scene, target, used, recent, catalog))
     if clip_id:
+        receipt.write_text(clip_id)
         used.add(clip_id)
         return target, clip_id
-    target.unlink(missing_ok=True)
     return None
 
 
@@ -482,8 +507,9 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, preserve_pictu
     filename = f"{video_id}.mp4"
     preview = storage_preview(path, timeline, preserve_picture=preserve_picture)
     validate_audio(preview, expected=ffprobe_duration(path))
-    client.storage.from_(bucket).upload(filename, preview.read_bytes(),
-        file_options={"content-type": "video/mp4", "upsert": "true"})
+    data = preview.read_bytes()
+    retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
+        file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
     return client.storage.from_(bucket).get_public_url(filename)
 
 
@@ -497,8 +523,9 @@ def upload_thumbnail(client, path: Path, video_id: str) -> str:
         else:
             raise
     name = f"{video_id}.jpg"
-    client.storage.from_(bucket).upload(name, path.read_bytes(),
-        file_options={"content-type": "image/jpeg", "upsert": "true"})
+    data = path.read_bytes()
+    retry_io(lambda: client.storage.from_(bucket).upload(name, data,
+        file_options={"content-type": "image/jpeg", "upsert": "true"}), "save thumbnail")
     return client.storage.from_(bucket).get_public_url(name)
 
 
@@ -559,20 +586,27 @@ def process(video: dict[str, Any], supabase) -> None:
         for shot in range(count):
             queries = scene["search_queries"]
             shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
-            match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
+            try:
+                match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
+            except TemporaryRenderError:
+                if not raw:
+                    raise
+                break
             if not match:
                 break
             source, clip_id = match
             raw.append(source)
             clip_ids.append(clip_id)
         if not raw:
-            raise RuntimeError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
+            raise ValueError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
         clip = render_scene(scene, raw, audio, srt, directory,
                             duration=float(entry["duration"]) if keep_audio else None,
                             normalized_audio=keep_audio, size=size, bitrate=bitrate)
-        for source in raw:
-            if source.name != "raw_01_00.mp4":
-                source.unlink(missing_ok=True)
+        if not parent:
+            for source in raw:
+                if source.name != "raw_01_00.mp4":
+                    source.unlink(missing_ok=True)
+                    source.with_suffix(".pixabay").unlink(missing_ok=True)
         rendered.append(clip)
         voice = clip.with_suffix(".wav")
         voices.append(voice)
@@ -615,16 +649,8 @@ def process(video: dict[str, Any], supabase) -> None:
         print(f"[thumbnail] {thumbnail_error}", flush=True)
 
     save_fields(supabase, video, progress_note="Saving MP4 preview")
-    storage_url, storage_error = "", ""
-    try:
-        storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
-    except Exception as error:
-        storage_error = f"MP4 preview storage: {str(error)[:250]}"
-        print(f"[storage] {storage_error}", flush=True)
-
-    if not storage_url:
-        raise RuntimeError("MP4 could not be saved: " + storage_error)
-    warnings = [x for x in (thumbnail_error, storage_error) if x]
+    storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
+    warnings = [thumbnail_error] if thumbnail_error else []
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url or None, actual_duration_seconds=ffprobe_duration(final),
                 completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v6", scene_timeline=timeline,
@@ -713,6 +739,33 @@ def publish_due(client, limit: int = 3) -> None:
             break
 
 
+
+def render_job(video, client) -> bool:
+    """Retry transient errors in the same runner and retain its downloaded assets."""
+    attempts = int(stored_metadata(video).get("render_attempts") or 0)
+    while attempts < 3:
+        attempts += 1
+        save_fields(client, video, render_attempts=attempts)
+        try:
+            process(video, client)
+            return True
+        except Exception as error:
+            if video.get("status") == "completed":
+                return True
+            if attempts < 3 and transient(error):
+                print(f"[retry] {video['id']}: {type(error).__name__}; retrying in this run", flush=True)
+                save_fields(client, video, progress_note="Retrying a temporary render error")
+                time.sleep(2 ** attempts)
+                continue
+            print(f"[failed] {video['id']}: {type(error).__name__}: {str(error)[:300]}", flush=True)
+            save_fields(client, video, status="failed", error_message=str(error)[:700],
+                        progress_note="Rendering failed; open the video to retry")
+            return False
+    save_fields(client, video, status="failed", error_message="The render exhausted its automatic retry attempts.",
+                progress_note="Rendering failed; open the video to retry")
+    return False
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -730,9 +783,13 @@ def main(argv: list[str] | None = None) -> None:
         return
     processed, failures = 0, 0
     while True:
-        result = supabase.table("videos").select("*").eq("status", "pending").order("created_at").limit(1).execute()
+        result = supabase.table("videos").select("*").eq("status", "pending").order("created_at").limit(10).execute()
+        candidates = result.data or []
+        oldest = parse_timestamp(candidates[0].get("created_at")) if candidates else None
+        if oldest and (datetime.now(timezone.utc) - oldest).total_seconds() < 600:
+            candidates.sort(key=lambda row: not bool(stored_metadata(row).get("revision")))
         video = None
-        for candidate in result.data or []:
+        for candidate in candidates:
             changed = supabase.table("videos").update({"status": "rendering"}).eq("id", candidate["id"]).eq("status", "pending").execute()
             if changed.data:
                 video = changed.data[0]
@@ -748,7 +805,8 @@ def main(argv: list[str] | None = None) -> None:
                     started = datetime.fromisoformat(str(data.get("worker_heartbeat_at") or data.get("render_started_at") or candidate["created_at"]).replace("Z", "+00:00"))
                     if started.tzinfo is None:
                         started = started.replace(tzinfo=timezone.utc)
-                    if (datetime.now(timezone.utc) - started).total_seconds() > 7200:
+                    stale_after = REVISION_STALE_SECONDS if data.get("revision") else RENDER_STALE_SECONDS
+                    if (datetime.now(timezone.utc) - started).total_seconds() > stale_after:
                         if int(data.get("render_attempts") or 0) >= 3:
                             save_fields(supabase, candidate, status="failed", error_message="Render interrupted repeatedly. Retry after checking the worker logs.")
                             continue
@@ -757,20 +815,8 @@ def main(argv: list[str] | None = None) -> None:
                 except (KeyError, TypeError, ValueError):
                     continue
         if video:
-            attempts = int(stored_metadata(video).get("render_attempts") or 0) + 1
-            save_fields(supabase, video, render_attempts=attempts)
-            try:
-                process(video, supabase)
-            except Exception as error:
+            if not render_job(video, supabase):
                 failures += 1
-                print(f"[failed] {video.get('id')}: {type(error).__name__}: {str(error)[:300]}", flush=True)
-                # Once the MP4 is saved, upload or thumbnail failures cannot requeue the render.
-                if video.get("status") == "completed":
-                    break
-                save_fields(supabase, video, status="pending" if attempts < 3 else "failed",
-                            error_message=str(error)[:700],
-                            progress_note="Automatic render retry scheduled" if attempts < 3 else "Rendering failed; open the scenes and retry")
-                break
             processed += 1
         elif args.once or args.drain:
             break

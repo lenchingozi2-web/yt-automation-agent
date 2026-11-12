@@ -16,6 +16,8 @@ from worker import render_scene, stitch, video_details, safe_publish_error, save
 from studio_publish import publication_due
 from studio_revision import stitch_revision
 
+from studio_retry import retry_io
+
 
 def ffmpeg(*args):
     subprocess.run(['ffmpeg', '-v', 'error', '-y', *map(str, args)], check=True, timeout=90)
@@ -26,6 +28,22 @@ def energy(path, hz, start=0, seconds=.5):
         '-t', str(seconds), '-map', '0:a:0', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-'])
     values = struct.unpack('<' + 'f' * (len(data) // 4), data)
     return abs(sum(v * complex(math.cos(2*math.pi*hz*i/8000), math.sin(2*math.pi*hz*i/8000)) for i,v in enumerate(values)))
+
+
+class ExternalRetryRegression(unittest.TestCase):
+    def test_storage_retry_recovers_from_service_error_and_skips_permanent_errors(self):
+        from unittest.mock import Mock
+        from storage3.exceptions import StorageApiError
+        outage = StorageApiError("temporary", "unavailable", 503)
+        service = Mock(side_effect=[outage, "saved"])
+        with patch("studio_retry.time.sleep"):
+            self.assertEqual(retry_io(service, "save preview"), "saved")
+        self.assertEqual(service.call_count, 2)
+
+        denied = Mock(side_effect=StorageApiError("denied", "forbidden", 403))
+        with self.assertRaises(StorageApiError):
+            retry_io(denied, "save preview")
+        self.assertEqual(denied.call_count, 1)
 
 
 class MediaRegression(unittest.TestCase):

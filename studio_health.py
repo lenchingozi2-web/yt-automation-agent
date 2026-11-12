@@ -1,9 +1,16 @@
 """Read-only GitHub Actions integration health check. Never prints credentials or rows."""
 from __future__ import annotations
 
+from collections import Counter
+from datetime import datetime, timezone
 import os
 import sys
+import httpx
 from supabase import create_client
+
+from studio_maintenance import metadata
+from studio_publish import has_approval, parse_timestamp
+from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, retry_io
 
 
 def main() -> int:
@@ -40,10 +47,26 @@ def main() -> int:
     if not ({"scenes", "script"} & set(available)):
         print("BLOCKED: videos table needs a scenes or script column to hold render data.")
         return 4
-    if not os.getenv("PIXABAY_API_KEY"):
-        print("WARNING: PIXABAY_API_KEY is missing in GitHub Actions (safe dark fallback only).")
+    healthy = True
+    pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
+    if pixabay_key:
+        try:
+            def check_pixabay():
+                response = httpx.get("https://pixabay.com/api/videos/", params={
+                    "key": pixabay_key, "q": "forest", "safesearch": "true", "per_page": 3,
+                }, timeout=10)
+                response.raise_for_status()
+                return response.json()["hits"]
+
+            if not retry_io(check_pixabay, "check Pixabay search"):
+                raise ValueError("empty search response")
+            print("OK: Pixabay video search returned footage.")
+        except Exception as error:
+            print("BLOCKED: Pixabay search failed.", type(error).__name__)
+            healthy = False
     else:
-        print("OK: Pixabay key configured (API access itself not tested).")
+        print("BLOCKED: PIXABAY_API_KEY is missing in GitHub Actions.")
+        healthy = False
     if not os.getenv("YOUTUBE_TOKEN_JSON"):
         print("NOTICE: YouTube automatic uploads disabled until YOUTUBE_TOKEN_JSON is configured.")
     else:
@@ -54,28 +77,47 @@ def main() -> int:
         except Exception as error:
             _, note = safe_publish_error(error)
             print("BLOCKED:", note, flush=True)
-    for name in ("renders", "thumbnails"):
+    for setting, default in (("SUPABASE_VIDEO_BUCKET", "renders"), ("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")):
+        bucket = os.getenv(setting, default)
         try:
-            client.storage.get_bucket(name)
-            print("OK: Storage bucket exists:", name)
-        except Exception:
-            print("NOTICE: Storage bucket not created yet:", name,
-                  "(worker will create it on its first successful upload).")
-    from studio_maintenance import metadata
-    rows = client.table("videos").select("*").order("created_at", desc=True).limit(100).execute().data or []
-    from collections import Counter
-    print("QUEUE COUNTS:", dict(Counter(r.get("status") for r in rows)), flush=True)
-    print("UPLOAD COUNTS:", dict(Counter(metadata(r).get("publish_status", "legacy") for r in rows)), flush=True)
-    import re
-    for row in rows:
-        if row.get("status") == "rendering":
-            state = metadata(row)
-            note = str(state.get("progress_note", ""))
-            stage = note if re.fullmatch(r"Rendering scene \d+ of \d+|Joining scenes|Saving MP4 preview|Starting narration and footage preparation", note) else "Processing"
-            print("ACTIVE RENDER:", stage, "heartbeat:", state.get("worker_heartbeat_at", "unknown"), flush=True)
-    print("V5 RENDERS:", sum(metadata(r).get("render_version") == "studio-v5" for r in rows), flush=True)
-    print("PASS: Read-only Studio database integration probe.")
-    return 0
+            retry_io(lambda: client.storage.get_bucket(bucket), f"check {default} storage")
+            print("OK: Storage bucket exists:", default)
+        except Exception as error:
+            print("BLOCKED: Storage bucket unavailable:", default, type(error).__name__)
+            healthy = False
+
+    active = client.table("videos").select("*").in_("status", ["pending", "rendering", "failed"]).order("created_at").limit(100).execute().data or []
+    completed = client.table("videos").select("*").eq("status", "completed").order("created_at", desc=True).limit(100).execute().data or []
+    print("QUEUE COUNTS:", dict(Counter(row.get("status") for row in [*active, *completed])), flush=True)
+    approved = [metadata(row) for row in completed if has_approval(metadata(row))]
+    print("APPROVED UPLOAD COUNTS:", dict(Counter(row.get("publish_status", "legacy") for row in approved)), flush=True)
+    now = datetime.now(timezone.utc)
+    for row in active:
+        data = metadata(row)
+        queued = parse_timestamp(row.get("created_at"))
+        if row["status"] == "pending" and queued:
+            print("PENDING AGE:", max(0, round((now - queued).total_seconds())), "seconds", flush=True)
+        if row["status"] == "rendering":
+            last = parse_timestamp(data.get("worker_heartbeat_at")) or parse_timestamp(data.get("render_started_at")) or queued
+            if last:
+                age = max(0, round((now - last).total_seconds()))
+                threshold = REVISION_STALE_SECONDS if data.get("revision") else RENDER_STALE_SECONDS
+                print("ACTIVE RENDER:", "stale" if age >= threshold else "working",
+                      "heartbeat", age, "seconds ago", flush=True)
+    for row in completed:
+        data = metadata(row)
+        if not data.get("revision"):
+            continue
+        queued = parse_timestamp(row.get("created_at"))
+        started = parse_timestamp(data.get("render_started_at"))
+        finished = parse_timestamp(data.get("completed_at"))
+        if queued and started and finished and queued <= started <= finished:
+            print("LATEST REVISION TIMING:", round((started - queued).total_seconds()), "seconds queued;",
+                  round((finished - started).total_seconds()), "seconds in worker", flush=True)
+            break
+    print("PASS: Studio database, storage and stock-footage probe." if healthy else "FAILED: Studio render dependencies require attention.")
+    return 0 if healthy else 5
+
 
 
 if __name__ == "__main__":
