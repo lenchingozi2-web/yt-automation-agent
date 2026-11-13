@@ -380,11 +380,12 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const batches = [];
       for (let index = 0; index < draft.scenes.length; index += 22) batches.push(draft.scenes.slice(index, index + 22));
       const spokenSource = (scene: Scene) => (scene.source_ids || []).some((id) => {
+        if (briefing && id !== 1) return false;
         const publisher = evidence.find((source) => source.id === id)?.publisher;
         const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
         return publisher && normalize(scene.narration).includes(normalize(publisher));
       });
-      const attribution = batches.findIndex((scenes) => scenes.some((scene) => spokenSource(scene) && (!briefing || scene.source_ids?.includes(1))));
+      const attribution = batches.findIndex((scenes) => scenes.some(spokenSource));
       if (attribution < 0) {
         auditedDraft = draft;
         const leadScene = draft.scenes.find((scene) => scene.source_ids?.includes(1)) ?? draft.scenes.find((scene) => scene.source_ids?.length);

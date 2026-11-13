@@ -45,7 +45,7 @@ jobs:
           RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
           RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py
-      - name: Verify a sourced 12-minute script without queueing a video
+      - name: Verify a sourced briefing script without queueing a video
         if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

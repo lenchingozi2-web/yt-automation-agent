@@ -40,7 +40,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id || (github.event_name == 'push' && contains(github.event.head_commit.message, '[recover-metanoticing]') && '0f03ccad-06b4-45d4-9255-7253d5b1eb18') || '' }}
+          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
           REDESIGN_PWS_THUMBNAIL: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '' }}
         run: |
@@ -101,7 +101,7 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id || (github.event_name == 'push' && contains(github.event.head_commit.message, '[recover-metanoticing]') && '0f03ccad-06b4-45d4-9255-7253d5b1eb18') || '' }}
+          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
         run: |
           if [ -n "$RETRY_NARRATION_ID" ]; then
