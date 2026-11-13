@@ -30,7 +30,7 @@ from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import create_thumbnail, verify_thumbnail
 from studio_thumbnail_art import make_prader_willi_thumbnail
-from studio_audio import make_audio, validate_audio, probe, retime_srt
+from studio_audio import BACKUP_VOICE, VOICE, NarrationUnavailable, make_audio, validate_audio, probe, retime_srt
 from studio_maintenance import metadata as stored_metadata
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
@@ -801,13 +801,33 @@ def process(video: dict[str, Any], supabase) -> None:
             available = max(0, 46_000_000 - parent.stat().st_size)
             bitrate = max(180, int(available * 8 / sum(item["duration"] for item in originals) / 1000))
         print(f"[revision] scene {target_scene}: {mode}; reusing {len(original_scenes) - 1} other scenes", flush=True)
+    narration_voice = VOICE
     if not parent or mode == "rewrite":
-        for index, scene in enumerate(selected):
-            save_fields(supabase, video, progress_note=f"Preparing narration {index + 1} of {len(selected)}")
-            audio, srt = make_audio(scene, directory)
-            audio_plan.append((audio, srt, ffprobe_duration(audio)))
+        parent_voice = None
+        if parent:
+            parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
+            parent_voice = stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None
+        narration_voice = parent_voice or VOICE
+        voices_to_try = [narration_voice] if parent else list(dict.fromkeys(filter(None, [VOICE, BACKUP_VOICE])))
+        for index, voice in enumerate(voices_to_try):
+            audio_plan = []
+            try:
+                for number, scene in enumerate(selected, 1):
+                    prefix = "Recovering narration" if index else "Preparing narration"
+                    save_fields(supabase, video, progress_note=f"{prefix} {number} of {len(selected)}")
+                    audio, srt = make_audio(scene, directory, voice) if voice != VOICE else make_audio(scene, directory)
+                    audio_plan.append((audio, srt, ffprobe_duration(audio)))
+                narration_voice = voice
+                break
+            except NarrationUnavailable:
+                if index == len(voices_to_try) - 1:
+                    raise
+                print("[narration] Switching the full render to the backup neural voice.", flush=True)
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
                                     ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None)
+    elif parent:
+        parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
+        narration_voice = (stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None) or VOICE
     recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
     catalog = {}
     rendered = []
@@ -819,7 +839,7 @@ def process(video: dict[str, Any], supabase) -> None:
         entry = originals[index] if index < len(originals) else None
         save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
         if parent and mode == "audio":
-            audio, _ = make_audio(scene, directory)
+            audio, _ = make_audio(scene, directory, narration_voice) if narration_voice != VOICE else make_audio(scene, directory)
             duration = float(entry["duration"])
             voice = directory / f"revised_audio_{number:02d}.wav"
             prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
@@ -927,7 +947,7 @@ def process(video: dict[str, Any], supabase) -> None:
     chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url, actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline, youtube_chapters=chapters,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline, youtube_chapters=chapters, narration_voice=narration_voice,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 and thumbnail ready for review.", error_message=None)

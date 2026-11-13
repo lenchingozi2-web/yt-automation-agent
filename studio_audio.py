@@ -14,6 +14,7 @@ import wave
 from studio_retry import TemporaryRenderError
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
+BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
 RATE = os.getenv("EDGE_TTS_RATE", "-4%")
 AUDIO_VERSION = "natural-phrases-v3"
 
@@ -72,10 +73,10 @@ def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Pat
     return target
 
 
-async def synthesize(text: str, path: Path) -> list[tuple[float, float, str]]:
+async def synthesize(text: str, path: Path, voice: str = VOICE) -> list[tuple[float, float, str]]:
     import edge_tts
     boundaries = []
-    communicate = edge_tts.Communicate(text, VOICE, rate=RATE, boundary="WordBoundary")
+    communicate = edge_tts.Communicate(text, voice, rate=RATE, boundary="WordBoundary", connect_timeout=12, receive_timeout=15)
     with path.open("wb") as handle:
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -125,8 +126,9 @@ def complete_boundaries(boundaries: list[tuple[float, float, str]], text: str, s
 
 
 
-def synthesize_part(text: str, mp3: Path, wav: Path) -> tuple[list, float]:
-    boundaries = asyncio.run(asyncio.wait_for(synthesize(text, mp3), 45))
+def synthesize_part(text: str, mp3: Path, wav: Path, voice: str) -> tuple[list, float]:
+    request = synthesize(text, mp3) if voice == VOICE else synthesize(text, mp3, voice)
+    boundaries = asyncio.run(asyncio.wait_for(request, 30))
     seconds = validate_audio(mp3, words=len(text.split()))
     complete_boundaries(boundaries, text, seconds)
     subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-y", "-i", str(mp3),
@@ -135,10 +137,10 @@ def synthesize_part(text: str, mp3: Path, wav: Path) -> tuple[list, float]:
     return boundaries, validate_audio(wav, expected=seconds, words=len(text.split()))
 
 
-def recover_in_phrases(text: str, mp3: Path, wav: Path) -> list:
+def recover_in_phrases(text: str, mp3: Path, wav: Path, voice: str) -> list:
     words = text.split()
     if len(words) < 6:
-        return synthesize_part(text, mp3, wav)[0]
+        return synthesize_part(text, mp3, wav, voice)[0]
     part = wav.with_suffix(".phrase.wav")
     boundaries = []
     elapsed = 0.0
@@ -151,7 +153,7 @@ def recover_in_phrases(text: str, mp3: Path, wav: Path) -> list:
                 phrase, words = " ".join(words[:end]), words[end:]
                 for attempt in range(3):
                     try:
-                        timings, _ = synthesize_part(phrase, mp3, part)
+                        timings, _ = synthesize_part(phrase, mp3, part, voice)
                         break
                     except Exception:
                         if attempt == 2:
@@ -166,7 +168,11 @@ def recover_in_phrases(text: str, mp3: Path, wav: Path) -> list:
     finally:
         part.unlink(missing_ok=True)
 
-def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
+class NarrationUnavailable(TemporaryRenderError):
+    """The selected neural voice failed to deliver validated audio."""
+
+
+def make_audio(scene: dict, directory: Path, voice: str = VOICE) -> tuple[Path, Path]:
     number = int(scene["scene_number"])
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
     if not text:
@@ -174,7 +180,7 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
     audio = directory / f"scene_{number:02d}.wav"
     srt = audio.with_suffix(".srt")
     manifest = audio.with_suffix(".audio.json")
-    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, VOICE, RATE, scene.get("format"), text]).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, voice, RATE, scene.get("format"), text]).encode()).hexdigest()
     if manifest.exists() and audio.exists() and srt.exists():
         try:
             if json.loads(manifest.read_text())["fingerprint"] == fingerprint:
@@ -187,9 +193,9 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
     for attempt in range(3):
         try:
             if attempt < 2:
-                boundaries, seconds = synthesize_part(text, temporary, decoded)
+                boundaries, seconds = synthesize_part(text, temporary, decoded, voice)
             else:
-                boundaries = recover_in_phrases(text, temporary, decoded)
+                boundaries = recover_in_phrases(text, temporary, decoded, voice)
                 seconds = validate_audio(decoded, words=len(text.split()))
                 complete_boundaries(boundaries, text, seconds)
                 if len(text.split()) >= 6:
@@ -197,7 +203,7 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
             write_srt(phrase_cues(boundaries, seconds, scene.get("format") == "9:16"), srt)
             decoded.replace(audio)
             temporary.unlink(missing_ok=True)
-            manifest.write_text(json.dumps({"fingerprint": fingerprint, "voice": VOICE,
+            manifest.write_text(json.dumps({"fingerprint": fingerprint, "voice": voice,
                                              "rate": RATE, "seconds": seconds}))
             return audio, srt
         except Exception as error:
@@ -206,6 +212,6 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
             reason = str(error) if isinstance(error, ValueError) else type(error).__name__
             print(f"[narration] scene {number}, attempt {attempt + 1}: {reason}", flush=True)
             if attempt == 2:
-                raise TemporaryRenderError(f"Neural narration unavailable for scene {number} after automatic retries.") from error
+                raise NarrationUnavailable(f"Neural narration unavailable for scene {number} after automatic retries.") from error
             time.sleep(2 ** attempt)
     raise RuntimeError("Narration was not generated")
