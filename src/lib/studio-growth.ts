@@ -53,8 +53,12 @@ export function teaserDraft(video: StudioVideo, firstScene: number): Draft | und
 }
 
 export function communityPostFor(video: StudioVideo) {
-  const hook = video.community_post || `What would you like me to explore next after watching “${video.title}”?`;
+  const hook = video.community_post || communityQuestion(video.title);
   return hook + (video.youtube_url ? "\n\n" + video.youtube_url : "");
+}
+
+export function communityQuestion(title: string) {
+  return `What would you like me to explore next after watching “${title}”?`;
 }
 
 export function parseLagosPublishTime(value: string) {

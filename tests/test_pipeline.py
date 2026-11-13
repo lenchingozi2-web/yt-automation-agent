@@ -222,14 +222,14 @@ class MediaRegression(unittest.TestCase):
             line = "These are the words in the first phrase. These are all the words in the second phrase."
             async def fake(text, path):
                 calls.append(text)
-                if text == line:
+                if text == line or text == "These are all the words in the second phrase.":
                     raise ValueError("fixture timing error")
                 ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=24000", "-t", "2.2", path)
                 return [(i * .2, (i + 1) * .2, word) for i, word in enumerate(text.split())]
             with patch("studio_audio.synthesize", fake), patch("studio_audio.time.sleep"):
                 audio, srt = make_audio({"scene_number": 9, "narration": line}, directory)
             self.assertEqual(calls[:2], [line, line])
-            self.assertEqual(" ".join(calls[2:]), line)
+            self.assertEqual(calls.count("These are all the words in the second phrase."), 2)
             self.assertGreater(validate_audio(audio), 4.3)
             self.assertIn("00:00:02,", srt.read_text())
             captions = " ".join(line for line in srt.read_text().splitlines() if line and "-->" not in line and not line.isdecimal())

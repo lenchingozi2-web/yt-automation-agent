@@ -139,31 +139,39 @@ def synthesize_part(text: str, mp3: Path, wav: Path, voice: str) -> tuple[list, 
 
 def recover_in_phrases(text: str, mp3: Path, wav: Path, voice: str) -> list:
     words = text.split()
-    if len(words) < 6:
-        return synthesize_part(text, mp3, wav, voice)[0]
     part = wav.with_suffix(".phrase.wav")
     boundaries = []
     elapsed = 0.0
     try:
         with wave.open(str(wav), "wb") as joined:
             joined.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
-            while words:
-                end = next((i for i in range(min(12, len(words)), 3, -1)
-                            if words[i - 1].endswith((".", ",", ";", "?", "!", ":"))), min(10, len(words)))
-                phrase, words = " ".join(words[:end]), words[end:]
-                for attempt in range(3):
+            def append_phrase(phrase: list[str]) -> None:
+                nonlocal elapsed
+                for attempt in range(2):
                     try:
-                        timings, _ = synthesize_part(phrase, mp3, part, voice)
+                        timings, _ = synthesize_part(" ".join(phrase), mp3, part, voice)
                         break
                     except Exception:
-                        if attempt == 2:
+                        if attempt == 0:
+                            time.sleep(1)
+                            continue
+                        if len(phrase) == 1:
                             raise
-                        time.sleep(2 ** attempt)
+                        midpoint = len(phrase) // 2
+                        append_phrase(phrase[:midpoint])
+                        append_phrase(phrase[midpoint:])
+                        return
                 with wave.open(str(part), "rb") as audio:
                     frames = audio.getnframes()
                     joined.writeframes(audio.readframes(frames))
                 boundaries.extend((elapsed + start, elapsed + end, word) for start, end, word in timings)
                 elapsed += frames / 48000
+
+            while words:
+                end = next((i for i in range(min(12, len(words)), 3, -1)
+                            if words[i - 1].endswith((".", ",", ";", "?", "!", ":"))), min(10, len(words)))
+                append_phrase(words[:end])
+                words = words[end:]
         return boundaries
     finally:
         part.unlink(missing_ok=True)
@@ -177,10 +185,10 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE) -> tuple[Path, 
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
     if not text:
         raise ValueError(f"Scene {number} has no narration")
-    audio = directory / f"scene_{number:02d}.wav"
+    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, voice, RATE, scene.get("format"), text]).encode()).hexdigest()
+    audio = directory / f"scene_{number:02d}_{fingerprint[:16]}.wav"
     srt = audio.with_suffix(".srt")
     manifest = audio.with_suffix(".audio.json")
-    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, voice, RATE, scene.get("format"), text]).encode()).hexdigest()
     if manifest.exists() and audio.exists() and srt.exists():
         try:
             if json.loads(manifest.read_text())["fingerprint"] == fingerprint:

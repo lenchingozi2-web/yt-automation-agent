@@ -1,4 +1,4 @@
-import { addViewerPrompt } from "./studio-growth.ts";
+import { addViewerPrompt, communityQuestion } from "./studio-growth.ts";
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 
 type Json = Record<string, unknown>;
@@ -405,7 +405,8 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const sources = draft.sources?.filter((source) => source.id && (cited.has(source.id) || briefing?.references.includes(source.url))) ?? [];
       const references = sources.map((source) => [source.publisher, source.url].filter(Boolean).join(" — ")).join("\n");
       const description = references ? draft.description.slice(0, Math.max(0, Math.min(3400, 4700 - references.length))).trim() + "\n\nSources\n" + references : draft.description;
-      return addViewerPrompt({ ...draft, description, sources }, viewerPrompt);
+      return addViewerPrompt({ ...draft, description, sources,
+        community_post: draft.community_post || communityQuestion(draft.title) }, viewerPrompt);
     } catch (error) {
       if (error instanceof Error && error.message.includes("writing model is unavailable")) throw error;
       if (!checkedClaims) lastStage = "format";
