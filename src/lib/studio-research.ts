@@ -254,7 +254,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
       }
     }
   }
-  const count = Math.max(4, Math.min(60, Math.ceil(duration / 12)));
+  const count = Math.max(4, Math.min(60, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
   const totalTarget = Math.round(duration * 2.25);
   const perScene = Math.round(totalTarget / count);
   const lower = Math.max(14, perScene - 3);
@@ -278,16 +278,36 @@ export async function researchedDraft(brief: string, duration: number, format: D
     `The video is ${duration} seconds and ${format}. Expand short scenes with a concrete example or a clearer explanation. Do not use markdown or speaker labels.`,
     JSON.stringify({ brief, angle, recent, evidence, briefing }),
   ].join("\n");
+  const writeDraft = async (correction: string) => {
+    if (duration < 300) return await modelJson(prompt + correction, Math.max(3200, Math.ceil(duration * 18)), 24000);
+    const first = Math.ceil(count / 3);
+    const second = Math.ceil((count - first) / 2);
+    const chapters = [
+      { count: first, purpose: "Introduce the central question, explain the lead report's background and methods in plain language, and name its publisher when describing the study. Supply title, description, tags and thumbnail_title for the whole video." },
+      { count: second, purpose: "Continue directly into the documented findings, their limitations and how the supporting evidence adds context. Open on the findings. Omit a fresh introduction and any closing call to action." },
+      { count: count - first - second, purpose: "Show viewers how to apply or think through the findings with several distinct clearly hypothetical examples. Give concrete steps, explain their limits and close the video. Avoid repeating the study summary." },
+    ];
+    const chapterPrompt = prompt.replace(/Write exactly \d+ scenes with .* in total\./, "");
+    const segments = await Promise.all(chapters.map((chapter, index) => modelJson([
+      chapterPrompt,
+      `Write only chapter ${index + 1} of one video. Write exactly ${chapter.count} scenes, with ${lower}–${upper} spoken words per scene. ${chapter.purpose}`,
+      "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
+      correction,
+    ].join("\n"), Math.max(3200, chapter.count * 250), 35000)));
+    return { ...segments[0], scenes: segments.flatMap((segment) => list(segment.scenes)).map((scene, i) => ({
+      ...object(scene), scene_number: i + 1,
+    })) };
+  };
   let problem = "";
   let prior: Json | undefined;
   let auditedDraft: Draft | undefined;
   for (let attempt = 0; attempt < (duration >= 300 || process.env.STUDIO_PREFER_GROQ === "1" ? 3 : 2); attempt++) {
     trace("Draft attempt " + (attempt + 1) + ".");
     const correction = problem ? "\nCorrect every issue from the previous draft. Remove unsupported specifics or replace them with directly supported wording. " +
-      JSON.stringify({ issues: problem, previous: prior }) : "";
+      JSON.stringify(duration >= 300 ? { issues: problem } : { issues: problem, previous: prior }) : "";
     let raw: Json;
     if (auditedDraft && problem && duration >= 300) {
-      const numbers = [...problem.matchAll(/\bscene\s+#?(\d{1,2})\b/gi)].map((match) => Number(match[1]));
+      const numbers = [...problem.matchAll(/\bscene\s+#?(\d{1,2})\b/g)].map((match) => Number(match[1]));
       const repair = await modelJson([
         EDITORIAL,
         "Fix every audit finding below. Return JSON with scenes (only changed scenes) and any changed title, thumbnail_title, or description.",
@@ -305,13 +325,14 @@ export async function researchedDraft(brief: string, duration: number, format: D
         thumbnail_title: text(repair.thumbnail_title) || auditedDraft.thumbnail_title,
         scenes: auditedDraft.scenes.map((scene) => changed.has(scene.scene_number) ? { ...scene, ...changed.get(scene.scene_number) } : scene) };
     } else {
-      raw = await modelJson(prompt + correction, Math.max(3200, Math.ceil(duration * 18)), duration > 360 ? 36000 : 24000);
+      raw = await writeDraft(correction);
     }
     auditedDraft = undefined;
     prior = raw;
     let checkedClaims = false;
     const draft = { ...normalizeDraft({ ...raw, sources: sourceList(evidence) }), format, duration_seconds: duration };
     try {
+      if (duration >= 300 && draft.scenes.length < count * .8) throw new Error("Write the requested number of scenes in each chapter.");
       if (!text(raw.title) || draft.scenes.length < 3 || draft.scenes.length > 60) throw new Error("The script has an invalid title or scene count.");
       if (AUTOPICK.test(brief) && recent.some((title) => title.trim().toLowerCase() === draft.title.trim().toLowerCase())) {
         throw new Error("Choose a title and angle distinct from the previous productions.");
@@ -321,8 +342,18 @@ export async function researchedDraft(brief: string, duration: number, format: D
         trace("Duration check received " + total + " words for " + duration + " seconds.");
         throw new Error("The previous draft has " + total + " spoken words. Rewrite it with about " + totalTarget + " spoken words.");
       }
-      const lines = draft.scenes.map((scene) => scene.narration.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim());
-      if (new Set(lines).size !== lines.length) throw new Error("The script contains repeated narration.");
+      const uniqueLines = new Map<string, number>();
+      const duplicates = draft.scenes.flatMap((scene) => {
+        const line = scene.narration.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+        const earlier = uniqueLines.get(line);
+        if (earlier !== undefined) return [`Scene ${scene.scene_number} repeats scene ${earlier}. Replace the later scene with a distinct example.`];
+        uniqueLines.set(line, scene.scene_number);
+        return [];
+      });
+      if (duplicates.length) {
+        auditedDraft = draft;
+        throw new Error(duplicates.join(" | "));
+      }
       draft.scenes.forEach((scene) => verifyScene(scene, evidence));
       if (!draft.scenes.some((scene) => scene.source_ids?.length)) throw new Error("The draft omitted its source citations.");
       if (briefing && !draft.scenes.some((scene) => scene.source_ids?.includes(1))) throw new Error("The draft omitted its lead report.");
