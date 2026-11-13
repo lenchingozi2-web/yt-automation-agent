@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]')
         with:
           node-version: '24'
       - uses: actions/setup-python@v5
@@ -46,7 +46,7 @@ jobs:
           RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py
       - name: Verify a sourced 12-minute script without queueing a video
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -54,6 +54,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           STUDIO_SCRIPT_TRACE: '1'
           STUDIO_PUBLIC_FIXTURE_TRACE: '1'
+          HEALTH_DRAFT_CHECK: ${{ contains(github.event.head_commit.message, '[verify-health-draft]') }}
         run: |
           python - <<'PYTHON'
           import json, os, subprocess
@@ -69,14 +70,16 @@ jobs:
           response.raise_for_status()
           ideas = response.json()
           assert {idea["topic_area"] for idea in ideas} == {"health", "education", "intelligence"}
-          lead = next(idea for idea in ideas if idea["topic_area"] == "education")
+          health_check = os.getenv("HEALTH_DRAFT_CHECK") == "true"
+          target = 300 if health_check else 720
+          lead = next(idea for idea in ideas if idea["topic_area"] == ("health" if health_check else "education"))
           print("Verified briefing date and all three topics:", lead["briefing_date"], flush=True)
           result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
-                                  input=json.dumps(dict(brief="Explain this study and apply it to learning.",
-                                      seconds=720, ratio="16:9", recent=[], briefing=lead)),
+                                  input=json.dumps(dict(brief="Explain the selected study using its exact findings and limitations.",
+                                      seconds=target, ratio="16:9", recent=[], briefing=lead)),
                                   text=True, stdout=subprocess.PIPE, timeout=290, check=True)
           draft = json.loads(result.stdout)
-          assert draft["duration_seconds"] == 720 and draft["format"] == "16:9"
+          assert draft["duration_seconds"] == target and draft["format"] == "16:9"
           assert all(link in draft["description"] for link in lead["references"])
           ctas = [index for index, scene in enumerate(draft["scenes"])
                   if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
@@ -84,6 +87,6 @@ jobs:
           assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
           assert draft.get("community_post")
           count = sum(len(scene["narration"].split()) for scene in draft["scenes"])
-          assert count >= 1188
-          print(f"PASS: 12-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words, one mid-video CTA, chapter markers and named sources.", flush=True)
+          assert count >= target * 1.65
+          print(f"PASS: {target // 60}-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words, one mid-video CTA, chapter markers and named sources.", flush=True)
           PYTHON

@@ -341,15 +341,17 @@ def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], rece
             pairs[pair] = (lead, source)
             options.append({"pair": pair, **source.evidence()})
         reports.append({"beat": lead.beat, "lead_report": lead.evidence(), "supporting_reports": options})
-    schema = {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object",
-              "properties": {"title": {"type": "string"}, "hook_summary": {"type": "string"},
-                             "pair": {"type": "integer", "minimum": 1, "maximum": len(pairs)}},
-              "required": ["title", "hook_summary", "pair"]}}
+    ordered_pairs = {beat: [number for number, (lead, _) in pairs.items() if lead.beat == beat] for beat in BEATS}
+    story_fields = {"title": {"type": "string"}, "hook_summary": {"type": "string"}}
+    schema = {"type": "array", "minItems": 3, "maxItems": 3, "prefixItems": [
+        {"type": "object", "properties": {**story_fields, "pair": {"type": "integer", "enum": allowed}},
+         "required": ["title", "hook_summary", "pair"]} for allowed in ordered_pairs.values()
+    ]}
     problem = ""
     for _ in range(3):
         raw = ask(gemini, """
 Create exactly three different, true short story pitches for a YouTube producer. Write in natural English.
-Choose one lead from each beat: health, education, intelligence. The lead record's beat is supplied.
+Return the stories in this exact order: health, education, intelligence. Each position may use only a pair listed for that beat.
 Use only the supplied source records. Lead with a concrete, documented observation or unexpected detail.
 Name the actual lead journal or institution in the summary next to the finding. Use the publication
 name supplied in the lead record. Do not read out URLs or use an unnamed phrase like "researchers say".
@@ -366,7 +368,7 @@ explicitly included in the summary. Do not imply contextual sources independentl
 Return a raw JSON array with exactly three objects, each with title (10–160 characters), hook_summary
 (80–700 characters, around 2–3 sentences), and pair (an integer copied from one of the supporting reports).
 Do not output URLs or additional fields.
-""", {"reports": reports, "previous_titles": recent_titles, "previous_check": problem}, schema=schema)
+""", {"reports": reports, "allowed_pairs": ordered_pairs, "previous_titles": recent_titles, "previous_check": problem}, schema=schema)
         try:
             stories = validate_batch(resolve_story_sources(raw, pairs), evidence, recent_titles)
         except ValueError as error:
