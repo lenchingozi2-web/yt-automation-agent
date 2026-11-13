@@ -216,7 +216,7 @@ async function audit(scenes: Scene[], evidence: Evidence[], framing?: Pick<Draft
     ...(requireAttribution ? ["The voiceover must naturally name at least one cited journal, institution or source by name. Flag copied sentences, invented dramatic details, unrelated citations and absent or inaccurate spoken attribution."] : []),
     ...(briefing && framing ? ["Confirm the framing accurately represents the selected lead report."] : []),
     'Return JSON {"issues":[]} only if all material claims pass; otherwise return concise strings with scene numbers and the unsupported claims. Do not rewrite.',
-    JSON.stringify({ scenes: scenes.map(({ scene_number, narration, source_ids }) => ({ scene_number, narration, source_ids })), evidence: evidence.filter((source) => cited.has(source.id || 0)), framing, briefing }),
+    JSON.stringify({ scenes: scenes.map(({ scene_number, narration, source_ids }) => ({ scene_number, narration, source_ids })), evidence: framing ? evidence : evidence.filter((source) => cited.has(source.id || 0)), framing, briefing }),
   ].join("\n"), scenes.length > 25 ? 3600 : 1700, scenes.length > 25 ? 32000 : 26000);
   if (!Array.isArray(result.issues) || result.issues.some((issue) => typeof issue !== "string")) {
     throw new Error("Studio could not complete the source check. Try again.");
@@ -280,11 +280,34 @@ export async function researchedDraft(brief: string, duration: number, format: D
   ].join("\n");
   let problem = "";
   let prior: Json | undefined;
-  for (let attempt = 0; attempt < (process.env.STUDIO_PREFER_GROQ === "1" ? 3 : 2); attempt++) {
+  let auditedDraft: Draft | undefined;
+  for (let attempt = 0; attempt < (duration >= 300 || process.env.STUDIO_PREFER_GROQ === "1" ? 3 : 2); attempt++) {
     trace("Draft attempt " + (attempt + 1) + ".");
     const correction = problem ? "\nCorrect every issue from the previous draft. Remove unsupported specifics or replace them with directly supported wording. " +
       JSON.stringify({ issues: problem, previous: prior }) : "";
-    const raw = await modelJson(prompt + correction, Math.max(3200, Math.ceil(duration * 18)), duration > 360 ? 36000 : 24000);
+    let raw: Json;
+    if (auditedDraft && problem && duration >= 300) {
+      const numbers = [...problem.matchAll(/\bscene\s+#?(\d{1,2})\b/gi)].map((match) => Number(match[1]));
+      const repair = await modelJson([
+        EDITORIAL,
+        "Fix every audit finding below. Return JSON with scenes (only changed scenes) and any changed title, thumbnail_title, or description.",
+        "Keep the rest of the script intact. For each changed scene keep its scene_number and about the same narration length. Return narration, search_queries and source_ids.",
+        "If a claim is unsupported, replace it with a clearly marked practical example or a transition. Keep attribution and do not introduce extra findings.",
+        JSON.stringify({ issues: problem, framing: { title: auditedDraft.title, description: auditedDraft.description, thumbnail_title: auditedDraft.thumbnail_title },
+          scenes: numbers.length ? auditedDraft.scenes.filter((scene) => numbers.includes(scene.scene_number)) : auditedDraft.scenes, evidence }),
+      ].join("\n"), 5500, 32000);
+      const changed = new Map(list(repair.scenes).map((scene) => {
+        const patch = object(scene);
+        return [Number(patch.scene_number), patch];
+      }));
+      raw = { ...auditedDraft,
+        title: text(repair.title) || auditedDraft.title, description: text(repair.description) || auditedDraft.description,
+        thumbnail_title: text(repair.thumbnail_title) || auditedDraft.thumbnail_title,
+        scenes: auditedDraft.scenes.map((scene) => changed.has(scene.scene_number) ? { ...scene, ...changed.get(scene.scene_number) } : scene) };
+    } else {
+      raw = await modelJson(prompt + correction, Math.max(3200, Math.ceil(duration * 18)), duration > 360 ? 36000 : 24000);
+    }
+    auditedDraft = undefined;
     prior = raw;
     let checkedClaims = false;
     const draft = { ...normalizeDraft({ ...raw, sources: sourceList(evidence) }), format, duration_seconds: duration };
@@ -313,11 +336,12 @@ export async function researchedDraft(brief: string, duration: number, format: D
         const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
         return publisher && normalize(scene.narration).includes(normalize(publisher));
       });
-      const attribution = batches.findIndex((scenes) => scenes.some(spokenSource));
-      if (attribution < 0) throw new Error("Name the supplied publisher exactly at least once in a scene that cites it.");
+      const attribution = batches.findIndex((scenes) => scenes.some((scene) => spokenSource(scene) && (!briefing || scene.source_ids?.includes(1))));
+      if (attribution < 0) throw new Error("Name the supplied publisher exactly at least once in a scene that cites it. For briefing stories, name the publisher of source 1 in a scene that cites source 1.");
       const issues = (await Promise.all(batches.map((scenes, index) => audit(scenes, evidence, index === attribution ? framing : undefined,
-        scenes.some((scene) => scene.source_ids?.includes(1)) ? briefing : undefined, index === attribution)))).flat();
+        index === attribution ? briefing : undefined, index === attribution)))).flat();
       if (issues.length) {
+        auditedDraft = draft;
         trace("The audit flagged " + issues.length + " claims.");
         throw new Error(issues.slice(0, 12).join(" | "));
       }

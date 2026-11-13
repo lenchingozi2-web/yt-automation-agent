@@ -6,7 +6,7 @@ on:
     - cron: '19 5 * * *'
   push:
     branches: [main]
-    paths: [research_fetcher.py, .github/workflows/nightly_research.yml]
+    paths: [research_fetcher.py, src/lib/studio-research.ts, .github/workflows/nightly_research.yml]
   workflow_dispatch:
     inputs:
       preview_only:
