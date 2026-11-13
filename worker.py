@@ -278,7 +278,8 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
             filters.append("atempo=0.5")
             tempo *= 2
         filters.append(f"atempo={tempo:.6f}")
-    filters += ["aresample=48000", f"apad=whole_dur={duration:.6f}", f"atrim=duration={duration:.6f}"]
+    samples = round(duration * 48000)
+    filters += ["aresample=48000", f"apad=whole_len={samples}", f"atrim=end_sample={samples}", "asetpts=N/SR/TB"]
     if normalize:
         filters += ["afade=t=in:d=0.015", f"afade=t=out:st={max(0, duration - .028):.6f}:d=0.028"]
     run(["ffmpeg", "-y", "-v", "error", "-xerror", "-i", str(audio), "-map", "0:a:0", "-af", ",".join(filters),
@@ -887,9 +888,7 @@ def process(video: dict[str, Any], supabase) -> None:
         rendered.append(clip)
         voice = clip.with_suffix(".wav")
         voices.append(voice)
-        with wave.open(str(voice), "rb") as pcm:
-            duration = pcm.getnframes() / pcm.getframerate()
-        replacement_timeline.append({"scene_number": logical, "duration": round(duration, 6),
+        replacement_timeline.append({"scene_number": logical, "duration": round(round(seconds * 30) / 30, 6),
                                      "captions": srt.read_text(encoding="utf-8"), "footage": clip_ids})
     save_fields(supabase, video, progress_note="Joining scenes")
     if parent:
@@ -1119,9 +1118,11 @@ def main(argv: list[str] | None = None) -> None:
         if row["status"] == "completed" and details.get("video_url"):
             print("[recovery] Saved preview is already complete.", flush=True)
             return
-        if (row["status"] != "failed" or has_approval(details)
-                or not str(details.get("error_message") or "").startswith("Neural narration unavailable")):
-            parser.error("Select an unapproved production with a narration render failure")
+        error_message = str(details.get("error_message") or "")
+        recoverable = (error_message.startswith("Neural narration unavailable")
+                       or error_message == "The saved scene timeline does not match the video duration.")
+        if row["status"] != "failed" or has_approval(details) or not recoverable:
+            parser.error("Select an unapproved production with a recoverable render failure")
         changed = supabase.table("videos").update({"status": "rendering"}).eq("id", row["id"]).eq("status", "failed").execute().data or []
         if not changed:
             parser.error("The render status changed")

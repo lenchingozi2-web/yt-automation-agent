@@ -10,11 +10,12 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import wave
 
 from googleapiclient.errors import HttpError
 from studio_audio import make_audio, phrase_cues, retime_srt, validate_audio, write_srt
 from studio_automation import generate_researched_draft
-from worker import render_scene, scene_durations, stitch, verify_render_geometry, video_details, safe_publish_error, save_fields, usable_footage, run
+from worker import prepare_scene_audio, render_scene, scene_durations, stitch, verify_render_geometry, video_details, safe_publish_error, save_fields, usable_footage, run
 from studio_publish import publication_due, thumbnail_due
 from studio_revision import stitch_revision
 
@@ -160,6 +161,15 @@ class MediaRegression(unittest.TestCase):
         self.assertAlmostEqual(sum(scene_durations([260, 265, 245], 720, approximate=True)), 770)
         self.assertAlmostEqual(sum(scene_durations([140, 150], 720, approximate=True)), 322.2333, places=3)
         self.assertAlmostEqual(sum(scene_durations([100, 98], 180, approximate=True, ceiling=180)), 180)
+
+    def test_scene_narration_has_exact_samples_at_fractional_frame_boundaries(self):
+        with TemporaryDirectory() as tmp:
+            source, output = Path(tmp) / "source.wav", Path(tmp) / "scene.wav"
+            ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "2.4", source)
+            for frames in (46, 53, 73):
+                prepare_scene_audio(source, output, frames / 30, tempo=1.25)
+                with wave.open(str(output), "rb") as pcm:
+                    self.assertEqual(pcm.getnframes(), frames * 1600)
 
     def test_narration_beats_stock_audio_and_survives_all_cuts(self):
         with TemporaryDirectory() as tmp:
