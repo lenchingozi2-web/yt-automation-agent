@@ -9,7 +9,7 @@ import httpx
 from supabase import create_client
 
 from studio_maintenance import metadata
-from studio_publish import has_approval, parse_timestamp
+from studio_publish import credential_version, has_approval, parse_timestamp, publication_due
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, retry_io
 
 
@@ -77,6 +77,7 @@ def main() -> int:
         except Exception as error:
             _, note = safe_publish_error(error)
             print("BLOCKED:", note, flush=True)
+            healthy = False
     for setting, default in (("SUPABASE_VIDEO_BUCKET", "renders"), ("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")):
         bucket = os.getenv(setting, default)
         try:
@@ -92,6 +93,13 @@ def main() -> int:
     approved = [metadata(row) for row in completed if has_approval(metadata(row))]
     print("APPROVED UPLOAD COUNTS:", dict(Counter(row.get("publish_status", "legacy") for row in approved)), flush=True)
     now = datetime.now(timezone.utc)
+    version = credential_version()
+    long_reviews = [row for row in completed if float(metadata(row).get("actual_duration_seconds") or 0) >= 600]
+    if long_reviews:
+        latest_long = metadata(long_reviews[0])
+        print("LATEST LONG RENDER:", round(float(latest_long["actual_duration_seconds"])),
+              "seconds; upload state:", latest_long.get("publish_status", "review pending"), flush=True)
+    print("APPROVED UPLOADS DUE:", sum(publication_due(row, version, now) for row in completed), flush=True)
     for row in active:
         data = metadata(row)
         queued = parse_timestamp(row.get("created_at"))
@@ -115,7 +123,7 @@ def main() -> int:
             print("LATEST REVISION TIMING:", round((started - queued).total_seconds()), "seconds queued;",
                   round((finished - started).total_seconds()), "seconds in worker", flush=True)
             break
-    print("PASS: Studio database, storage and stock-footage probe." if healthy else "FAILED: Studio render dependencies require attention.")
+    print("PASS: Studio database, storage, stock footage and configured YouTube authorization." if healthy else "FAILED: Studio render dependencies require attention.")
     return 0 if healthy else 5
 
 

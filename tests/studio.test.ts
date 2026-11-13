@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canRetryYouTubeThumbnail, durationFromBrief, normalizeVideo, normalizeDraft, youtubeStudioUrl } from '../src/lib/studio.ts';
+import { canRetryYouTubeThumbnail, durationFromBrief, normalizeVideo, normalizeDraft, youtubePublishAction, youtubeStudioUrl } from '../src/lib/studio.ts';
 
 test('saved settings beat database defaults and measured geometry describes the finished preview', () => {
   const row = { format: '16:9', duration_seconds: 180, scenes: [{ narration: 'Keep the selected settings.', _studio: {
@@ -195,4 +195,17 @@ test("duration stated in a video brief can override the untouched default", () =
   assert.equal(durationFromBrief("Generate a 10 minutes video on AI in education"), 600);
   assert.equal(durationFromBrief("Create a 12-minute video"), 720);
   assert.equal(durationFromBrief("Create a video about a 10-minute study break"), undefined);
+});
+
+
+test("the upload action is available for a saved MP4 and tracks approval, retries and uncertain uploads", () => {
+  const video = normalizeVideo({ id: "saved", status: "completed", video_url: "https://example.org/video.mp4" });
+  const approved = { ...video, publish_approved_at: "2026-11-13T08:00:00Z" };
+  assert.equal(youtubePublishAction(video), "approve");
+  assert.equal(youtubePublishAction({ ...approved, publish_status: "pending" }), undefined);
+  assert.equal(youtubePublishAction({ ...approved, publish_status: "uploading" }), undefined);
+  assert.equal(youtubePublishAction({ ...approved, publish_status: "failed" }), "retry");
+  assert.equal(youtubePublishAction({ ...approved, publish_status: "upload_uncertain" }), "recheck");
+  assert.equal(youtubePublishAction({ ...approved, youtube_id: "AbCdEf12345" }), undefined);
+  assert.equal(youtubePublishAction({ ...video, video_url: "" }), undefined);
 });

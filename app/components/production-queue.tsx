@@ -1,7 +1,7 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
-import { canRetryYouTubeThumbnail, groupProductions, youtubeStudioUrl, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
+import { canRetryYouTubeThumbnail, groupProductions, youtubePublishAction, youtubeStudioUrl, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
 const FILTERS = ["All", "In progress", "Ready", "Needs attention"] as const;
@@ -28,12 +28,14 @@ function videoState(video: StudioVideo) {
     return { label: "Thumbnail needs attention", tone: "error", filter: "Needs attention" };
   }
   if (video.youtube_url) return { label: "Uploaded to YouTube", tone: "success", filter: "Ready" };
-  if (video.video_url && !video.publish_approved_at) return { label: "Ready for review", tone: "success", filter: "Ready" };
+
   if (video.publish_status === "uploading") return { label: "Uploading to YouTube", tone: "active", filter: "In progress" };
   if (video.publish_status === "pending") return { label: "Upload queued", tone: "active", filter: "In progress" };
   if (video.publish_status === "upload_uncertain") return { label: "Check YouTube Studio", tone: "error", filter: "Needs attention" };
-  if (video.publish_status === "auth_required") return { label: "YouTube reconnect required", tone: "error", filter: "Needs attention" };
+  if (video.publish_status === "failed") return { label: "Upload needs attention", tone: "error", filter: "Needs attention" };
+  if (["auth_required", "not_configured"].includes(video.publish_status ?? "")) return { label: "YouTube reconnect required", tone: "error", filter: "Needs attention" };
   if (video.publish_status === "retry") return { label: "Upload retry scheduled", tone: "error", filter: "Needs attention" };
+  if (video.video_url && !video.publish_approved_at) return { label: "Ready for review", tone: "success", filter: "Ready" };
   return { label: "MP4 ready", tone: "success", filter: "Ready" };
 }
 
@@ -123,17 +125,19 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
   latest: boolean; editable: boolean;
 }) {
   const [failed, setFailed] = useState(false);
-  const [watched, setWatched] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [playerVersion, setPlayerVersion] = useState(0);
   const [editing, setEditing] = useState(!video.video_url && !video.youtube_url);
   const [attempted, setAttempted] = useState(false);
   const player = useRef<HTMLVideoElement>(null);
   const youtubeEdit = youtubeStudioUrl(video);
   const thumbnailFailed = video.thumbnail_publish_status === "failed";
-  const canApprove = !!video.video_url && !video.youtube_url && (!video.publish_approved_at ||
-    ["auth_required", "retry", "upload_uncertain", "not_configured"].includes(video.publish_status ?? ""));
+  const publishAction = youtubePublishAction(video);
+  const queued = !publishAction && ["pending", "uploading"].includes(video.publish_status ?? "");
+  const publishLabel = publishAction === "approve" ? "Approve & publish on YouTube" : "Retry YouTube upload";
   async function send() {
     setAttempted(true);
-    if (await approve()) close();
+    if (await approve()) setConfirming(false);
   }
   return <Modal titleId="preview-title" close={close} className="preview-dialog">
     <header className="dialog-header">
@@ -142,10 +146,13 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
       <button className="icon-button" aria-label="Close preview" onClick={close}><X size={20} /></button>
     </header>
     <div className="preview-body">
-      {video.video_url && <video ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
+      {video.video_url && <video key={playerVersion} ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
         className={video.format === "9:16" ? "vertical" : ""} aria-label={video.title}
-        onEnded={() => setWatched(true)} onError={() => setFailed(true)} />}
-      {failed && <p role="alert" className="media-error">The preview could not load. Try downloading the MP4.</p>}
+        onCanPlay={() => setFailed(false)} onError={() => setFailed(true)} />}
+      {failed && <div className="media-error" role="alert">The preview could not load. <button type="button" className="text-button" onClick={() => {
+        setFailed(false);
+        setPlayerVersion((version) => version + 1);
+      }}>Retry playback</button> or use Download MP4.</div>}
       {!!video.scene_times?.length && video.video_url && <label className="preview-scenes">Jump to scene
         <select value="" onChange={(event) => { if (player.current && event.target.value) player.current.currentTime = Number(event.target.value); }}>
           <option value="">Choose a scene</option>
@@ -157,7 +164,9 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
         <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
       </details>}
       {youtubeEdit && <section className="revision-panel" aria-label="YouTube upload details">
-        <p className="review-note">Manage this video’s visibility in YouTube Studio.</p>
+        <p className="review-note">{video.youtube_visibility_at_upload === "public" ? "YouTube accepted the public upload."
+          : video.youtube_visibility_at_upload ? `YouTube reported ${video.youtube_visibility_at_upload} visibility. Check YouTube Studio to review it.`
+          : "Manage this video’s visibility in YouTube Studio."}</p>
         {["pending", "retry"].includes(video.thumbnail_publish_status ?? "") && <p className="review-note" role="status">
           YouTube thumbnail is queued. Studio will retry if processing is delayed.
         </p>}
@@ -182,19 +191,33 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
     </div>
     <footer className="dialog-footer preview-footer">
       {!latest && <p className="review-note">Earlier version</p>}
-      {!editing && attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
-      {canApprove && !editing && <p className="review-note">
-        {video.publish_status === "upload_uncertain" ? "Check YouTube Studio for an existing copy before approving another upload."
-          : watched ? "Approval queues this video for a public upload on YouTube." : "Watch the preview to the end to unlock approval."}
+      {!editing && attempted && feedback && <Notice feedback={feedback} />}
+      {!editing && queued && <p className="review-note" role="status">{video.publish_status === "uploading"
+        ? (video.progress_note || "Uploading to YouTube.") + " You can close this window while it runs." : "Approved. Waiting for the YouTube upload worker."}</p>}
+      {!editing && publishAction && !confirming && <p className="review-note">{publishAction === "recheck"
+        ? "Check YouTube Studio for an existing copy before retrying." : "Review the preview or downloaded MP4. Approval queues a public upload."}</p>}
+      {!editing && publishAction === "recheck" && confirming && <p id="publish-confirmation" className="review-note" role="status">
+        Confirm that you checked YouTube Studio and found no existing copy. Retrying will request a public upload.
+      </p>}
+      {!editing && video.publish_error && !queued && <p className="video-problem" role="status">
+        {video.publish_error}{video.publish_status === "retry" && clock(video.publish_retry_at) && " Next attempt after " + clock(video.publish_retry_at) + "."}
       </p>}
       <div className="preview-actions">
         {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
         {youtubeEdit && <a className="button button-secondary" href={youtubeEdit} target="_blank" rel="noreferrer">YouTube Studio <ArrowUpRight size={17} /></a>}
         {editable && !!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
-          setEditing(!editing); setAttempted(false); if (!editing) player.current?.pause();
+          setEditing(!editing); setAttempted(false); setConfirming(false); if (!editing) player.current?.pause();
         }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
-        {canApprove && !editing && <button className="button button-primary" disabled={!watched || failed || busy} onClick={() => void send()}>
-          {busy && <LoaderCircle size={16} className="spinner" />} Approve &amp; publish on YouTube
+        {publishAction === "recheck" && !editing && <a className="button button-secondary" href="https://studio.youtube.com/" target="_blank" rel="noreferrer">Check YouTube Studio <ArrowUpRight size={17} /></a>}
+        {publishAction && !editing && confirming && <button type="button" className="button button-secondary" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>}
+        {publishAction && !editing && <button type="button" className="button button-primary" disabled={busy}
+          aria-describedby={confirming ? "publish-confirmation" : undefined} onClick={() => {
+            player.current?.pause();
+            if (publishAction !== "recheck" || confirming) void send();
+            else { setAttempted(false); setConfirming(true); }
+          }}>
+          {busy && attempted && <LoaderCircle size={16} className="spinner" />}
+          {busy && attempted ? "Sending approval…" : confirming ? "Confirm retry" : publishLabel}
         </button>}
       </div>
     </footer>

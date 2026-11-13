@@ -62,7 +62,7 @@ def publication_due(row: dict[str, Any], version: str, now: datetime) -> bool:
         return False
     state = data.get("publish_status")
     if state == "uploading":
-        heartbeat = parse_timestamp(data.get("worker_heartbeat_at"))
+        heartbeat = parse_timestamp(data.get("publish_heartbeat_at")) or parse_timestamp(data.get("worker_heartbeat_at"))
         return heartbeat is None or now - heartbeat >= timedelta(hours=2)
     if data.get("publish_requested"):
         return True
@@ -72,7 +72,7 @@ def publication_due(row: dict[str, Any], version: str, now: datetime) -> bool:
         if data.get("publish_auth_version") == version:
             return False
         return True
-    if int(data.get("publish_attempts") or 0) >= 5:
+    if state == "failed" or int(data.get("publish_attempts") or 0) >= 5:
         return False
     due = parse_timestamp(data.get("publish_retry_at"))
     return due is None or due <= now

@@ -28,6 +28,11 @@ def obj(value: Any) -> dict[str, Any]:
 def metadata(row: dict[str, Any]) -> dict[str, Any]:
     data: dict[str, Any] = {}
     scenes = row.get("scenes")
+    if isinstance(scenes, str):
+        try:
+            scenes = json.loads(scenes)
+        except ValueError:
+            scenes = None
     if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict):
         data.update(obj(scenes[0].get("_studio")))
     data.update(obj(scenes))

@@ -21,6 +21,32 @@ from studio_revision import stitch_revision
 from studio_retry import retry_io
 
 
+class UploadRegression(unittest.TestCase):
+    def test_youtube_metadata_preserves_source_urls_within_byte_limit(self):
+        from worker import youtube_snippet
+        sources = "\n\nSources\nJournal — https://example.org/study"
+        snippet = youtube_snippet({"title": "<AI> Study", "description": "é" * 3000 + sources,
+                                   "tags": ["learning", "learning", "x" * 510, "health"]})
+        self.assertEqual(snippet["title"], "AI Study")
+        self.assertTrue(snippet["description"].endswith(sources))
+        self.assertLessEqual(len(snippet["description"].encode()), 5000)
+        self.assertEqual(snippet["tags"], ["learning", "health"])
+
+    @patch("worker.time.sleep")
+    @patch("worker.MediaFileUpload")
+    @patch("worker.youtube_credentials")
+    @patch("worker.build")
+    def test_lost_response_after_upload_session_started_requires_reconciliation(self, build, credentials, media, sleep):
+        from worker import UploadOutcomeUncertain, upload_youtube
+        request = build.return_value.videos.return_value.insert.return_value
+        request.resumable_uri = "fixture"
+        request.next_chunk.side_effect = TimeoutError()
+        with self.assertRaises(UploadOutcomeUncertain) as result:
+            upload_youtube({"title": "Saved production"}, Path("fixture.mp4"))
+        self.assertEqual(safe_publish_error(result.exception)[0], "upload_uncertain")
+        self.assertEqual(request.next_chunk.call_count, 4)
+
+
 class ThumbnailRetryRegression(unittest.TestCase):
     @patch("worker.verify_thumbnail")
     @patch("worker.save_fields")

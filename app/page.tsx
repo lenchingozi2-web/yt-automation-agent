@@ -29,6 +29,10 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
   const [storageLoading, setStorageLoading] = useState(false);
   const pending = useRef<AbortController | null>(null);
   const pendingStorage = useRef<AbortController | null>(null);
+  const updateVideo = useCallback((video: StudioVideo) => {
+    pending.current?.abort();
+    setData((current) => current && { ...current, videos: current.videos.map((item) => item.id === video.id ? normalizeVideo(video) : item) });
+  }, []);
   const active = data?.videos.some((video) => video.status === "pending" || video.status === "rendering" ||
     video.publish_status === "pending" || video.publish_status === "uploading");
 
@@ -94,7 +98,7 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
     };
   }, [active, refresh]);
 
-  return { data, storage, error, refreshing, storageLoading, refresh, refreshStorage };
+  return { data, storage, error, refreshing, storageLoading, refresh, refreshStorage, updateVideo };
 }
 
 function Workspace({ user, install, signOut }: { user: User; install: (() => void) | null; signOut: () => Promise<void> }) {
@@ -116,7 +120,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     if (!response.ok || result?.ok !== true) throw new Error(toSafeMessage(result?.error, "Studio could not complete the request. Try again."));
     return result as T;
   }, []);
-  const { data, storage, error, refreshing, storageLoading, refresh, refreshStorage } = useWorkspace(user, request);
+  const { data, storage, error, refreshing, storageLoading, refresh, refreshStorage, updateVideo } = useWorkspace(user, request);
   const availableBuckets = storage?.buckets.filter((bucket) => bucket.available) ?? [];
   const bytes = availableBuckets.reduce((total, bucket) => total + bucket.bytes, 0);
   const storageLabel = storageLoading && !storage ? "Checking…" : availableBuckets.length ? (bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " MB" : "Unavailable";
@@ -149,7 +153,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
   }
 
   type GenerateResult = { draft: Draft; video?: StudioVideo; message: string; note?: string };
-  type RenderResult = { message: string; note?: string };
+  type RenderResult = { message: string; note?: string; video?: StudioVideo };
 
   async function generate(prompt: string, duration: number, format: Draft["format"], review: boolean, requestId: string) {
     return action("generate", async () => {
@@ -195,7 +199,8 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
 
   async function retry(video: StudioVideo, publish = false) {
     return action(video.id, async () => {
-      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true } : {}) });
+      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true, checkedYouTube: video.publish_status === "upload_uncertain" } : {}) });
+      if (result.video) updateVideo(result.video);
       setFeedback({ kind: "success", message: result.message, detail: result.note });
       void refresh(true);
     });

@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import subprocess
 import wave
@@ -392,26 +392,65 @@ def youtube_credentials() -> Credentials:
     return credentials
 
 
-def upload_youtube(video: dict[str, Any], file_path: Path) -> tuple[str, str | None]:
+def youtube_snippet(video: dict[str, Any]) -> dict[str, Any]:
+    def clean(value: Any) -> str:
+        return re.sub(r"[<>\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value or "")).strip()
+
+    title = " ".join(clean(video["title"]).split())[:100] or "LenxiQ Studio video"
+    description = clean(video.get("description"))
+    if len(description.encode()) > 5000:
+        summary, divider, sources = description.rpartition("\n\nSources\n")
+        references = divider + sources
+        if divider and len(references.encode()) < 5000:
+            description = summary.encode()[:5000 - len(references.encode())].decode(errors="ignore").rstrip() + references
+        else:
+            description = description.encode()[:5000].decode(errors="ignore").rstrip()
+    tags = []
+    remaining = 500
+    values = video.get("tags")
+    for value in values if isinstance(values, list) else []:
+        tag = " ".join(clean(value).split())
+        length = len(tag) + int(" " in tag) * 2 + int(bool(tags))
+        if tag and tag not in tags and length <= remaining:
+            tags.append(tag)
+            remaining -= length
+    return {"title": title, "description": description, "tags": tags, "categoryId": "27"}
+
+
+class UploadOutcomeUncertain(RuntimeError):
+    """A resumable request may have reached YouTube without a final response."""
+
+
+def upload_youtube(video: dict[str, Any], file_path: Path, on_progress=None) -> tuple[str, str | None]:
     youtube = build("youtube", "v3", credentials=youtube_credentials())
-    request = youtube.videos().insert(part="snippet,status", body={"snippet": {
-        "title": str(video["title"])[:100], "description": str(video.get("description", "")),
-        "tags": video.get("tags", []), "categoryId": "27"}, "status": {
+    request = youtube.videos().insert(part="snippet,status", body={"snippet": youtube_snippet(video), "status": {
         "privacyStatus": "public", "selfDeclaredMadeForKids": False}},
         media_body=MediaFileUpload(str(file_path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
     response = None
     failures = 0
     while response is None:
         try:
-            _, response = request.next_chunk()
-            failures = 0
+            progress, response = request.next_chunk()
         except Exception as error:
             status = getattr(getattr(error, "resp", None), "status", None)
-            if failures >= 3 or (status is not None and status not in (429, 500, 502, 503, 504)):
+            if status is not None and status not in (408, 429, 500, 502, 503, 504):
+                if status == 404 and request.resumable_uri:
+                    raise UploadOutcomeUncertain from error
+                raise
+            if failures >= 3:
+                if request.resumable_uri and status != 429:
+                    raise UploadOutcomeUncertain from error
                 raise
             time.sleep(2 ** failures)
             failures += 1
-    return response["id"], response.get("status", {}).get("privacyStatus")
+            continue
+        failures = 0
+        if progress and on_progress:
+            on_progress(round(progress.progress() * 100))
+    video_id = response.get("id")
+    if not isinstance(video_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise UploadOutcomeUncertain
+    return video_id, response.get("status", {}).get("privacyStatus")
 
 
 def set_youtube_thumbnail(video_id: str, image_path: Path) -> None:
@@ -578,13 +617,20 @@ def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
         existing = {**decode(row.get("script")), **extras}
         payload["script"] = json.dumps(existing) if isinstance(row.get("script"), str) else existing
     elif extras and "scenes" in known:
-        scenes = row.get("scenes")
+        original_scenes = row.get("scenes")
+        scenes = original_scenes
+        if isinstance(scenes, str):
+            try:
+                scenes = json.loads(scenes)
+            except ValueError:
+                scenes = None
         if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict):
             scenes = [dict(x) for x in scenes]
             scenes[0]["_studio"] = {**decode(scenes[0].get("_studio")), **extras}
-            payload["scenes"] = scenes
+            payload["scenes"] = json.dumps(scenes) if isinstance(original_scenes, str) else scenes
         elif isinstance(scenes, dict):
-            payload["scenes"] = {**scenes, **extras}
+            merged_scenes = {**scenes, **extras}
+            payload["scenes"] = json.dumps(merged_scenes) if isinstance(original_scenes, str) else merged_scenes
     if not payload: raise RuntimeError("videos table has no supported status column.")
     for attempt in range(3):
         try:
@@ -831,6 +877,8 @@ def process(video: dict[str, Any], supabase) -> None:
 
 
 def safe_publish_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, UploadOutcomeUncertain):
+        return "upload_uncertain", "YouTube did not confirm the upload. Check YouTube Studio for an existing copy before retrying."
     text = str(error)
     if "invalid_youtube_credentials" in text or "invalid_client" in text or "unauthorized_client" in text:
         return "auth_required", "YouTube credentials are incomplete or invalid. Update YOUTUBE_TOKEN_JSON in GitHub Actions."
@@ -838,8 +886,11 @@ def safe_publish_error(error: Exception) -> tuple[str, str]:
         return "auth_required", "YouTube authorization expired or was revoked. Reconnect YouTube and update YOUTUBE_TOKEN_JSON in GitHub Actions."
     if "quotaExceeded" in text or "uploadLimitExceeded" in text:
         return "retry", "YouTube upload quota reached; the saved MP4 will be retried later."
-    if "insufficientPermissions" in text:
+    if any(reason in text for reason in ("insufficientPermissions", "youtubeSignupRequired", "channelRequired")):
         return "auth_required", "YouTube upload permission is missing. Reconnect with the youtube.upload scope."
+    status = getattr(getattr(error, "resp", None), "status", None)
+    if status in (400, 403, 404, 413):
+        return "failed", f"YouTube rejected the upload (HTTP {status}). The MP4 remains available."
     return "retry", "YouTube upload temporarily unavailable (" + type(error).__name__ + "). The MP4 remains available."
 
 
@@ -855,19 +906,33 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
     attempts = 1 if new_auth else int(details.get("publish_attempts") or 0) + 1
     save_fields(supabase, video, publish_status="uploading", publish_attempts=attempts,
                 publish_requested=False, publish_auth_version=version,
-                publish_error=None, progress_note="MP4 ready. Uploading to YouTube.")
+                publish_error=None, publish_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+                progress_note="MP4 ready. Preparing the YouTube upload.")
     try:
         if master is None:
             # Fetch only this job's trusted storage object, never a row-supplied URL.
             master = directory / "publish_preview.mp4"
-            content = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(str(video["id"]) + ".mp4")
+            bucket = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
+            content = retry_io(lambda: bucket.download(str(video["id"]) + ".mp4"), "download approved MP4")
             master.write_bytes(content)
         validate_audio(master)
-        youtube_id, actual_visibility = upload_youtube(details, master)
+        def record_progress(percent):
+            try:
+                save_fields(supabase, video, publish_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+                            progress_note=f"Uploading to YouTube · {percent}%")
+            except Exception:
+                # A lost progress update must never interrupt a YouTube upload.
+                print("[youtube] Could not save upload progress.", flush=True)
+
+        youtube_id, actual_visibility = upload_youtube(details, master, on_progress=record_progress)
     except Exception as error:
         state, message = safe_publish_error(error)
+        if state == "retry" and attempts >= 5:
+            state = "failed"
+            message = "Automatic upload retries were exhausted. You can retry from the saved preview."
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=min(86400, 900 * 2 ** min(attempts, 6)))
         save_fields(supabase, video, publish_status=state, publish_error=message,
-                    publish_retry_at=datetime.fromtimestamp(time.time() + min(86400, 900 * 2 ** min(attempts, 6)), timezone.utc).isoformat(),
+                    publish_retry_at=retry_at.isoformat() if state == "retry" else None,
                     progress_note="MP4 ready. " + message)
         print("[youtube]", message, flush=True)
         return
@@ -889,9 +954,6 @@ def publish_due(client, limit: int = 3) -> None:
     rows = client.table("videos").select("*").eq("status", "completed").order("created_at", desc=True).limit(100).execute().data or []
     rows.sort(key=lambda row: not stored_metadata(row).get("publish_requested"))
     now = datetime.now(timezone.utc)
-    for row in [row for row in rows if thumbnail_due(row, version, now)][:limit]:
-        details = stored_metadata(row)
-        apply_uploaded_thumbnail(row, client, details.get("youtube_id") or details.get("youtube_video_id"))
     done = 0
     for row in rows:
         if not publication_due(row, version, now):
@@ -904,6 +966,9 @@ def publish_due(client, limit: int = 3) -> None:
         done += 1
         if done >= limit:
             break
+    for row in [row for row in rows if thumbnail_due(row, version, now)][:limit]:
+        details = stored_metadata(row)
+        apply_uploaded_thumbnail(row, client, details.get("youtube_id") or details.get("youtube_video_id"))
 
 
 
@@ -1006,6 +1071,8 @@ def main(argv: list[str] | None = None) -> None:
             break
         else:
             time.sleep(POLL_SECONDS)
+        if video:
+            publish_due(supabase, max(1, min(12, args.max_uploads)))
         if args.once or (args.drain and processed >= args.max_jobs):
             break
     if failures:

@@ -8,9 +8,18 @@ export function isBriefingSource(url: string) {
 }
 export type RevisionMode = "audio" | "visual" | "rewrite";
 export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; publish_retry_at?: string; youtube_visibility_at_upload?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
 export function youtubeStudioUrl(video: StudioVideo) {
   return /^[A-Za-z0-9_-]{11}$/.test(video.youtube_id ?? "") ? `https://studio.youtube.com/video/${video.youtube_id}/edit` : "";
+}
+
+export function youtubePublishAction(video: StudioVideo): "approve" | "retry" | "recheck" | undefined {
+  if (video.status !== "completed" || !video.video_url || video.youtube_id || video.youtube_url ||
+      ["uploading", "uploaded"].includes(video.publish_status ?? "") ||
+      (video.publish_status === "pending" && !!video.publish_approved_at)) return undefined;
+  if (video.publish_status === "upload_uncertain") return "recheck";
+  if (["retry", "failed", "auth_required", "not_configured"].includes(video.publish_status ?? "")) return "retry";
+  if (!video.publish_approved_at) return "approve";
 }
 
 export function canRetryYouTubeThumbnail(video: StudioVideo) {
@@ -145,7 +154,8 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     error_message: stringOf(meta.error_message || meta.error),
     progress_note: stringOf(meta.progress_note || meta.progress || meta.note),
     publish_status: stringOf(meta.publish_status), publish_error: stringOf(meta.publish_error),
-    publish_approved_at: stringOf(meta.publish_approved_at),
+    publish_approved_at: stringOf(meta.publish_approved_at), publish_retry_at: stringOf(meta.publish_retry_at),
+    youtube_visibility_at_upload: stringOf(meta.youtube_visibility_at_upload),
     thumbnail_publish_status: stringOf(meta.thumbnail_publish_status),
     actual_duration_seconds: Number(meta.actual_duration_seconds) || undefined,
     render_version: stringOf(meta.render_version), automation: stringOf(meta.automation) };
