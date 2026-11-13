@@ -232,7 +232,8 @@ class MediaRegression(unittest.TestCase):
             self.assertEqual(" ".join(calls[2:]), line)
             self.assertGreater(validate_audio(audio), 4.3)
             self.assertIn("00:00:02,", srt.read_text())
-            self.assertIn("second phrase", srt.read_text().replace("\n", " "))
+            captions = " ".join(line for line in srt.read_text().splitlines() if line and "-->" not in line and not line.isdecimal())
+            self.assertEqual(captions, line)
 
     def test_audio_repair_preserves_picture_and_surrounding_narration(self):
         with TemporaryDirectory() as tmp:
