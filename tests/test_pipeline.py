@@ -105,6 +105,11 @@ class MediaRegression(unittest.TestCase):
                 self.assertEqual(verify_render_geometry(final, size, 2), (ratio, 2.0))
                 self.assertGreater(energy(final, 440, start=1.45), energy(final, 880, start=1.45) * 10)
 
+    def test_approximate_runtime_respects_narration_and_short_cap(self):
+        self.assertAlmostEqual(sum(scene_durations([260, 265, 245], 720, approximate=True)), 770)
+        self.assertAlmostEqual(sum(scene_durations([140, 150], 720, approximate=True)), 322.2333, places=3)
+        self.assertAlmostEqual(sum(scene_durations([100, 98], 180, approximate=True, ceiling=180)), 180)
+
     def test_narration_beats_stock_audio_and_survives_all_cuts(self):
         with TemporaryDirectory() as tmp:
             directory = Path(tmp)

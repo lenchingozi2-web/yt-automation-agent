@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canRetryYouTubeThumbnail, normalizeVideo, normalizeDraft, youtubeStudioUrl } from '../src/lib/studio.ts';
+import { canRetryYouTubeThumbnail, durationFromBrief, normalizeVideo, normalizeDraft, youtubeStudioUrl } from '../src/lib/studio.ts';
 
 test('saved settings beat database defaults and measured geometry describes the finished preview', () => {
   const row = { format: '16:9', duration_seconds: 180, scenes: [{ narration: 'Keep the selected settings.', _studio: {
@@ -105,7 +105,7 @@ test("researched drafting revises an unsupported claim and keeps cited source re
     else process.env.GEMINI_API_KEY = original;
   });
   const lines = [
-    "Try this after reading a short page of notes. Close the notebook and explain the main idea as if a friend has asked you a question.",
+    "Wikipedia describes retrieval practice as recalling information from memory. Try closing the notebook and explaining the idea as if a friend had asked a question.",
     "If you cannot remember a detail, keep going until you reach the end of your explanation. Open the notebook and compare your explanation with the text.",
     "Suppose you are reviewing three definitions. Write each one down from memory and mark the parts you would like to revisit when you next sit down.",
     "You can try that with one topic today. Keep the question you struggled with and use it as your starting point the next time you study.",
@@ -117,6 +117,7 @@ test("researched drafting revises an unsupported claim and keeps cited source re
   let referenceReads = 0;
   context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
     if (input.includes("europepmc")) return Response.json({ resultList: { result: [] } });
+    if (input.includes("api.ies.ed.gov")) return Response.json({ response: { docs: [] } });
     if (input.includes("wikipedia")) {
       referenceReads++;
       return Response.json({ query: { pages: [{ pageid: 100 + referenceReads, title: "Testing effect",
@@ -186,5 +187,12 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
   assert.equal(lookups, 2);
   assert.match(draft.scenes[0].narration, /Example Journal/);
   assert.deepEqual(draft.sources?.map((source) => source.url), references);
-  assert.ok(draft.description.endsWith(references.join("\n")));
+  assert.deepEqual(draft.description.split("\n").slice(-2), references.map((url, index) => ["Example Journal", "Example Education Journal"][index] + " — " + url));
+});
+
+
+test("duration stated in a video brief can override the untouched default", () => {
+  assert.equal(durationFromBrief("Generate a 10 minutes video on AI in education"), 600);
+  assert.equal(durationFromBrief("Create a 12-minute video"), 720);
+  assert.equal(durationFromBrief("Create a video about a 10-minute study break"), undefined);
 });

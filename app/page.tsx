@@ -12,7 +12,11 @@ import { ProductionQueue, type RevisionInput } from "./components/production-que
 import { SceneEditor } from "./components/scene-editor";
 
 type Quota = { used: number; limit: number };
-type StorageInfo = { buckets: { bytes: number; available: boolean; partial: boolean }[] };
+type StorageInfo = {
+  buckets: { bytes: number; available: boolean; partial: boolean }[];
+  retention: { published_preview_days: number; published_thumbnail_days: number };
+  immediate_dispatch_available: boolean;
+};
 type QueueData = { videos: StudioVideo[]; quota: Quota };
 type InstallEvent = Event & { prompt: () => Promise<unknown> };
 const WORKFLOW = "https://github.com/lenchingozi2-web/yt-automation-agent/actions/workflows/daily_video.yml";
@@ -251,9 +255,14 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <article className="metric">
             <div className="metric-label"><HardDrive size={17} /> Media storage</div>
             <strong>{storageLabel}</strong>
+            {storage && <p>Uploaded previews expire after {storage.retention.published_preview_days} days. Unpublished previews stay available.</p>}
             <button className="text-button" disabled={storageLoading} onClick={() => void refreshStorage()}>
               {storageLoading ? "Checking storage…" : "Refresh usage"}
             </button>
+            {storage?.immediate_dispatch_available && <button type="button" className="text-button" disabled={!!busy} onClick={() => void action("cleanup", async () => {
+              const result = await request<{ message: string }>("/api/storage", { method: "POST" });
+              setFeedback({ kind: "success", message: result.message });
+            })}>{busy === "cleanup" ? "Starting cleanup…" : "Clean expired media"}</button>}
           </article>
         </section>
         <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(next) => { setTopic(""); edit(next); }} />

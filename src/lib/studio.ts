@@ -141,7 +141,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     youtube_url: stringOf(meta.youtube_url) || (youtubeId ? "https://www.youtube.com/watch?v=" + encodeURIComponent(youtubeId) : ""),
     youtube_id: youtubeId, created_at: stringOf(meta.created_at),
     render_started_at: stringOf(meta.render_started_at), completed_at: stringOf(meta.completed_at),
-    thumbnail_url: stringOf(meta.thumbnail_url), preview_expired_at: stringOf(meta.preview_expired_at),
+    thumbnail_url: meta.thumbnail_expired_at ? "" : stringOf(meta.thumbnail_url), preview_expired_at: stringOf(meta.preview_expired_at),
     error_message: stringOf(meta.error_message || meta.error),
     progress_note: stringOf(meta.progress_note || meta.progress || meta.note),
     publish_status: stringOf(meta.publish_status), publish_error: stringOf(meta.publish_error),
@@ -177,4 +177,12 @@ export function groupProductions(videos: StudioVideo[]) {
     latest: versions[0],
     playable: versions.find((version) => version.status === "completed" && version.video_url),
   }));
+}
+
+
+export function durationFromBrief(brief: string): number | undefined {
+  const match = /\b(?:video|script)\s+(?:of|lasting|for)\s+(?:about\s+)?(\d+(?:\.\d+)?)\s*[- ]?\s*(minutes?|mins?|seconds?|secs?)\b|\b(\d+(?:\.\d+)?)\s*[- ]?\s*(minutes?|mins?|seconds?|secs?)\s+(?:long\s+)?(?:video|script)\b/i.exec(brief);
+  if (!match) return undefined;
+  const seconds = Math.round(Number(match[1] ?? match[3]) * (/^m/i.test(match[2] ?? match[4]) ? 60 : 1));
+  return seconds >= 60 && seconds <= 720 ? seconds : undefined;
 }

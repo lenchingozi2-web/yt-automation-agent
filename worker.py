@@ -209,12 +209,24 @@ def video_size(scene):
     return (1080, 1920) if scene.get("format") == "9:16" else (1920, 1080)
 
 
-def scene_durations(natural: list[float], target: float | None) -> list[float]:
+def scene_durations(natural: list[float], target: float | None, *, approximate: bool = False, ceiling: float | None = None) -> list[float]:
     if not natural or any(not math.isfinite(seconds) or seconds <= 0 for seconds in natural):
         raise ValueError("Narration has invalid scene durations.")
     if target is None:
         return [math.ceil(seconds * 30) / 30 for seconds in natural]
     natural_total = sum(natural)
+    if approximate:
+        tolerance = min(90, max(5, target * .10))
+        lower = target - tolerance
+        upper = min(target + tolerance, ceiling or math.inf)
+        if natural_total < lower:
+            target = min(lower, natural_total / .90)
+        elif natural_total > upper:
+            target = max(upper, natural_total / 1.10)
+        else:
+            target = natural_total
+        if ceiling is not None:
+            target = min(ceiling, target)
     tempo = natural_total / target
     if not .80 <= tempo <= 1.25:
         raise ValueError(f"The narration is about {natural_total:.0f}s at normal speed, too far from the "
@@ -698,7 +710,8 @@ def process(video: dict[str, Any], supabase) -> None:
             save_fields(supabase, video, progress_note=f"Preparing narration {index + 1} of {len(selected)}")
             audio, srt = make_audio(scene, directory)
             audio_plan.append((audio, srt, ffprobe_duration(audio)))
-        durations = scene_durations([item[2] for item in audio_plan], target)
+        durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
+                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None)
     recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
     catalog = {}
     rendered = []
@@ -779,7 +792,7 @@ def process(video: dict[str, Any], supabase) -> None:
         timeline.append({**entry, "start": round(cursor / 30, 6)})
         cursor += round(entry["duration"] * 30)
     expected_size = size if parent else video_size({"format": ratio})
-    expected_seconds = int(picture_track(parent)["nb_frames"]) / 30 if parent else target or cursor / 30
+    expected_seconds = int(picture_track(parent)["nb_frames"]) / 30 if parent else sum(round(seconds * 30) for seconds in durations) / 30
     actual_ratio, actual_seconds = verify_render_geometry(final, expected_size, expected_seconds)
     if cursor != round(expected_seconds * 30):
         raise ValueError("The saved scene timeline does not match the video duration.")

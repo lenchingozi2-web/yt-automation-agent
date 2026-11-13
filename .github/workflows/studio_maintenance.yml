@@ -8,7 +8,10 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: '15 2 * * *'
+    - cron: '24 2 * * *'
+  push:
+    branches: [main]
+    paths: [studio_maintenance.py, .github/workflows/studio_maintenance.yml]
 permissions:
   contents: read
 concurrency:
@@ -34,7 +37,7 @@ jobs:
           STUDIO_PUBLISHED_PREVIEW_DAYS: '7'
           STUDIO_PUBLISHED_THUMBNAIL_DAYS: '90'
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.dry_run }}" = "true" ]; then
             python studio_maintenance.py --dry-run
           else
             python studio_maintenance.py

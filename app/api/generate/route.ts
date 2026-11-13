@@ -4,7 +4,7 @@ import { researchedDraft } from "@/src/lib/studio-research";
 import { getResearchIdea, markBriefingQueued } from "@/src/lib/studio-briefing";
 import { dispatchStudioWorker, errorResponse, findVideo, jobIdOf, quotaOf, recentTitles, requestObject, safeInsertVideo, statusFor, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 
-export const maxDuration = 180;
+export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {

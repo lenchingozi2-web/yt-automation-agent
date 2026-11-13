@@ -1,8 +1,12 @@
 name: LenxiQ Daily Briefing
 on:
   schedule:
-    - cron: '0 3 * * *'
-    - cron: '27 3 * * *'
+    - cron: '8 3 * * *'
+    - cron: '41 3 * * *'
+    - cron: '19 5 * * *'
+  push:
+    branches: [main]
+    paths: [research_fetcher.py, .github/workflows/nightly_research.yml]
   workflow_dispatch:
     inputs:
       preview_only:
@@ -20,6 +24,10 @@ jobs:
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]')
+        with:
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -37,3 +45,39 @@ jobs:
           RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
           RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py
+      - name: Verify a sourced 12-minute script without queueing a video
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]')
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
+          STUDIO_SCRIPT_TRACE: '1'
+        run: |
+          python - <<'PYTHON'
+          import json, os, subprocess
+          import httpx
+
+          url = os.environ["NEXT_PUBLIC_SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+          headers = {"apikey": key}
+          if not key.startswith("sb_secret_"):
+              headers["Authorization"] = "Bearer " + key
+          response = httpx.get(url + "/rest/v1/research_ideas", headers=headers, timeout=15,
+                              params={"select": "briefing_date,topic_area,title,hook_summary,references", "order": "position", "limit": 3})
+          response.raise_for_status()
+          ideas = response.json()
+          assert {idea["topic_area"] for idea in ideas} == {"health", "education", "intelligence"}
+          lead = next(idea for idea in ideas if idea["topic_area"] == "education")
+          print("Verified briefing date and all three topics:", lead["briefing_date"], flush=True)
+          result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
+                                  input=json.dumps(dict(brief="Explain this study and apply it to learning.",
+                                      seconds=720, ratio="16:9", recent=[], briefing=lead)),
+                                  text=True, stdout=subprocess.PIPE, timeout=260, check=True)
+          draft = json.loads(result.stdout)
+          assert draft["duration_seconds"] == 720 and draft["format"] == "16:9"
+          assert all(link in draft["description"] for link in lead["references"])
+          count = sum(len(scene["narration"].split()) for scene in draft["scenes"])
+          assert count >= 1188
+          print(f"PASS: 12-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words and named sources.", flush=True)
+          PYTHON

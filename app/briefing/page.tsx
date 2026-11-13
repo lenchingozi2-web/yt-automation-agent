@@ -27,6 +27,8 @@ function Briefing() {
   const [data, setData] = useState<BriefingData | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [loading, setLoading] = useState(true);
+  const [duration, setDuration] = useState(60);
+  const [requesting, setRequesting] = useState(false);
   const [drafting, setDrafting] = useState<string | null>(null);
   const draftLock = useRef(false);
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -48,6 +50,19 @@ function Briefing() {
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [refresh]);
 
+  async function requestBriefing() {
+    setRequesting(true);
+    setFeedback(null);
+    try {
+      const result = await studioRequest<{ message: string }>("/api/briefing", { method: "POST" });
+      setFeedback({ kind: "success", message: result.message });
+    } catch (error) {
+      setFeedback({ kind: "error", message: toSafeMessage(error, "Could not request a briefing.") });
+    } finally {
+      setRequesting(false);
+    }
+  }
+
   async function draftVideo(idea: ResearchIdea) {
     if (draftLock.current) return;
     draftLock.current = true;
@@ -55,7 +70,7 @@ function Briefing() {
     setFeedback(null);
     try {
       const result = await studioRequest<{ video?: { id: string }; note?: string }>("/api/generate", {
-        method: "POST", body: JSON.stringify({ researchIdeaId: idea.id, autoRender: true, duration: 60, format: "9:16" }),
+        method: "POST", body: JSON.stringify({ researchIdeaId: idea.id, autoRender: true, duration, format: duration <= 180 ? "9:16" : "16:9" }),
       });
       if (!result.video) throw new Error("The draft was created but Studio could not queue the render. Try again.");
       setData((current) => current && { ...current, ideas: current.ideas.map((row) => row.id === idea.id ? { ...row, status: "queued" } : row) });
@@ -82,7 +97,7 @@ function Briefing() {
         <div><h1>Daily Briefing</h1><p>Source-checked stories across health, education and intelligence.</p></div>
       </section>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[var(--muted)]">{day === data?.today ? dateLabel : day ? `Latest briefing · ${dateLabel}` : ""}</p>
+        <p className="text-[var(--muted)]">{day === data?.today ? dateLabel : day ? `Today’s briefing is pending. Showing ${dateLabel}.` : ""}</p>
         <button className="button button-secondary" onClick={() => void refresh()} disabled={loading || !!drafting}>
           <RefreshCw size={16} className={loading ? "spinner" : undefined} /> Refresh
         </button>
@@ -90,6 +105,18 @@ function Briefing() {
       <Notice feedback={feedback} dismiss={() => setFeedback(null)} />
       {loading && !data && <p role="status">Loading briefing…</p>}
       {data && !data.ideas.length && <p className="panel p-5">The first briefing is being prepared. Check again after the daily research run.</p>}
+      {data && day !== data.today && <button type="button" className="button button-secondary self-start" onClick={() => void requestBriefing()} disabled={requesting || !!drafting}>
+        {requesting ? "Starting research…" : "Request today’s briefing"}
+      </button>}
+      {!!data?.ideas.length && <label className="self-start">Video length
+        <select value={duration} onChange={(event) => setDuration(Number(event.target.value))} disabled={!!drafting}>
+          <option value={60}>About 1 minute · Portrait</option>
+          <option value={180}>About 3 minutes · Portrait</option>
+          <option value={300}>About 5 minutes · Landscape</option>
+          <option value={600}>About 10 minutes · Landscape</option>
+          <option value={720}>About 12 minutes · Landscape</option>
+        </select>
+      </label>}
       <div className="grid gap-4">
         {data?.ideas.map((idea) => <article key={idea.id} className="panel grid gap-4 p-5 sm:p-6">
           {idea.topic_area && <p className="text-sm text-[var(--accent)]">{topicLabels[idea.topic_area]}</p>}

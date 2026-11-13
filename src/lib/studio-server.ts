@@ -126,19 +126,36 @@ export async function quotaOf(client: SupabaseClient) {
   return { used: count ?? 0, limit: STUDIO_DAILY_LIMIT, timezone: "Africa/Lagos" };
 }
 
-export async function dispatchStudioWorker(thumbnailVideoId?: string) {
-  const token = process.env.STUDIO_GITHUB_DISPATCH_TOKEN?.trim() || process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN;
-  if (!token) return { dispatched: false, note: "The automatic render worker checks the queue on a schedule. Processing may be delayed." };
+export function studioDispatchAvailable() {
+  return Boolean(dispatchToken());
+}
+
+function dispatchToken() {
+  return (process.env.STUDIO_GITHUB_DISPATCH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_PAT || process.env.GH_TOKEN || "").trim();
+}
+
+export async function dispatchStudioAction(
+  workflow: "studio_worker.yml" | "nightly_research.yml" | "studio_maintenance.yml",
+  inputs?: Record<string, string>,
+) {
+  const token = dispatchToken();
+  if (!token) return false;
   try {
-    const response = await fetch("https://api.github.com/repos/lenchingozi2-web/yt-automation-agent/actions/workflows/studio_worker.yml/dispatches", {
+    const response = await fetch("https://api.github.com/repos/lenchingozi2-web/yt-automation-agent/actions/workflows/" + workflow + "/dispatches", {
       method: "POST",
       headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: "main", ...(thumbnailVideoId ? { inputs: { thumbnail_video_id: thumbnailVideoId } } : {}) }),
+      body: JSON.stringify({ ref: "main", inputs }),
       cache: "no-store", signal: AbortSignal.timeout(8000),
     });
-    return response.ok ? { dispatched: true, note: "Worker dispatched." } :
-      { dispatched: false, note: "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable (" + response.status + ")." };
-  } catch {
-    return { dispatched: false, note: "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable." };
+    if (!response.ok) console.warn("[studio dispatch]", workflow, response.status);
+    return response.ok;
+  } catch (error) {
+    console.warn("[studio dispatch]", workflow, error instanceof Error ? error.name : "Unknown error");
+    return false;
   }
+}
+
+export async function dispatchStudioWorker(thumbnailVideoId?: string) {
+  const dispatched = await dispatchStudioAction("studio_worker.yml", thumbnailVideoId ? { thumbnail_video_id: thumbnailVideoId } : undefined);
+  return { dispatched, note: dispatched ? "Worker dispatched." : "Automatic rendering is queued. Scheduled processing will take over if immediate dispatch is unavailable." };
 }

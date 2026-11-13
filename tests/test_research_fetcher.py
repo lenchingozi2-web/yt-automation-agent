@@ -102,7 +102,7 @@ class ResearchBriefingTest(unittest.TestCase):
 
     @patch("research_fetcher.ask")
     def test_source_audit_rejects_incomplete_batch(self, ask):
-        ask.side_effect = [self.numbered, [{"passed": True}] * 2, self.numbered, [{"passed": False}] * 3]
+        ask.side_effect = [self.numbered, [{"passed": True}] * 2, self.numbered, [{"passed": False}] * 3, self.numbered, [{"passed": False}] * 3]
         with self.assertRaisesRegex(RuntimeError, "did not pass verification"):
             write_briefing(None, self.groups, [])
 

@@ -82,7 +82,7 @@ def main() -> int:
         jpg = client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(video_id + ".jpg")
         assert len(mp4) > 10000 and b"ftyp" in mp4[:64], "MP4 not playable"
         assert jpg[:2] == bytes.fromhex("ffd8"), "invalid JPEG thumbnail"
-        for ratio, target, size in [("16:9", 10, (1920, 1080)), ("9:16", 10, (1080, 1920))]:
+        for ratio, target, size in [("16:9", 10, (1920, 1080)), ("9:16", 14, (1080, 1920))]:
             render_id = video_id
             if ratio == "9:16":
                 portrait_draft = deepcopy(draft)
@@ -98,8 +98,12 @@ def main() -> int:
             poster = path.with_suffix(".jpg")
             poster.write_bytes(client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(render_id + ".jpg"))
             verify_thumbnail(poster, ratio)
-            measured_ratio, measured_seconds = verify_render_geometry(path, size, target)
-            print(f"PASS: Stored {measured_ratio} MP4, {size[0]}×{size[1]}, {measured_seconds:.3f}s, and matching thumbnail.")
+            measured_ratio, measured_seconds = verify_render_geometry(path, size)
+            assert abs(measured_seconds - target) <= 5
+            assert measured_ratio == ratio
+            if ratio == "9:16":
+                assert abs(measured_seconds - target) > 0.1, "expected a natural runtime for the shorter narration"
+            print(f"PASS: Stored {measured_ratio} MP4, {size[0]}×{size[1]}, {measured_seconds:.3f}s against {target}s target, and matching thumbnail.")
         revised_draft = deepcopy(draft)
         revised_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
                                                      "mode": "audio", "original_media": True}

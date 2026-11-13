@@ -1,8 +1,8 @@
 import { type FormEvent, useRef, useState } from "react";
 import { ArrowRight, Clapperboard, FileText, LoaderCircle, Monitor, Smartphone, Sparkles } from "lucide-react";
-import { normalizeDraft, type Draft } from "@/src/lib/studio";
+import { durationFromBrief, normalizeDraft, type Draft } from "@/src/lib/studio";
 
-const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [720, "12 minutes"], [0, "Custom"]] as const;
+const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [600, "10 minutes"], [720, "12 minutes"], [0, "Custom"]] as const;
 
 export function Composer({ id, busy, disabled, generate, edit }: {
   id: string;
@@ -14,6 +14,7 @@ export function Composer({ id, busy, disabled, generate, edit }: {
   const [mode, setMode] = useState<"generate" | "paste">("generate");
   const [format, setFormat] = useState<Draft["format"]>("16:9");
   const [duration, setDuration] = useState(180);
+  const [durationChosen, setDurationChosen] = useState(false);
   const [custom, setCustom] = useState("3");
   const [prompt, setPrompt] = useState("");
   const [script, setScript] = useState("");
@@ -22,7 +23,7 @@ export function Composer({ id, busy, disabled, generate, edit }: {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const seconds = duration || Math.round(Number(custom) * 60);
+    const seconds = mode === "generate" && !durationChosen ? durationFromBrief(prompt) ?? duration : duration || Math.round(Number(custom) * 60);
     if (mode === "paste") {
       let parsed: unknown;
       try {
@@ -66,11 +67,13 @@ export function Composer({ id, busy, disabled, generate, edit }: {
             <button type="button" aria-pressed={format === "9:16"} onClick={() => setFormat("9:16")}><Smartphone size={17} /> Portrait <small>9:16</small></button>
           </div>
         </fieldset>
-        <label>Target duration<select value={duration} onChange={(event) => setDuration(Number(event.target.value))}>
+        <label>Approximate duration<select value={duration} onChange={(event) => { setDurationChosen(true); setDuration(Number(event.target.value)); }}>
           {DURATIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         {duration === 0 && <label>Minutes<input type="number" min="1" max="12" step="any" value={custom} onChange={(event) => setCustom(event.target.value)} required /></label>}
       </div>
+      {mode === "generate" && !durationChosen && durationFromBrief(prompt) && durationFromBrief(prompt) !== duration &&
+        <p className="text-sm text-[var(--muted)]">Using the duration in your brief. You can override it above.</p>}
       <div className="composer-footer">
         {mode === "generate"
           ? <label className="checkbox"><input type="checkbox" checked={review} onChange={(event) => setReview(event.target.checked)} /> Review the script before rendering</label>
