@@ -12,4 +12,6 @@ assert expiration_flags({**published, "completed_at": (now - timedelta(days=2)).
 assert expiration_flags({**published, "thumbnail_publish_status": "retry"}, now) == (True, False)
 assert expiration_flags({**published, "status": "rendering"}, now) == (False, False)
 assert expiration_flags({**published, "created_at": now.isoformat()}, now) == (False, False)
+assert expiration_flags({**published, "publish_at": (now + timedelta(days=20)).isoformat()}, now) == (False, False)
+assert expiration_flags({**published, "publish_at": (now - timedelta(days=2)).isoformat()}, now) == (False, False)
 print("Retention safety tests passed")

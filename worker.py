@@ -394,7 +394,7 @@ def youtube_credentials() -> Credentials:
 
 
 def youtube_chapters(scenes, timeline, duration) -> list[dict]:
-    if duration < 300 or not isinstance(scenes, list) or not isinstance(timeline, list):
+    if duration < 30 or not isinstance(scenes, list) or not isinstance(timeline, list):
         return []
     starts = {}
     for entry in timeline:

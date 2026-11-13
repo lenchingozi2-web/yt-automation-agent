@@ -27,7 +27,7 @@ export function formatYouTubeTime(seconds: number) {
 }
 
 export function teaserDraft(video: StudioVideo, firstScene: number): Draft | undefined {
-  if (!video.youtube_url || (video.actual_duration_seconds || video.duration_seconds) < 300 || !Number.isInteger(firstScene) || firstScene < 1) return;
+  if (!video.youtube_url || ((video.actual_duration_seconds ?? 0) < 300 && video.duration_seconds < 300) || !Number.isInteger(firstScene) || firstScene < 1) return;
   if (!video.scenes[firstScene - 1]?.narration) return;
   const scenes = [];
   let words = 0;

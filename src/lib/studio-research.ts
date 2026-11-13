@@ -289,7 +289,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     const chapters = [
       { count: first, purpose: "Introduce the central question, explain the lead report's background and methods in plain language, and name its publisher when describing the study. Supply title, description, tags and thumbnail_title for the whole video." },
       { count: second, purpose: "Continue directly into the documented findings, their limitations and how the supporting evidence adds context. Open on the findings. Omit a fresh introduction and any closing call to action." },
-      { count: count - first - second, purpose: "Show viewers how to apply or think through the findings with several distinct clearly hypothetical examples. Give concrete steps, explain their limits and close the video. Avoid repeating the study summary." },
+      { count: count - first - second, purpose: "Show viewers how to apply or think through the findings with several distinct clearly hypothetical examples. Give concrete steps, explain their limits and close the video. End with a short takeaway and a transition to more LenxiQ videos, so an end screen can appear during the final scene. Avoid repeating the study summary." },
     ];
     const chapterPrompt = prompt.replace(/Write exactly \d+ scenes with .* in total\./, "");
     const segments = await Promise.all(chapters.map((chapter, index) => modelJson([

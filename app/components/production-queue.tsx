@@ -28,7 +28,7 @@ function videoState(video: StudioVideo) {
   if (video.youtube_url && video.thumbnail_publish_status === "failed") {
     return { label: "Thumbnail needs attention", tone: "error", filter: "Needs attention" };
   }
-  if (video.youtube_url) return { label: video.publish_at ? "Scheduled upload" : "Uploaded to YouTube", tone: "success", filter: "Ready" };
+  if (video.youtube_url) return { label: "Uploaded to YouTube", tone: "success", filter: "Ready" };
 
   if (video.publish_status === "uploading") return { label: "Uploading to YouTube", tone: "active", filter: "In progress" };
   if (video.publish_status === "pending") return { label: "Upload queued", tone: "active", filter: "In progress" };
@@ -146,7 +146,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
     : publishAction === "approve" ? "Approve & publish on YouTube" : "Retry YouTube upload";
   const scheduled = video.publish_at && Date.parse(video.publish_at) > openedAt;
   const releaseInvalid = showSchedule && (!release || Date.parse(release) < openedAt + 15 * 60_000);
-  const fullVideo = (video.actual_duration_seconds || video.duration_seconds) >= 300;
+  const fullVideo = video.duration_seconds >= 300 || (video.actual_duration_seconds ?? 0) >= 300;
   const selectedTeaser = fullVideo ? teaserDraft(video, Number(teaserScene)) : undefined;
   async function send() {
     setAttempted(true);
@@ -199,10 +199,10 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
       {!!video.youtube_chapters?.length && <details className="preview-sources">
         <summary>Video chapters</summary>
         <ul>{video.youtube_chapters.map(({ start, title }) => <li key={start}>{formatYouTubeTime(start)} {title}</li>)}</ul>
-        {fullVideo && <p className="review-note">For a YouTube end screen, preview the final 15 seconds starting at {formatYouTubeTime((video.actual_duration_seconds || video.duration_seconds) - 15)}.</p>}
       </details>}
       {video.youtube_url && <details className="preview-sources">
         <summary>Promote this video</summary>
+        {fullVideo && <p className="review-note">In YouTube Studio, preview an end screen from {formatYouTubeTime((video.actual_duration_seconds || video.duration_seconds) - 15)} and add a related video or playlist.</p>}
         <label>YouTube post draft<textarea readOnly rows={4} value={communityPostFor(video)} /></label>
         <button type="button" className="button button-secondary" onClick={async () => {
           try { await navigator.clipboard.writeText(communityPostFor(video)); setCopyState("Post copied."); }

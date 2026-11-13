@@ -58,6 +58,14 @@ def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
             completed = completed.replace(tzinfo=timezone.utc)
     except ValueError:
         return False, False
+    if data.get("publish_at"):
+        try:
+            release = datetime.fromisoformat(str(data["publish_at"]).replace("Z", "+00:00"))
+            if release.tzinfo is None:
+                release = release.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False, False
+        completed = max(completed, release)
     age = now - completed
     render_bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     thumb_bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
