@@ -53,6 +53,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           STUDIO_SCRIPT_TRACE: '1'
+          STUDIO_PUBLIC_FIXTURE_TRACE: '1'
         run: |
           python - <<'PYTHON'
           import json, os, subprocess
@@ -73,7 +74,7 @@ jobs:
           result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
                                   input=json.dumps(dict(brief="Explain this study and apply it to learning.",
                                       seconds=720, ratio="16:9", recent=[], briefing=lead)),
-                                  text=True, stdout=subprocess.PIPE, timeout=260, check=True)
+                                  text=True, stdout=subprocess.PIPE, timeout=290, check=True)
           draft = json.loads(result.stdout)
           assert draft["duration_seconds"] == 720 and draft["format"] == "16:9"
           assert all(link in draft["description"] for link in lead["references"])
