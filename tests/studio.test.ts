@@ -209,3 +209,39 @@ test("the upload action is available for a saved MP4 and tracks approval, retrie
   assert.equal(youtubePublishAction({ ...approved, youtube_id: "AbCdEf12345" }), undefined);
   assert.equal(youtubePublishAction({ ...video, video_url: "" }), undefined);
 });
+
+
+test("a long draft gets one spoken CTA at a chapter transition without changing its facts", async () => {
+  const { addViewerPrompt } = await import("../src/lib/studio-growth.ts");
+  const draft = normalizeDraft({ duration_seconds: 720, scenes: Array.from({ length: 12 }, (_, index) => ({
+    narration: `Scene ${index + 1} explains a different part of the study.`,
+    source_ids: [1], search_queries: ["laboratory"],
+    chapter_title: [0, 4, 8].includes(index) ? "A study chapter" : undefined,
+  })) });
+  const result = addViewerPrompt(draft, "If this study breakdown helped, like the video and subscribe for more.");
+  assert.equal(result.scenes.length, 13);
+  assert.match(result.scenes[4].narration, /like the video and subscribe/);
+  assert.deepEqual(result.scenes[4].source_ids, []);
+  assert.equal(result.scenes[5].chapter_title, "A study chapter");
+  assert.equal(addViewerPrompt(result).scenes.length, 13);
+  assert.equal(addViewerPrompt({ ...draft, duration_seconds: 90 }).scenes.length, 12);
+});
+
+test("teaser reuses reviewed narration and schedule uses the displayed Lagos time", async () => {
+  const { teaserDraft, parseLagosPublishTime, formatLagosPublishInput } = await import("../src/lib/studio-growth.ts");
+  const video = normalizeVideo({ title: "How this study works", status: "completed",
+    duration_seconds: 700, youtube_id: "AbCdEf12345",
+    scenes: Array.from({ length: 7 }, () => ({ narration: "This was the approach the authors described when they published their methods and study details.", search_queries: ["lab"] })),
+  });
+  const short = teaserDraft(video, 2);
+  assert.equal(short?.format, "9:16");
+  assert.equal(short?.duration_seconds, 60);
+  assert.ok(short?.description.includes("AbCdEf12345"));
+  assert.equal(short?.scenes[0].narration, video.scenes[1].narration);
+  assert.equal(teaserDraft(video, 7), undefined);
+  assert.equal(teaserDraft({ ...video, youtube_url: "" }, 2), undefined);
+  const stamp = parseLagosPublishTime("2026-12-01T08:15");
+  assert.equal(stamp, "2026-12-01T07:15:00.000Z");
+  assert.equal(formatLagosPublishInput(stamp), "2026-12-01T08:15");
+  assert.equal(parseLagosPublishTime("2026-02-31T08:15"), undefined);
+});

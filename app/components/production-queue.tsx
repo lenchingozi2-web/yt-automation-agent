@@ -1,7 +1,8 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
-import { canRetryYouTubeThumbnail, groupProductions, youtubePublishAction, youtubeStudioUrl, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
+import { canRetryYouTubeThumbnail, groupProductions, youtubePublishAction, youtubeStudioUrl, type Draft, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
+import { communityPostFor, formatLagosPublishInput, formatYouTubeTime, parseLagosPublishTime, teaserDraft } from "@/src/lib/studio-growth";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
 const FILTERS = ["All", "In progress", "Ready", "Needs attention"] as const;
@@ -27,7 +28,7 @@ function videoState(video: StudioVideo) {
   if (video.youtube_url && video.thumbnail_publish_status === "failed") {
     return { label: "Thumbnail needs attention", tone: "error", filter: "Needs attention" };
   }
-  if (video.youtube_url) return { label: "Uploaded to YouTube", tone: "success", filter: "Ready" };
+  if (video.youtube_url) return { label: video.publish_at ? "Scheduled upload" : "Uploaded to YouTube", tone: "success", filter: "Ready" };
 
   if (video.publish_status === "uploading") return { label: "Uploading to YouTube", tone: "active", filter: "In progress" };
   if (video.publish_status === "pending") return { label: "Upload queued", tone: "active", filter: "In progress" };
@@ -119,8 +120,9 @@ function RevisionForm({ video, busy, submit }: {
   </form>;
 }
 
-function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback, latest, editable }: {
-  video: StudioVideo; close: () => void; approve: () => Promise<boolean>;
+function Preview({ video, close, approve, revise, retryThumbnail, createShort, busy, feedback, latest, editable }: {
+  video: StudioVideo; close: () => void; approve: (publishAt?: string) => Promise<boolean>;
+  createShort: (draft: Draft) => void;
   revise: (input: RevisionInput) => Promise<boolean>; retryThumbnail: () => Promise<boolean>; busy: boolean; feedback: Feedback | null;
   latest: boolean; editable: boolean;
 }) {
@@ -129,15 +131,26 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
   const [playerVersion, setPlayerVersion] = useState(0);
   const [editing, setEditing] = useState(!video.video_url && !video.youtube_url);
   const [attempted, setAttempted] = useState(false);
+  const [openedAt] = useState(Date.now);
+  const [schedule, setSchedule] = useState(() => formatLagosPublishInput(video.publish_at));
+  const [showSchedule, setShowSchedule] = useState(Boolean(video.publish_at));
+  const [copyState, setCopyState] = useState("");
+  const [teaserScene, setTeaserScene] = useState("1");
   const player = useRef<HTMLVideoElement>(null);
   const youtubeEdit = youtubeStudioUrl(video);
   const thumbnailFailed = video.thumbnail_publish_status === "failed";
   const publishAction = youtubePublishAction(video);
   const queued = !publishAction && ["pending", "uploading"].includes(video.publish_status ?? "");
-  const publishLabel = publishAction === "approve" ? "Approve & publish on YouTube" : "Retry YouTube upload";
+  const release = showSchedule ? parseLagosPublishTime(schedule) : undefined;
+  const publishLabel = showSchedule ? "Approve & schedule on YouTube"
+    : publishAction === "approve" ? "Approve & publish on YouTube" : "Retry YouTube upload";
+  const scheduled = video.publish_at && Date.parse(video.publish_at) > openedAt;
+  const releaseInvalid = showSchedule && (!release || Date.parse(release) < openedAt + 15 * 60_000);
+  const fullVideo = (video.actual_duration_seconds || video.duration_seconds) >= 300;
+  const selectedTeaser = fullVideo ? teaserDraft(video, Number(teaserScene)) : undefined;
   async function send() {
     setAttempted(true);
-    if (await approve()) setConfirming(false);
+    if (await approve(release)) setConfirming(false);
   }
   return <Modal titleId="preview-title" close={close} className="preview-dialog">
     <header className="dialog-header">
@@ -164,7 +177,9 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
         <ul>{video.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul>
       </details>}
       {youtubeEdit && <section className="revision-panel" aria-label="YouTube upload details">
-        <p className="review-note">{video.youtube_visibility_at_upload === "public" ? "YouTube accepted the public upload."
+        <p className="review-note">{scheduled ? "Scheduled for " + new Intl.DateTimeFormat("en-NG", { dateStyle: "medium", timeStyle: "short", timeZone: "Africa/Lagos" }).format(new Date(video.publish_at!)) + " WAT."
+          : video.publish_at ? "Check the current visibility in YouTube Studio."
+          : video.youtube_visibility_at_upload === "public" ? "YouTube accepted the public upload."
           : video.youtube_visibility_at_upload ? `YouTube reported ${video.youtube_visibility_at_upload} visibility. Check YouTube Studio to review it.`
           : "Manage this video’s visibility in YouTube Studio."}</p>
         {["pending", "retry"].includes(video.thumbnail_publish_status ?? "") && <p className="review-note" role="status">
@@ -181,6 +196,32 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
           </button>}
         </div>}
       </section>}
+      {!!video.youtube_chapters?.length && <details className="preview-sources">
+        <summary>Video chapters</summary>
+        <ul>{video.youtube_chapters.map(({ start, title }) => <li key={start}>{formatYouTubeTime(start)} {title}</li>)}</ul>
+        {fullVideo && <p className="review-note">For a YouTube end screen, preview the final 15 seconds starting at {formatYouTubeTime((video.actual_duration_seconds || video.duration_seconds) - 15)}.</p>}
+      </details>}
+      {video.youtube_url && <details className="preview-sources">
+        <summary>Promote this video</summary>
+        <label>YouTube post draft<textarea readOnly rows={4} value={communityPostFor(video)} /></label>
+        <button type="button" className="button button-secondary" onClick={async () => {
+          try { await navigator.clipboard.writeText(communityPostFor(video)); setCopyState("Post copied."); }
+          catch { setCopyState("Select the draft text to copy it."); }
+        }}>Copy post</button>
+        {copyState && <p className="review-note" role="status">{copyState}</p>}
+        {fullVideo && <div className="revision-panel">
+          <label>Teaser start scene
+            <select value={teaserScene} onChange={(event) => setTeaserScene(event.target.value)}>
+              {video.scenes.map((scene) => <option key={scene.scene_number} value={scene.scene_number}>
+                Scene {scene.scene_number}{scene.chapter_title ? " · " + scene.chapter_title : ""}
+              </option>)}
+            </select>
+          </label>
+          <button type="button" className="button button-secondary" disabled={!selectedTeaser || busy}
+            onClick={() => { if (selectedTeaser) { close(); createShort(selectedTeaser); } }}>Draft teaser Short</button>
+          <p className="review-note">{selectedTeaser ? "Review this portrait excerpt before rendering. After uploading it, select this video in the Short’s Related video field." : "Choose a scene with enough narration for an excerpt."}</p>
+        </div>}
+      </details>}
       {editing && <div className="revision-panel">
         {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
         <p className="review-note">{video.scene_times?.length && video.video_url
@@ -194,10 +235,17 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
       {!editing && attempted && feedback && <Notice feedback={feedback} />}
       {!editing && queued && <p className="review-note" role="status">{video.publish_status === "uploading"
         ? (video.progress_note || "Uploading to YouTube.") + " You can close this window while it runs." : "Approved. Waiting for the YouTube upload worker."}</p>}
+      {!editing && publishAction && <details open={showSchedule} onToggle={(event) => setShowSchedule(event.currentTarget.open)}>
+        <summary>Schedule release</summary>
+        <label>Release time (WAT)<input type="datetime-local" value={schedule}
+          min={formatLagosPublishInput(new Date(openedAt + 16 * 60_000).toISOString())}
+          onChange={(event) => setSchedule(event.target.value)} /></label>
+        <p className="review-note">Choose a time at least 15 minutes ahead. YouTube keeps the upload private until release.</p>
+      </details>}
       {!editing && publishAction && !confirming && <p className="review-note">{publishAction === "recheck"
-        ? "Check YouTube Studio for an existing copy before retrying." : "Review the preview or downloaded MP4. Approval queues a public upload."}</p>}
+        ? "Check YouTube Studio for an existing copy before retrying." : showSchedule ? "Approval queues the upload and schedules its public release." : "Review the preview or downloaded MP4. Approval queues a public upload."}</p>}
       {!editing && publishAction === "recheck" && confirming && <p id="publish-confirmation" className="review-note" role="status">
-        Confirm that you checked YouTube Studio and found no existing copy. Retrying will request a public upload.
+        Confirm that you checked YouTube Studio and found no existing copy. {showSchedule ? "The retry will schedule the public release." : "The retry will request a public upload."}
       </p>}
       {!editing && video.publish_error && !queued && <p className="video-problem" role="status">
         {video.publish_error}{video.publish_status === "retry" && clock(video.publish_retry_at) && " Next attempt after " + clock(video.publish_retry_at) + "."}
@@ -210,7 +258,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
         }}>{editing ? "Close editor" : "Regenerate or edit"}</button>}
         {publishAction === "recheck" && !editing && <a className="button button-secondary" href="https://studio.youtube.com/" target="_blank" rel="noreferrer">Check YouTube Studio <ArrowUpRight size={17} /></a>}
         {publishAction && !editing && confirming && <button type="button" className="button button-secondary" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>}
-        {publishAction && !editing && <button type="button" className="button button-primary" disabled={busy}
+        {publishAction && !editing && <button type="button" className="button button-primary" disabled={busy || releaseInvalid}
           aria-describedby={confirming ? "publish-confirmation" : undefined} onClick={() => {
             player.current?.pause();
             if (publishAction !== "recheck" || confirming) void send();
@@ -224,12 +272,13 @@ function Preview({ video, close, approve, revise, retryThumbnail, busy, feedback
   </Modal>;
 }
 
-export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, feedback, reuse }: {
+export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, feedback, reuse, createShort }: {
   videos: StudioVideo[]; loading: boolean; error: string; refreshing: boolean; refresh: () => void;
-  busy: string | null; retry: (video: StudioVideo, publish?: boolean) => Promise<boolean>; feedback: Feedback | null;
+  busy: string | null; retry: (video: StudioVideo, publish?: boolean, publishAt?: string) => Promise<boolean>; feedback: Feedback | null;
   retryThumbnail: (video: StudioVideo) => Promise<boolean>;
   revise: (video: StudioVideo, input: RevisionInput) => Promise<boolean>;
   reuse: (video: StudioVideo) => void;
+  createShort: (draft: Draft) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("All");
   const [search, setSearch] = useState("");
@@ -317,7 +366,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
     {preview && previewGroup && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
       latest={preview.id === previewGroup.latest.id}
       editable={preview.id === previewGroup.latest.id || (previewGroup.latest.status === "failed" && preview.id === previewGroup.playable?.id)}
-      approve={() => retry(preview, true)} revise={(input) => revise(preview, input)}
+      approve={(publishAt) => retry(preview, true, publishAt)} createShort={createShort} revise={(input) => revise(preview, input)}
       retryThumbnail={() => retryThumbnail(preview)} busy={busy !== null} feedback={feedback} />}
   </section>;
 }

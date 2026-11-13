@@ -1,3 +1,4 @@
+import { addViewerPrompt } from "./studio-growth.ts";
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 
 type Json = Record<string, unknown>;
@@ -19,7 +20,7 @@ const API = "https://generativelanguage.googleapis.com/v1beta/models/";
 const EDITORIAL = [
   "Write for a real person watching YouTube. Open with a specific problem, observation, or question the video can actually answer.",
   "Speak plainly with contractions and natural cadence. Use short clauses that also read well as captions. Each scene must advance the story.",
-  "Choose examples and a structure particular to this topic. Avoid stock hooks, invented anecdotes presented as real, repeated lines, empty hype and generic calls to subscribe.",
+  "Choose examples and a structure particular to this topic. Avoid stock hooks, invented anecdotes presented as real, repeated lines, empty hype and any like or subscribe requests in scene narration. Studio handles viewer prompts separately.",
   "Keep a distinction between observed evidence, hypotheses, and clearly labelled hypothetical examples. Preserve the original population, dates, quantities and limitations of any findings.",
   "Do not infer efficacy, diagnosis, safety, or causation from a technical capability, an association, or an early study. Never invent a citation.",
   "Visual search terms must be 2–4 words describing concrete visible actions, objects or settings. Give each scene an identifiable visual idea. Avoid green screens, brands, logos and generic filler.",
@@ -273,7 +274,9 @@ export async function researchedDraft(brief: string, duration: number, format: D
       "Use original narration and descriptions. Write a description without links. Studio will append all of the briefing’s exact URLs.",
     ] : []),
     ...(duration >= 300 ? ["Develop a long-form arc with the original question, what the researchers actually did, the findings, what remains uncertain, and a practical application. Use distinct, clearly hypothetical examples or commentary to explain the evidence without inventing facts or repeating the summary. Avoid verbatim source wording."] : []),
-    "The title, description and thumbnail must deliver a real, specific promise supported by the video. Never invent a result to make the hook stronger.",
+    "Use the main topic in a natural title and in the first two sentences of the description. Describe what viewers will learn in plain language. Use a few directly relevant tags. Avoid stuffing keywords or repeating the title.",
+    "The title, description and thumbnail must deliver a real, specific promise supported by the video. Deliver part of that promise in the first 30 seconds. Start the first scene with the actual topic or an illuminating example. Never invent a result to make the hook stronger.",
+    "Also return community_post: one brief question a viewer could answer after watching. Make it specific to the subject, with no claims, links or requests for personal health details.",
     "Do not copy previous titles or closely paraphrase their angle unless the user specifically requests it. Avoid repeating a location, prop, or setup across adjacent scenes.",
     `Write exactly ${count} scenes with ${lower}–${upper} words of narration in each scene. Count the words in the narration fields and aim for ${totalTarget} in total.`,
     `The video is ${duration} seconds and ${format}. Expand short scenes with a concrete example or a clearer explanation. Do not use markdown or speaker labels.`,
@@ -293,15 +296,20 @@ export async function researchedDraft(brief: string, duration: number, format: D
       chapterPrompt,
       `Write only chapter ${index + 1} of one video. Write exactly ${chapter.count} scenes, with ${lower}–${upper} spoken words per scene. ${chapter.purpose}`,
       "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
+      "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
+      ...(index === 0 ? ["Also return viewer_prompt as one optional sentence under 25 words inviting viewers to like and subscribe, tied to this video's subject or payoff. Use a casual tone and make no factual claims. Keep it out of the scenes."] : []),
       correction,
     ].join("\n"), Math.max(3200, chapter.count * 250), 35000)));
-    return { ...segments[0], scenes: segments.flatMap((segment) => list(segment.scenes)).map((scene, i) => ({
-      ...object(scene), scene_number: i + 1,
+    return { ...segments[0], scenes: segments.flatMap((segment, chapter) => list(segment.scenes).map((scene, index) => ({
+      ...object(scene), chapter_title: index === 0 ? text(segment.chapter_title) || ["The question", "What the evidence shows", "Putting it into practice"][chapter] : undefined,
+    }))).map((scene, i) => ({
+      ...scene, scene_number: i + 1,
     })) };
   };
   let problem = "";
   let prior: Json | undefined;
   let auditedDraft: Draft | undefined;
+  let viewerPrompt: unknown;
   for (let attempt = 0; attempt < (duration >= 300 ? 5 : process.env.STUDIO_PREFER_GROQ === "1" ? 3 : 2); attempt++) {
     trace("Draft attempt " + (attempt + 1) + ".");
     const correction = problem ? "\nCorrect every issue from the previous draft. Remove unsupported specifics or replace them with directly supported wording. " +
@@ -321,7 +329,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
       ].join("\n"), 5500, 32000);
       const changed = new Map(list(repair.scenes).map((scene) => {
         const patch = object(scene);
-        return [Number(patch.scene_number), patch];
+        return [Number(patch.scene_number), { narration: patch.narration, search_queries: patch.search_queries, source_ids: patch.source_ids }];
       }));
       raw = { ...auditedDraft,
         title: text(repair.title) || auditedDraft.title, description: text(repair.description) || auditedDraft.description,
@@ -332,6 +340,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     }
     auditedDraft = undefined;
     prior = raw;
+    if (raw.viewer_prompt) viewerPrompt = raw.viewer_prompt;
     let checkedClaims = false;
     const draft = { ...normalizeDraft({ ...raw, sources: sourceList(evidence) }), format, duration_seconds: duration };
     try {
@@ -384,7 +393,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const sources = draft.sources?.filter((source) => source.id && (cited.has(source.id) || briefing?.references.includes(source.url))) ?? [];
       const references = sources.map((source) => [source.publisher, source.url].filter(Boolean).join(" — ")).join("\n");
       const description = references ? draft.description.slice(0, Math.max(0, Math.min(3400, 4700 - references.length))).trim() + "\n\nSources\n" + references : draft.description;
-      return { ...draft, description, sources };
+      return addViewerPrompt({ ...draft, description, sources }, viewerPrompt);
     } catch (error) {
       if (error instanceof Error && error.message.includes("writing model is unavailable")) throw error;
       problem = error instanceof Error ? error.message : "Invalid draft.";

@@ -53,7 +53,7 @@ export async function POST(request: Request) {
         ids.set(source.id, id);
       }
       draft.sources = all;
-      draft.scenes[sceneNumber - 1] = { ...result.scene, source_ids: result.scene.source_ids?.map((id) => ids.get(id)!) };
+      draft.scenes[sceneNumber - 1] = { ...result.scene, chapter_title: scene.chapter_title, source_ids: result.scene.source_ids?.map((id) => ids.get(id)!) };
     }
     let source = video;
     const visited = new Set([id]);

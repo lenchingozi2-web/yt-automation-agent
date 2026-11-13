@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 import os
 import subprocess
+import unicodedata
 import wave
 import time
 from pathlib import Path
@@ -392,19 +393,54 @@ def youtube_credentials() -> Credentials:
     return credentials
 
 
+def youtube_chapters(scenes, timeline, duration) -> list[dict]:
+    if duration < 300 or not isinstance(scenes, list) or not isinstance(timeline, list):
+        return []
+    starts = {}
+    for entry in timeline:
+        if isinstance(entry, dict) and isinstance(entry.get("start"), (int, float)) and math.isfinite(entry["start"]):
+            starts.setdefault(entry.get("scene_number"), int(entry["start"]))
+    chapters = []
+    for index, scene in enumerate(scenes, 1):
+        label = scene.get("chapter_title") if isinstance(scene, dict) else None
+        start = starts.get(index)
+        if not isinstance(label, str) or start is None or not 0 <= start <= duration - 10:
+            continue
+        label = " ".join(re.sub(r"[<>\x00-\x1f]", " ", label).split())[:80]
+        if label and (not chapters or start - chapters[-1]["start"] >= 10):
+            chapters.append({"start": start, "title": label})
+    return chapters if len(chapters) >= 3 and chapters[0]["start"] == 0 else []
+
+
+def youtube_filename(title: str) -> str:
+    name = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode().lower()
+    return (re.sub(r"[^a-z0-9]+", "-", name).strip("-")[:90].rstrip("-") or "lenxiq-video") + ".mp4"
+
+
 def youtube_snippet(video: dict[str, Any]) -> dict[str, Any]:
     def clean(value: Any) -> str:
         return re.sub(r"[<>\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value or "")).strip()
 
     title = " ".join(clean(video["title"]).split())[:100] or "LenxiQ Studio video"
     description = clean(video.get("description"))
-    if len(description.encode()) > 5000:
-        summary, divider, sources = description.rpartition("\n\nSources\n")
-        references = divider + sources
-        if divider and len(references.encode()) < 5000:
-            description = summary.encode()[:5000 - len(references.encode())].decode(errors="ignore").rstrip() + references
-        else:
-            description = description.encode()[:5000].decode(errors="ignore").rstrip()
+    summary, divider, sources = description.rpartition("\n\nSources\n")
+    if not divider:
+        summary = description
+    sections = []
+    chapters = video.get("youtube_chapters") or []
+    if chapters and not re.search(r"^0{1,2}:00\s+\S", summary, re.M):
+        entries = [f'{chapter["start"] // 60:02d}:{chapter["start"] % 60:02d} {clean(chapter["title"])}'
+                   for chapter in chapters]
+        sections.append("Chapters\n" + "\n".join(entries))
+    if divider:
+        sections.append("Sources\n" + sources)
+    footer = ("\n\n" + "\n\n".join(sections)) if sections else ""
+    if len(footer.encode()) >= 5000:
+        footer = ("\n\nSources\n" + sources) if divider else ""
+    if len(footer.encode()) >= 5000:
+        footer = footer.encode()[:4950].decode(errors="ignore").rsplit("\n", 1)[0]
+    budget = 5000 - len(footer.encode())
+    description = (summary.encode()[:budget].decode(errors="ignore").rstrip() + footer).strip()
     tags = []
     remaining = 500
     values = video.get("tags")
@@ -417,14 +453,28 @@ def youtube_snippet(video: dict[str, Any]) -> dict[str, Any]:
     return {"title": title, "description": description, "tags": tags, "categoryId": "27"}
 
 
+class PublishTimePassed(ValueError):
+    """An approved release time elapsed before the upload could start."""
+
+
+def youtube_upload_status(video, now):
+    release = parse_timestamp(video.get("publish_at"))
+    if release is not None and release <= now:
+        raise PublishTimePassed
+    status = {"privacyStatus": "private" if release else "public", "selfDeclaredMadeForKids": False}
+    if release:
+        status["publishAt"] = release.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return status
+
+
 class UploadOutcomeUncertain(RuntimeError):
     """A resumable request may have reached YouTube without a final response."""
 
 
 def upload_youtube(video: dict[str, Any], file_path: Path, on_progress=None) -> tuple[str, str | None]:
+    status = youtube_upload_status(video, datetime.now(timezone.utc))
     youtube = build("youtube", "v3", credentials=youtube_credentials())
-    request = youtube.videos().insert(part="snippet,status", body={"snippet": youtube_snippet(video), "status": {
-        "privacyStatus": "public", "selfDeclaredMadeForKids": False}},
+    request = youtube.videos().insert(part="snippet,status", body={"snippet": youtube_snippet(video), "status": status},
         media_body=MediaFileUpload(str(file_path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True))
     response = None
     failures = 0
@@ -867,9 +917,17 @@ def process(video: dict[str, Any], supabase) -> None:
 
     save_fields(supabase, video, progress_note="Saving MP4 preview")
     storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
+    raw_scenes = video.get("scenes")
+    if isinstance(raw_scenes, str):
+        raw_scenes = json.loads(raw_scenes)
+    if isinstance(raw_scenes, dict):
+        raw_scenes = raw_scenes.get("scenes")
+    if not isinstance(raw_scenes, list):
+        raw_scenes = decode(video.get("script")).get("scenes")
+    chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url, actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline, youtube_chapters=chapters,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 and thumbnail ready for review.", error_message=None)
@@ -877,6 +935,8 @@ def process(video: dict[str, Any], supabase) -> None:
 
 
 def safe_publish_error(error: Exception) -> tuple[str, str]:
+    if isinstance(error, PublishTimePassed):
+        return "failed", "The scheduled time passed before upload. Choose a new release time or publish now."
     if isinstance(error, UploadOutcomeUncertain):
         return "upload_uncertain", "YouTube did not confirm the upload. Check YouTube Studio for an existing copy before retrying."
     text = str(error)
@@ -911,7 +971,7 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
     try:
         if master is None:
             # Fetch only this job's trusted storage object, never a row-supplied URL.
-            master = directory / "publish_preview.mp4"
+            master = directory / youtube_filename(str(details.get("title") or ""))
             bucket = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
             content = retry_io(lambda: bucket.download(str(video["id"]) + ".mp4"), "download approved MP4")
             master.write_bytes(content)
@@ -942,7 +1002,7 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
                 publish_status="uploaded", published_at=datetime.now(timezone.utc).isoformat(),
                 thumbnail_publish_status="pending", thumbnail_publish_attempts=0, thumbnail_retry_at=None,
                 publish_error=None, youtube_visibility_at_upload=actual_visibility,
-                progress_note="MP4 ready. Uploaded to YouTube.")
+                progress_note="MP4 ready. Scheduled on YouTube." if details.get("publish_at") else "MP4 ready. Uploaded to YouTube.")
     print("[youtube] Upload confirmed:", video["id"], "visibility:", actual_visibility or "unreported", flush=True)
     apply_uploaded_thumbnail(video, supabase, youtube_id, thumbnail)
 

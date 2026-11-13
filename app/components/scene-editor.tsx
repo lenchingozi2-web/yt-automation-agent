@@ -55,6 +55,8 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
                 <button type="button" className="icon-button danger" aria-label={`Delete scene ${index + 1}`} onClick={() => updateScenes(draft.scenes.filter((_, i) => i !== index))}><Trash2 size={16} /></button>
               </div>
             </div>
+            {scene.chapter_title && <label>Chapter title<input value={scene.chapter_title} maxLength={80}
+              onChange={(event) => updateScene(index, { chapter_title: event.target.value })} /></label>}
             <label>Narration<textarea rows={3} required value={scene.narration} onChange={(event) => updateScene(index, { narration: event.target.value })} /></label>
             <label>Footage search terms <small>Separated by commas</small><input value={scene.search_queries.join(",")}
               onChange={(event) => updateScene(index, { search_queries: event.target.value.split(",") })} /></label>

@@ -78,7 +78,12 @@ jobs:
           draft = json.loads(result.stdout)
           assert draft["duration_seconds"] == 720 and draft["format"] == "16:9"
           assert all(link in draft["description"] for link in lead["references"])
+          ctas = [index for index, scene in enumerate(draft["scenes"])
+                  if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
+          assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65
+          assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
+          assert draft.get("community_post")
           count = sum(len(scene["narration"].split()) for scene in draft["scenes"])
           assert count >= 1188
-          print(f"PASS: 12-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words and named sources.", flush=True)
+          print(f"PASS: 12-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words, one mid-video CTA, chapter markers and named sources.", flush=True)
           PYTHON

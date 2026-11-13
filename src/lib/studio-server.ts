@@ -63,7 +63,7 @@ const missingColumn = (error: unknown) => {
 function scriptPayload(draft: Draft) {
   return { ...draft, aspect_ratio: draft.format, duration: draft.duration_seconds, metadata: {
     aspect_ratio: draft.format, duration: draft.duration_seconds, description: draft.description,
-    tags: draft.tags, sources: draft.sources, video_url: "", youtube_url: "", error_message: "" } };
+    tags: draft.tags, sources: draft.sources, community_post: draft.community_post, video_url: "", youtube_url: "", error_message: "" } };
 }
 export async function safeInsertVideo(client: SupabaseClient, approved: unknown, userId?: string, jobId?: string, revision?: VideoRevision) {
   const draft = normalizeDraft(approved);

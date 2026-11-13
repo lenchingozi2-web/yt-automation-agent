@@ -32,6 +32,31 @@ class UploadRegression(unittest.TestCase):
         self.assertLessEqual(len(snippet["description"].encode()), 5000)
         self.assertEqual(snippet["tags"], ["learning", "health"])
 
+    def test_youtube_chapters_use_rendered_timestamps_and_keep_sources(self):
+        from worker import youtube_chapters, youtube_filename, youtube_snippet
+        scenes = [{"chapter_title": "The study question"}, {}, {"chapter_title": "The findings"},
+                  {"chapter_title": "Putting it into practice"}]
+        timeline = [{"scene_number": i + 1, "start": t} for i, t in enumerate([0, 8, 143.75, 281.4])]
+        chapters = youtube_chapters(scenes, timeline, 695)
+        self.assertEqual([chapter["start"] for chapter in chapters], [0, 143, 281])
+        snippet = youtube_snippet({"title": "The Study", "description": "é" * 3000 + "\n\nSources\nhttps://example.org/study",
+                                  "youtube_chapters": chapters})
+        self.assertIn("00:00 The study question\n02:23 The findings\n04:41 Putting it into practice", snippet["description"])
+        self.assertTrue(snippet["description"].endswith("https://example.org/study"))
+        self.assertLessEqual(len(snippet["description"].encode()), 5000)
+        self.assertEqual(youtube_filename("À study about AI & health"), "a-study-about-ai-health.mp4")
+
+    def test_youtube_upload_schedule_is_explicit_and_late_upload_stops(self):
+        from datetime import datetime, timezone
+        from worker import PublishTimePassed, youtube_upload_status
+        now = datetime(2026, 11, 13, tzinfo=timezone.utc)
+        self.assertEqual(youtube_upload_status({}, now)["privacyStatus"], "public")
+        future = youtube_upload_status({"publish_at": "2026-11-13T08:00:00+01:00"}, now)
+        self.assertEqual(future["privacyStatus"], "private")
+        self.assertEqual(future["publishAt"], "2026-11-13T07:00:00Z")
+        with self.assertRaises(PublishTimePassed):
+            youtube_upload_status({"publish_at": "2026-11-12T08:00:00Z"}, now)
+
     @patch("worker.time.sleep")
     @patch("worker.MediaFileUpload")
     @patch("worker.youtube_credentials")

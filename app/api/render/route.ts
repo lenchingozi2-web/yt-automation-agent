@@ -43,8 +43,13 @@ export async function POST(request: Request) {
         if (action === "recheck" && body.checkedYouTube !== true) {
           throw new StudioRequestError("Check YouTube Studio for an existing copy before retrying.", 409);
         }
+        const release = body.publishAt == null || body.publishAt === "" ? null : typeof body.publishAt === "string" ? Date.parse(body.publishAt) : NaN;
+        if (release !== null && (!Number.isFinite(release) || release < Date.now() + 15 * 60_000)) {
+          throw new StudioRequestError("Choose a release time at least 15 minutes from now, or publish now.", 400);
+        }
         first._studio = {
           ...meta,
+          publish_at: release === null ? null : new Date(release).toISOString(),
           publish_approved_at: new Date().toISOString(),
           publish_approved_by: userId,
           publish_requested: true,
@@ -95,7 +100,7 @@ export async function POST(request: Request) {
     }
     const dispatch = await dispatchStudioWorker();
     return NextResponse.json({
-      ok: true, message: publishing ? "Approved. The saved MP4 is queued for a public YouTube upload." : "Video queued for rendering.",
+      ok: true, message: publishing ? (normalizeVideo(saved).publish_at ? "Approved. Studio will upload and schedule the release on YouTube." : "Approved. The saved MP4 is queued for a public YouTube upload.") : "Video queued for rendering.",
       video: normalizeVideo(saved), workerDispatched: dispatch.dispatched, note: dispatch.note,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

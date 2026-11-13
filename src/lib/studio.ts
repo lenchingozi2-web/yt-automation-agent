@@ -1,5 +1,5 @@
-export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[] };
-export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[] };
+export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string };
+export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[]; community_post?: string };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
 export const PUBMED_SOURCE = /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/$/;
 export const ERIC_SOURCE = /^https:\/\/eric\.ed\.gov\/\?id=(E[JD]\d+)$/;
@@ -8,7 +8,7 @@ export function isBriefingSource(url: string) {
 }
 export type RevisionMode = "audio" | "visual" | "rewrite";
 export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; publish_retry_at?: string; youtube_visibility_at_upload?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; publish_retry_at?: string; publish_at?: string; youtube_chapters?: { start: number; title: string }[]; youtube_visibility_at_upload?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
 export function youtubeStudioUrl(video: StudioVideo) {
   return /^[A-Za-z0-9_-]{11}$/.test(video.youtube_id ?? "") ? `https://studio.youtube.com/video/${video.youtube_id}/edit` : "";
 }
@@ -86,6 +86,10 @@ export function footageSearches(scene: Scene, direction: string): string[] {
   return [...new Set(terms.map((term) => term.trim().toLowerCase()))].slice(0, 5);
 }
 
+function shortLine(value: unknown, limit: number) {
+  return typeof value === "string" ? value.replace(/https?:\/\/\S+/gi, "").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, limit) || undefined : undefined;
+}
+
 const stringOf = (v: unknown, fallback = "") => typeof v === "string" ? v : fallback;
 export function normalizeDraft(value: unknown): Draft {
   const outer = objectOf(value);
@@ -102,7 +106,7 @@ export function normalizeDraft(value: unknown): Draft {
     const r = objectOf(raw);
     return { scene_number: index + 1, narration: stringOf(r.narration || r.voiceover || r.text).trim(),
       search_queries: (Array.isArray(r.search_queries) ? r.search_queries : stringOf(r.search_queries || r.keywords).split(",")).filter((q: unknown): q is string => typeof q === "string" && !!q.trim()).map(q => q.trim()).slice(0, 5),
-      estimated_duration: Number(r.estimated_duration) || 15,
+      estimated_duration: Number(r.estimated_duration) || 15, chapter_title: shortLine(r.chapter_title, 80),
       source_ids: Array.isArray(r.source_ids) ? [...new Set(r.source_ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))].slice(0, 12) : [] };
   });
   const first = entries.length > 0 ? objectOf(entries[0]) : {};
@@ -121,7 +125,7 @@ export function normalizeDraft(value: unknown): Draft {
   return { title: stringOf(source.title, "Untitled production"), description: stringOf(source.description || nested.description),
     tags: (Array.isArray(source.tags) ? source.tags : Array.isArray(nested.tags) ? nested.tags : stringOf(source.tags).split(",")).filter((t: unknown): t is string => typeof t === "string" && !!t.trim()),
     format: ratio === "9:16" ? "9:16" : "16:9",
-    duration_seconds: Math.round(duration ?? 180), scenes, sources,
+    duration_seconds: Math.round(duration ?? 180), scenes, sources, community_post: shortLine(source.community_post, 350),
     thumbnail_title: stringOf(source.thumbnail_title || nested.thumbnail_title || source.thumbnailTitle || source.title, "New story") };
 }
 export function normalizeVideo(raw: unknown): StudioVideo {
@@ -155,6 +159,11 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     progress_note: stringOf(meta.progress_note || meta.progress || meta.note),
     publish_status: stringOf(meta.publish_status), publish_error: stringOf(meta.publish_error),
     publish_approved_at: stringOf(meta.publish_approved_at), publish_retry_at: stringOf(meta.publish_retry_at),
+    publish_at: stringOf(meta.publish_at),
+    youtube_chapters: Array.isArray(meta.youtube_chapters) ? meta.youtube_chapters.flatMap((entry) => {
+      const { start, title } = objectOf(entry);
+      return typeof start === "number" && Number.isFinite(start) && start >= 0 && typeof title === "string" ? [{ start, title }] : [];
+    }) : undefined,
     youtube_visibility_at_upload: stringOf(meta.youtube_visibility_at_upload),
     thumbnail_publish_status: stringOf(meta.thumbnail_publish_status),
     actual_duration_seconds: Number(meta.actual_duration_seconds) || undefined,

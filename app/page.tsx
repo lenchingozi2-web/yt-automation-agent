@@ -197,9 +197,9 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     }, true);
   }
 
-  async function retry(video: StudioVideo, publish = false) {
+  async function retry(video: StudioVideo, publish = false, publishAt?: string) {
     return action(video.id, async () => {
-      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true, checkedYouTube: video.publish_status === "upload_uncertain" } : {}) });
+      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true, publishAt, checkedYouTube: video.publish_status === "upload_uncertain" } : {}) });
       if (result.video) updateVideo(result.video);
       setFeedback({ kind: "success", message: result.message, detail: result.note });
       void refresh(true);
@@ -275,7 +275,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} retryThumbnail={retryThumbnail} revise={revise} feedback={feedback} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
+          busy={busy} retry={retry} retryThumbnail={retryThumbnail} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); edit(next); }} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>
