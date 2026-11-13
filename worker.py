@@ -1063,6 +1063,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--publish-only", action="store_true")
+    parser.add_argument("--retry-narration", metavar="STUDIO_VIDEO_ID")
     parser.add_argument("--thumbnail-only", metavar="STUDIO_VIDEO_ID")
     parser.add_argument("--redesign-thumbnail", metavar="ORIGINAL_STUDIO_VIDEO_ID")
     parser.add_argument("--max-jobs", type=int, default=3)
@@ -1086,6 +1087,31 @@ def main(argv: list[str] | None = None) -> None:
         save_fields(supabase, rows[0], thumbnail_publish_attempts=0)
         if not apply_uploaded_thumbnail(rows[0], supabase, youtube_id):
             raise SystemExit(1)
+        return
+    if args.retry_narration:
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.retry_narration, re.I):
+            parser.error("Select a valid Studio video ID")
+        rows = supabase.table("videos").select("*").eq("id", args.retry_narration).limit(1).execute().data or []
+        if not rows:
+            parser.error("Saved production not found")
+        row = rows[0]
+        details = stored_metadata(row)
+        if row["status"] == "completed" and details.get("video_url"):
+            print("[recovery] Saved preview is already complete.", flush=True)
+            return
+        if (row["status"] != "failed" or has_approval(details)
+                or not str(details.get("error_message") or "").startswith("Neural narration unavailable")):
+            parser.error("Select an unapproved production with a narration render failure")
+        changed = supabase.table("videos").update({"status": "rendering"}).eq("id", row["id"]).eq("status", "failed").execute().data or []
+        if not changed:
+            parser.error("The render status changed")
+        row = changed[0]
+        save_fields(supabase, row, render_attempts=0, render_started_at=datetime.now(timezone.utc).isoformat(),
+                    progress_note="Retrying narration and rendering the saved script")
+        if not render_job(row, supabase):
+            raise SystemExit(1)
+        print("[recovery] Saved MP4 ready for review; duration:",
+              stored_metadata(row).get("actual_duration_seconds"), "seconds", flush=True)
         return
     publish_due(supabase, max(1, min(12, args.max_uploads)))
     if args.publish_only:

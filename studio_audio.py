@@ -9,10 +9,13 @@ import re
 import subprocess
 import time
 from pathlib import Path
+import wave
+
+from studio_retry import TemporaryRenderError
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 RATE = os.getenv("EDGE_TTS_RATE", "-4%")
-AUDIO_VERSION = "natural-phrases-v2"
+AUDIO_VERSION = "natural-phrases-v3"
 
 
 def probe(path: Path) -> dict:
@@ -121,6 +124,48 @@ def complete_boundaries(boundaries: list[tuple[float, float, str]], text: str, s
         raise ValueError("Neural narration has incomplete or inconsistent word timings")
 
 
+
+def synthesize_part(text: str, mp3: Path, wav: Path) -> tuple[list, float]:
+    boundaries = asyncio.run(asyncio.wait_for(synthesize(text, mp3), 45))
+    seconds = validate_audio(mp3, words=len(text.split()))
+    complete_boundaries(boundaries, text, seconds)
+    subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-y", "-i", str(mp3),
+                    "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(wav)],
+                   capture_output=True, check=True, timeout=30)
+    return boundaries, validate_audio(wav, expected=seconds, words=len(text.split()))
+
+
+def recover_in_phrases(text: str, mp3: Path, wav: Path) -> list:
+    words = text.split()
+    if len(words) < 6:
+        return synthesize_part(text, mp3, wav)[0]
+    part = wav.with_suffix(".phrase.wav")
+    boundaries = []
+    elapsed = 0.0
+    try:
+        with wave.open(str(wav), "wb") as joined:
+            joined.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+            while words:
+                end = next((i for i in range(min(12, len(words)), 3, -1)
+                            if words[i - 1].endswith((".", ",", ";", "?", "!", ":"))), min(10, len(words)))
+                phrase, words = " ".join(words[:end]), words[end:]
+                for attempt in range(3):
+                    try:
+                        timings, _ = synthesize_part(phrase, mp3, part)
+                        break
+                    except Exception:
+                        if attempt == 2:
+                            raise
+                        time.sleep(2 ** attempt)
+                with wave.open(str(part), "rb") as audio:
+                    frames = audio.getnframes()
+                    joined.writeframes(audio.readframes(frames))
+                boundaries.extend((elapsed + start, elapsed + end, word) for start, end, word in timings)
+                elapsed += frames / 48000
+        return boundaries
+    finally:
+        part.unlink(missing_ok=True)
+
 def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
     number = int(scene["scene_number"])
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
@@ -141,13 +186,14 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
     decoded = audio.with_suffix(".part.wav")
     for attempt in range(3):
         try:
-            boundaries = asyncio.run(asyncio.wait_for(synthesize(text, temporary), 90))
-            seconds = validate_audio(temporary, words=len(text.split()))
-            complete_boundaries(boundaries, text, seconds)
-            subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-y", "-i", str(temporary),
-                            "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(decoded)],
-                           capture_output=True, check=True, timeout=30)
-            seconds = validate_audio(decoded, expected=seconds, words=len(text.split()))
+            if attempt < 2:
+                boundaries, seconds = synthesize_part(text, temporary, decoded)
+            else:
+                boundaries = recover_in_phrases(text, temporary, decoded)
+                seconds = validate_audio(decoded, words=len(text.split()))
+                complete_boundaries(boundaries, text, seconds)
+                if len(text.split()) >= 6:
+                    print(f"[narration] scene {number} recovered with the same voice in short phrases.", flush=True)
             write_srt(phrase_cues(boundaries, seconds, scene.get("format") == "9:16"), srt)
             decoded.replace(audio)
             temporary.unlink(missing_ok=True)
@@ -157,7 +203,9 @@ def make_audio(scene: dict, directory: Path) -> tuple[Path, Path]:
         except Exception as error:
             temporary.unlink(missing_ok=True)
             decoded.unlink(missing_ok=True)
+            reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+            print(f"[narration] scene {number}, attempt {attempt + 1}: {reason}", flush=True)
             if attempt == 2:
-                raise RuntimeError(f"Neural narration unavailable for scene {number}; retry queued job") from error
+                raise TemporaryRenderError(f"Neural narration unavailable for scene {number} after automatic retries.") from error
             time.sleep(2 ** attempt)
     raise RuntimeError("Narration was not generated")

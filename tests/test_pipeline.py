@@ -215,6 +215,25 @@ class MediaRegression(unittest.TestCase):
                 self.assertEqual(len(calls),3)
                 validate_audio(audio)
 
+    def test_failed_full_scene_recovers_in_same_voice_with_continuous_captions(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            calls = []
+            line = "These are the words in the first phrase. These are all the words in the second phrase."
+            async def fake(text, path):
+                calls.append(text)
+                if text == line:
+                    raise ValueError("fixture timing error")
+                ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=24000", "-t", "2.2", path)
+                return [(i * .2, (i + 1) * .2, word) for i, word in enumerate(text.split())]
+            with patch("studio_audio.synthesize", fake), patch("studio_audio.time.sleep"):
+                audio, srt = make_audio({"scene_number": 9, "narration": line}, directory)
+            self.assertEqual(calls[:2], [line, line])
+            self.assertEqual(" ".join(calls[2:]), line)
+            self.assertGreater(validate_audio(audio), 4.3)
+            self.assertIn("00:00:02,", srt.read_text())
+            self.assertIn("second phrase", srt.read_text().replace("\n", " "))
+
     def test_audio_repair_preserves_picture_and_surrounding_narration(self):
         with TemporaryDirectory() as tmp:
             directory = Path(tmp)

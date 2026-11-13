@@ -2,6 +2,10 @@ name: Studio Render Worker
 on:
   workflow_dispatch:
     inputs:
+      retry_narration_id:
+        type: string
+        description: Retry one failed narration render without publishing
+        required: false
       thumbnail_video_id:
         type: string
         description: Studio video ID to retry its YouTube thumbnail only
@@ -36,6 +40,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
           REDESIGN_PWS_THUMBNAIL: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '' }}
         run: |
@@ -49,7 +54,7 @@ jobs:
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
           work = True
-          if url and key and not os.getenv("THUMBNAIL_VIDEO_ID") and os.getenv("REDESIGN_PWS_THUMBNAIL") != "true":
+          if url and key and not os.getenv("RETRY_NARRATION_ID") and not os.getenv("THUMBNAIL_VIDEO_ID") and os.getenv("REDESIGN_PWS_THUMBNAIL") != "true":
               headers = {"apikey": key, "Authorization": "Bearer " + key}
               def read(query):
                   request = Request(url + "/rest/v1/videos?" + query, headers=headers)
@@ -96,9 +101,12 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
         run: |
-          if [ -n "$THUMBNAIL_VIDEO_ID" ]; then
+          if [ -n "$RETRY_NARRATION_ID" ]; then
+            python worker.py --retry-narration "$RETRY_NARRATION_ID"
+          elif [ -n "$THUMBNAIL_VIDEO_ID" ]; then
             python worker.py --thumbnail-only "$THUMBNAIL_VIDEO_ID"
           else
             python worker.py --drain --max-jobs 3

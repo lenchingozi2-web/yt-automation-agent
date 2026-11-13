@@ -357,6 +357,8 @@ Follow it with what was discovered and why it matters. Be specific, conversation
 Prefer an interesting fact to hype. Avoid stock hooks, invented scenes or dialogue, dramatization,
 personal medical advice, certainty beyond the evidence and copied wording. Say when a result is preliminary.
 Offer practical general health tips only when a guideline or review directly supports them.
+In titles and summaries, name the actual comparison. A model that uses a test's results and outperforms
+a calculation using those results has not outperformed the test itself.
 Do not reuse angles from previous productions. Choose one source pair per story. The "pair" number
 identifies a specific supporting report and its enclosing lead report. The lead report must establish
 the event or finding. The supporting report must corroborate it or substantiate distinct context
@@ -382,7 +384,8 @@ Verify the title and every material claim against the cited excerpts. The first 
 what happened. Each other source must substantiate a point made in the pitch, as independent context
 or corroboration. Flag missing attribution by name to the lead publisher, unrelated citations, overclaims, wrong time or place, health tips without
 guideline or review support, and pitches repeating a recent title's underlying event or specific angle.
-Do not use prior knowledge to fill gaps. Return a raw JSON array with one object per
+Reject a title or summary that substitutes a broader comparator or endpoint, even if the numbers are
+correct. Verify each comparator, input, endpoint and population as written. Do not use prior knowledge to fill gaps. Return a raw JSON array with one object per
 story in supplied order, with passed (boolean) and reason (a short string, empty if passed).
 """, audit_payload)
         if len(audit) == 3 and all(isinstance(item, dict) and item.get("passed") is True for item in audit):

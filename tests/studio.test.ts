@@ -177,12 +177,14 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
     }
     const instruction = JSON.parse(String(init?.body)).contents[0].parts[0].text as string;
     assert.ok(!instruction.startsWith("Plan research"));
+    assert.ok(!instruction.includes("Fixture headline with an unsupported comparison"));
+    assert.ok(!instruction.includes("Fixture summary with an unsupported claim"));
     const audit = instruction.startsWith("You are an independent fact checker");
     assert.match(instruction, audit ? /voiceover must naturally name/ : /Naturally name a cited journal/);
     return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(audit ? { issues: [] } : draftInput) }] } }] });
   });
   const draft = await researchedDraft("Create a video from this briefing", 60, "9:16", [], {
-    title: "The missing detail between shifts", hook_summary: "Two papers about handover checks", references,
+    title: "Fixture headline with an unsupported comparison", hook_summary: "Fixture summary with an unsupported claim", references,
   });
   assert.equal(lookups, 2);
   assert.match(draft.scenes[0].narration, /Example Journal/);
