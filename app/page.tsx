@@ -260,7 +260,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <article className="metric">
             <div className="metric-label"><HardDrive size={17} /> Media storage</div>
             <strong>{storageLabel}</strong>
-            {storage && <p>Midnight WAT cleanup removes previews uploaded to YouTube at least {storage.retention.published_preview_hours} hours earlier.</p>}
+            {storage && <p>Midnight WAT cleanup removes stored copies of videos uploaded to YouTube at least {storage.retention.published_preview_hours} hours earlier.</p>}
             <button className="text-button" disabled={storageLoading} onClick={() => void refreshStorage()}>
               {storageLoading ? "Checking storage…" : "Refresh usage"}
             </button>

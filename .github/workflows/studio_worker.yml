@@ -22,7 +22,7 @@ on:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_media.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_master.py, studio_media.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '2-57/5 * * * *'
 permissions:

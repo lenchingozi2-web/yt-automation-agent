@@ -5,12 +5,13 @@ type BucketInfo = { name: string; bytes: number; count: number; available: boole
 export async function GET(request: Request) {
   try {
     const client = await studioClient(request);
-    const names = [process.env.SUPABASE_VIDEO_BUCKET || "renders", process.env.SUPABASE_THUMBNAIL_BUCKET || "thumbnails"];
+    const names = [process.env.SUPABASE_VIDEO_BUCKET || "renders", process.env.SUPABASE_THUMBNAIL_BUCKET || "thumbnails", "studio-masters"];
     const buckets: BucketInfo[] = [];
     for (const name of names) {
       // Metadata listing is used for a rough current size; Supabase Billing is authoritative.
       const { data, error } = await client.storage.from(name).list("", { limit: 1000, offset: 0 });
       if (error) {
+        if (name === "studio-masters" && (String(error.statusCode) === "404" || /bucket not found/i.test(error.message))) continue;
         buckets.push({ name, bytes: 0, count: 0, partial: false, available: false,
           error: "Bucket unavailable or storage permission denied." });
         continue;

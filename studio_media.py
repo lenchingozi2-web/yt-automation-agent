@@ -127,9 +127,7 @@ def motion_background(size: tuple[int, int]) -> Image.Image:
 
 def narration_motion(text: str, path: Path, size: tuple[int, int], frames: int) -> Path:
     """Render staggered words and a moving accent on an editorial background."""
-    # Composite at a smaller resolution and let the regular scene renderer upscale it.
-    scale = min(1, 900 / max(size))
-    width, height = (max(2, round(side * scale / 2) * 2) for side in size)
+    width, height = size
     background = motion_background((width, height))
     margin = round(width * (.12 if height > width else .15))
     tokens = text.split()
@@ -170,20 +168,18 @@ def narration_motion(text: str, path: Path, size: tuple[int, int], frames: int) 
     first_line = top - spacing // 2
     reveal = min(24, max(1, round(frames * .58)))
     settle = max(1, min(8, frames // 5))
+    animated_frames = min(frames, reveal + settle + 1)
     temporary = path.with_suffix(".part.mp4")
     command = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size",
-               f"{width}x{height}", "-framerate", "30", "-i", "-", "-an", "-c:v", "libx264", "-preset", "ultrafast",
+               f"{width}x{height}", "-framerate", "30", "-i", "-", "-an",
+               "-vf", f"tpad=stop_mode=clone:stop={frames - animated_frames}", "-c:v", "libx264", "-preset", "fast",
                "-crf", "17", "-threads", "2", "-bf", "0", "-pix_fmt", "yuv420p", str(temporary)]
     try:
         with subprocess.Popen(command, stdin=subprocess.PIPE) as encoder:
             assert encoder.stdin is not None
             stream = encoder.stdin
             try:
-                settled_frame = b""
-                for frame in range(frames):
-                    if settled_frame:
-                        stream.write(settled_frame)
-                        continue
+                for frame in range(animated_frames):
                     image = background.copy()
                     draw = ImageDraw.Draw(image, "RGBA")
                     line_width = max(1, round(width * (.035 + .09 * min(1, frame / reveal))))
@@ -198,10 +194,7 @@ def narration_motion(text: str, path: Path, size: tuple[int, int], frames: int) 
                         y = top + row * spacing + round((1 - ease) * face.size * .65)
                         color = (235, 209, 149) if row == 0 else (248, 244, 232)
                         draw.text((x, y), word, font=face, fill=(*color, round(255 * ease)), anchor="lt")
-                    pixels = image.tobytes()
-                    stream.write(pixels)
-                    if frame >= reveal + settle:
-                        settled_frame = pixels
+                    stream.write(image.tobytes())
                 stream.close()
                 if encoder.wait(timeout=30):
                     raise RuntimeError("FFmpeg could not encode the narration animation")
@@ -219,6 +212,8 @@ def prepare_stock_image(data: bytes, path: Path, size: tuple[int, int]) -> None:
         if source.width * source.height > 16_000_000 or min(source.size) < 320:
             raise ValueError("Unsuitable stock photo dimensions")
         picture = ImageOps.exif_transpose(source).convert("RGB")
+        if min(picture.width / size[0], picture.height / size[1]) < .62:
+            raise ValueError("Stock photo is too small for this crop")
         ImageOps.fit(picture, size, method=Image.Resampling.LANCZOS).save(path, "PNG")
 
 

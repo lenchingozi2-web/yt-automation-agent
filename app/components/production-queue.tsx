@@ -150,7 +150,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, promote, busy,
   }
   return <Modal titleId="preview-title" close={close} className="preview-dialog">
     <header className="dialog-header">
-      <div><p>{video.revision ? "Scene " + video.revision.scene_number + " revision" : video.video_url ? "Video preview" : "YouTube upload"}</p>
+      <div><p>{video.revision ? "Scene " + video.revision.scene_number + " revision" : video.video_url ? (video.preview_resolution ? video.preview_resolution + "p preview" : "Video preview") : "YouTube upload"}</p>
         <h2 id="preview-title">{video.title}</h2></div>
       <button className="icon-button" aria-label="Close preview" onClick={close}><X size={20} /></button>
     </header>

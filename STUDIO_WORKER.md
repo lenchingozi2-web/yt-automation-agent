@@ -16,7 +16,7 @@ The dashboard and scheduled producer use one Supabase `videos` queue and one FFm
 
 ## Storage and retention
 
-Previews stay below the Supabase Free 50 MB object limit; new jobs reserve space below 800 MiB in the render bucket. Only media with a saved YouTube copy can expire: MP4 becomes eligible for permanent deletion 12 hours after the confirmed YouTube upload, and the nightly cleanup is scheduled for midnight WAT (23:00 UTC), when the production allowance resets. Thumbnails follow their 90-day retention policy. Unpublished media is retained. Rows and scripts remain. Public renders/thumbnails buckets retain the existing application's access model. Masters are uploaded as Actions artifacts only for private repositories; this repository is public.
+Previews stay below the Supabase Free 50 MB object limit. If a full-resolution render exceeds it, the worker saves the master in private 32 MB parts and makes a smaller review copy. YouTube uploads and scene revisions reassemble and verify the saved master. The worker checks the combined usage of the previews and masters against an 800 MiB budget. Both copies become eligible for permanent deletion 12 hours after the confirmed YouTube upload. Cleanup is scheduled for midnight WAT (23:00 UTC), when the production allowance resets. Thumbnails follow their 90-day retention policy. Unpublished media is retained. Rows and scripts remain. Public renders/thumbnails buckets retain the existing application's access model. Masters are uploaded as Actions artifacts only for private repositories; this repository is public.
 
 ## Configuration
 

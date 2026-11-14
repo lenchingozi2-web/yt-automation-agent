@@ -86,7 +86,7 @@ def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
     return archive_video, archive_thumbnail
 
 
-def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = False) -> dict[str, Any]:
+def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = False, *, has_master_bucket: bool | None = None) -> dict[str, Any]:
     archive_video, archive_thumbnail = expiration_flags(row, now)
     video_id = str(row["id"])
     outcome = {"id": video_id, "video": archive_video, "thumbnail": archive_thumbnail}
@@ -106,7 +106,11 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
             raise ValueError("Preview does not belong to this production.")
         client.storage.from_(bucket).remove(
             [filename] if filename == f"{video_id}.mp4" else [filename, f"{video_id}.mp4"])
-        save_fields(client, row, guard_snapshot=True, video_url=None, storage_url=None,
+        if data.get("upload_master") or has_master_bucket:
+            from studio_master import remove_upload_master
+
+            remove_upload_master(client, video_id, has_bucket=has_master_bucket)
+        save_fields(client, row, guard_snapshot=True, video_url=None, storage_url=None, upload_master=None,
                     preview_expired_at=now.isoformat())
     if archive_thumbnail:
         bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
@@ -142,8 +146,9 @@ def attention_action(row: dict[str, Any]) -> str | None:
     return None
 
 
-def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bool, include_new: bool) -> None:
+def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bool, include_new: bool, *, has_master_bucket: bool) -> None:
     from worker import guard_video_snapshot, save_fields
+    from studio_master import remove_upload_master
     from studio_retry import retry_io
 
     deleted = dismissed = deferred = removed = 0
@@ -185,6 +190,12 @@ def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bo
                     cleaned = False
                     cleanup_errors.append(video_id)
                     print("[attention] media removal failed", video_id, default, type(error).__name__, flush=True)
+            try:
+                removed += remove_upload_master(client, video_id, has_bucket=has_master_bucket)
+            except Exception as error:
+                cleaned = False
+                cleanup_errors.append(video_id)
+                print("[attention] master removal failed", video_id, type(error).__name__, flush=True)
             if not cleaned:
                 continue
             changed = guard_video_snapshot(client.table("videos").delete().eq("id", video_id), row).execute().data
@@ -204,6 +215,7 @@ def main() -> None:
     parser.add_argument("--clear-attention", action="store_true")
     args = parser.parse_args()
     from supabase import create_client
+    from studio_master import MASTER_BUCKET, bucket_exists
     url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
     if not url or not key:
@@ -213,20 +225,25 @@ def main() -> None:
     pinned = {revision["parent_id"] for row in video_rows(client, ["pending", "rendering"])
               if isinstance(revision := metadata(row).get("revision"), dict)
               and revision.get("original_media") and revision.get("parent_id")}
+    has_master_bucket = bucket_exists(client, MASTER_BUCKET)
     rows = list(video_rows(client, ["completed", "failed"]))
     if args.clear_attention or any(metadata(row).get("discard_requested_at") for row in rows):
-        clear_attention(client, rows, pinned, args.dry_run, args.clear_attention)
+        clear_attention(client, rows, pinned, args.dry_run, args.clear_attention, has_master_bucket=has_master_bucket)
     rows = [row for row in rows if row["status"] == "completed" and not metadata(row).get("discard_requested_at")]
     inventory = {}
-    for setting, default in (("SUPABASE_VIDEO_BUCKET", "renders"), ("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")):
-        storage = client.storage.from_(os.getenv(setting, default))
+    names = [("renders", os.getenv("SUPABASE_VIDEO_BUCKET", "renders")),
+             ("thumbnails", os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails"))]
+    if has_master_bucket:
+        names.append(("masters", MASTER_BUCKET))
+    for label, name in names:
+        storage = client.storage.from_(name)
         objects = []
         for offset in range(0, 10000, 1000):
             batch = storage.list("", {"limit": 1000, "offset": offset})
             objects.extend(item for item in batch if item.get("id"))
             if len(batch) < 1000:
                 break
-        inventory[default] = {"files": len(objects),
+        inventory[label] = {"files": len(objects),
                               "bytes": sum(int((item.get("metadata") or {}).get("size") or 0) for item in objects)}
     print("[retention] storage inventory", json.dumps(inventory), flush=True)
     eligible = 0
@@ -235,7 +252,7 @@ def main() -> None:
         if row.get("id") in pinned:
             continue
         try:
-            result = clean_row(client, row, now, args.dry_run)
+            result = clean_row(client, row, now, args.dry_run, has_master_bucket=has_master_bucket)
             if result["video"] or result["thumbnail"]:
                 eligible += 1
                 print("[retention]", result, "dry-run" if args.dry_run else "deleted", flush=True)

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from studio_audio import validate_audio
 from studio_maintenance import metadata, preview_filename
+from studio_master import download_upload_master
 from studio_retry import retry_io
 
 
@@ -52,13 +53,16 @@ def prepare_revision(client, video, details, directory: Path):
         by_scene.setdefault(int(entry["scene_number"]), []).append(entry)
         footage.update(str(clip) for clip in entry.get("footage", []))
         previous_end = start + duration
-    path = directory / "source_preview.mp4"
+    path = directory / ("source_master.mp4" if base.get("upload_master") else "source_preview.mp4")
     if not path.is_file():
-        bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
-        contents = retry_io(lambda: bucket.download(preview_filename(row)), "download source preview")
-        temporary = path.with_suffix(".part")
-        temporary.write_bytes(contents)
-        temporary.replace(path)
+        if base.get("upload_master"):
+            download_upload_master(client, parent_id, base["upload_master"], path)
+        else:
+            bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
+            contents = retry_io(lambda: bucket.download(preview_filename(row)), "download source preview")
+            temporary = path.with_suffix(".part")
+            temporary.write_bytes(contents)
+            temporary.replace(path)
     return path, by_scene, footage
 
 

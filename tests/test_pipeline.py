@@ -9,7 +9,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import wave
 
 from googleapiclient.errors import HttpError
@@ -71,6 +71,80 @@ class UploadRegression(unittest.TestCase):
             upload_youtube({"title": "Saved production"}, Path("fixture.mp4"))
         self.assertEqual(safe_publish_error(result.exception)[0], "upload_uncertain")
         self.assertEqual(request.next_chunk.call_count, 4)
+
+
+class PictureQualityRegression(unittest.TestCase):
+    def test_stock_selection_ranks_the_detail_remaining_after_the_crop(self):
+        from worker import stock_video_variants
+
+        def variant(url, width, height, size):
+            return {"url": url, "width": width, "height": height, "size": size}
+
+        clip = {"videos": {
+            "tiny": variant("Tiny", 480, 854, 1_000_000),
+            "wide": variant("Wide", 1920, 1080, 5_000_000),
+            "mid": variant("Small HD", 720, 1280, 6_000_000),
+            "native": variant("Full HD", 1080, 1920, 12_000_000),
+            "large": variant("4K", 2160, 3840, 45_000_000),
+            "oversize": variant("Oversize", 2160, 3840, 75_000_000),
+        }}
+        ranked = [entry[-1]["url"] for entry in stock_video_variants(clip, (1080, 1920))]
+        self.assertEqual(ranked, ["Full HD", "4K", "Small HD"])
+
+    def test_private_master_round_trip_and_corrupt_part_detection(self):
+        from studio_master import MASTER_BUCKET, download_upload_master, remove_upload_master, save_upload_master
+        with TemporaryDirectory() as tmp, patch("studio_master.PART_BYTES", 8):
+            directory = Path(tmp)
+            master, preview, restored = [directory / name for name in ("master.mp4", "preview.mp4", "restored.mp4")]
+            master.write_bytes(b"abcdefghijk")
+            preview.write_bytes(b"preview")
+            client = Mock()
+            objects = {}
+            bucket = client.storage.from_.return_value
+            bucket.list.side_effect = lambda *_: [
+                {"id": name, "name": name, "metadata": {"size": len(data)}} for name, data in objects.items()]
+            bucket.upload.side_effect = lambda name, data, **_: objects.update({name: data})
+            bucket.download.side_effect = objects.__getitem__
+            bucket.remove.side_effect = lambda paths: [objects.pop(name) for name in paths]
+            with patch("studio_master.bucket_exists", return_value=False):
+                manifest = save_upload_master(client, "example", master, preview, "renders", "example.mp4")
+            client.storage.create_bucket.assert_called_once_with(MASTER_BUCKET, options={"public": False})
+            self.assertEqual(manifest["parts"], 2)
+            download_upload_master(client, "example", manifest, restored)
+            self.assertEqual(restored.read_bytes(), master.read_bytes())
+            first = next(iter(objects))
+            objects[first] = b"corrupt!"
+            restored.unlink()
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                download_upload_master(client, "example", manifest, restored)
+            self.assertFalse(restored.exists())
+            self.assertEqual(remove_upload_master(client, "example", has_bucket=True), 2)
+            self.assertFalse(objects)
+
+    def test_approved_upload_uses_the_private_master_instead_of_the_review_file(self):
+        from worker import publish_saved
+        manifest = {"sha256": "master"}
+        row = {"id": "job", "status": "completed", "scenes": [{"_studio": {
+            "title": "New video", "upload_master": manifest, "publish_status": "pending",
+            "publish_approved_at": "2026-11-14T13:00:00Z", "publish_approved_by": "owner",
+        }}]}
+        client = Mock()
+        with (
+            TemporaryDirectory() as tmp,
+            patch("worker.ROOT", Path(tmp)),
+            patch("worker.save_fields"),
+            patch("worker.credential_version", return_value="connected"),
+            patch("worker.picture_track", return_value={"width": 1920, "height": 1080}),
+            patch("worker.validate_audio"),
+            patch("worker.download_upload_master", side_effect=lambda _, __, ___, path: path.write_bytes(b"master")) as download,
+            patch("worker.upload_youtube", return_value=("example1234", "private")) as upload,
+            patch("worker.apply_uploaded_thumbnail"),
+        ):
+            publish_saved(row, client)
+            target = Path(tmp) / "job" / "new-video.mp4"
+            download.assert_called_once_with(client, "job", manifest, target)
+            self.assertEqual(upload.call_args.args[1], target)
+            client.storage.from_.assert_not_called()
 
 
 class ThumbnailRetryRegression(unittest.TestCase):

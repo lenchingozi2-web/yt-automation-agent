@@ -33,6 +33,7 @@ from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, VOICE, NarrationUnavailable,
                           make_audio, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
 from studio_maintenance import metadata as stored_metadata, preview_filename
+from studio_master import OBJECT_LIMIT, download_upload_master, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
@@ -81,12 +82,38 @@ def usable_footage(path: Path) -> bool:
     return True
 
 
+def frame_coverage(source: tuple[int, int], output: tuple[int, int]) -> float:
+    """Native pixels available after cropping to the output framing."""
+    return min(source[0] / output[0], source[1] / output[1])
+
+
+def stock_video_variants(hit: dict, output: tuple[int, int]):
+    variants = hit.get("videos")
+    if not isinstance(variants, dict):
+        return []
+    ranked = []
+    for variant in variants.values():
+        if not isinstance(variant, dict) or not variant.get("url"):
+            continue
+        width, height = (int(variant.get(key, 0) or 0) for key in ("width", "height"))
+        coverage = frame_coverage((width, height), output)
+        size = int(variant.get("size", 0) or 0)
+        if coverage < .62 or size > 60_000_000:
+            continue
+        # Prefer the least expensive native-resolution variant. Below native,
+        # prefer the largest usable crop. Anything larger than native is a tie.
+        same_orientation = (width < height) == (output[0] < output[1])
+        ranked.append((min(coverage, 1), same_orientation, size or math.inf, width * height, variant))
+    return sorted(ranked, key=lambda item: (-item[0], not item[1], item[2], item[3]))
+
+
 async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict) -> str | None:
-    """Download a correctly oriented HD variant without ever preferring 4K bloat."""
+    """Choose stock media by relevance and usable detail after cropping."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key or catalog.get("pixabay_unavailable"):
         return None
-    portrait = str(scene.get("format", "16:9")) == "9:16"
+    output = scene.get("picture_size") or video_size(scene)
+    portrait = output[1] > output[0]
     narration = scene["narration"]
     override = bool(scene.get("footage_override"))
     queries, subjects, local = footage_intent(scene.get("spoken", narration), narration, scene["search_queries"], override)
@@ -141,30 +168,19 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     duration = float(hit.get("duration") or 0)
                     if 0 < duration < 2.5:
                         continue
-                    variants = hit.get("videos", {})
-                    if not isinstance(variants, dict):
-                        continue
-                    for variant in variants.values():
-                        if not isinstance(variant, dict) or not variant.get("url"):
-                            continue
-                        width = int(variant.get("width", 0) or 0)
-                        height = int(variant.get("height", 0) or 0)
-                        if width < 1 or height < 1:
-                            continue
-                        vertical_hd = height > width and width >= 480 and height >= 720
-                        horizontal_hd = width >= height and width >= 1280 and height >= 720
-                        if horizontal_hd or (portrait and vertical_hd):
-                            candidates.append((-score, clip_id in recent, portrait and not vertical_hd, width * height,
-                                               {**variant, "clip_id": clip_id}))
-                eligible = sorted(candidates, key=lambda item: item[:4])
+                    for coverage, oriented, size, pixels, variant in stock_video_variants(hit, output):
+                        candidates.append((-score, -coverage, clip_id in recent, not oriented, size, pixels,
+                                           {**variant, "clip_id": clip_id}))
+                eligible = sorted(candidates, key=lambda item: item[:6])
                 seen = set()
-                for _, _, _, _, variant in eligible:
+                for *_, variant in eligible:
                     clip_id = variant["clip_id"]
-                    if clip_id in seen:
+                    url = variant["url"]
+                    if url in seen:
                         continue
                     if len(seen) >= 6:
                         break
-                    seen.add(clip_id)
+                    seen.add(url)
                     count = 0
                     usable = False
                     try:
@@ -176,10 +192,18 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                                     if count > 60_000_000:
                                         raise ValueError("Pixabay footage exceeds 60 MB safety limit")
                                     handle.write(chunk)
-                        usable = count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target)
+                        if count > 10000:
+                            track = picture_track(target)
+                            width, height = int(track["width"]), int(track["height"])
+                            rotation = next((int(item["rotation"]) for item in track.get("side_data_list", [])
+                                             if "rotation" in item), 0)
+                            if rotation % 180 == 90:
+                                width, height = height, width
+                            usable = (frame_coverage((width, height), output) >= .62
+                                      and ffprobe_duration(target) > .5 and usable_footage(target))
                         if usable:
                             return clip_id
-                    except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
+                    except (OSError, ValueError, StopIteration, httpx.HTTPError, subprocess.SubprocessError) as error:
                         interrupted |= transient(error)
                         print(f"[b-roll] skipping unusable clip ({type(error).__name__})", flush=True)
                     finally:
@@ -208,7 +232,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                                 data.extend(chunk)
                                 if len(data) > 10_000_000:
                                     raise ValueError("Pixabay image exceeds the size limit")
-                        prepare_stock_image(data, target.with_suffix(".png"), video_size(scene))
+                        prepare_stock_image(data, target.with_suffix(".png"), output)
                         return clip_id
                     except (OSError, ValueError, httpx.HTTPError) as error:
                         interrupted |= transient(error)
@@ -233,7 +257,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
     fingerprint = hashlib.sha256(json.dumps([
-        "narration-match-v2", scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
+        "narration-match-v3", scene.get("picture_size"), scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
         scene["search_queries"], bool(scene.get("footage_override")),
     ]).encode()).hexdigest()
     if receipt.is_file():
@@ -304,7 +328,7 @@ def verify_render_geometry(path: Path, size: tuple[int, int] | None = None, seco
 
 
 def video_encoder():
-    return ["-c:v", "libx264", "-threads", "2", "-preset", "veryfast", "-crf", "23",
+    return ["-c:v", "libx264", "-threads", "2", "-preset", "fast", "-crf", "18",
             "-bf", "0", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
 
 
@@ -349,11 +373,11 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
         input_options = ["-loop", "1", "-framerate", "30"] if still else ["-stream_loop", "-1"]
         command += [*input_options, "-i", str(source)]
         length = shot_frames[i] if shot_frames is not None else round((i + 1) * frames / len(sources)) - round(i * frames / len(sources))
-        zoom = 1 if still or motion_card else 1.06
+        zoom = 1 if still or motion_card else 1.03
         scaled_w, scaled_h = int(width * zoom) // 2 * 2, int(height * zoom) // 2 * 2
         motion = (f"zoompan=z='1+0.06*on/{max(1, length - 1)}':x='iw/2-iw/(2*zoom)':"
                   f"y='ih/2-ih/(2*zoom)':d=1:s={width}x{height}:fps=30," if still else "")
-        filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
+        filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase:force_divisible_by=2:flags=lanczos,"
                        f"crop={width}:{height}:x='(iw-ow)*(0.5+0.45*sin(t/3+{i}))':y='(ih-oh)/2',"
                        f"{motion}setsar=1,fps=30,trim=end_frame={length},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
@@ -787,62 +811,64 @@ def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False,
     row.update(payload)
 
 
-def storage_preview(path: Path, timeline=(), *, preserve_picture=False) -> Path:
-    """Create a playable preview under the Supabase Free 50 MB single-file limit.
-
-    The 1080p master stays on disk for optional YouTube upload and Actions artifact.
-    """
-    maximum = 48_000_000
-    if path.stat().st_size < maximum:
+def storage_preview(path: Path, timeline=()) -> Path:
+    """Encode a browser-compatible MP4 within Supabase's single-file allowance."""
+    if path.stat().st_size < OBJECT_LIMIT:
         return path
-    if preserve_picture:
-        raise RuntimeError("This targeted revision exceeds the preview file limit. Reduce the replacement scene length or footage complexity.")
     seconds = ffprobe_duration(path)
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, check=True)
-    width, height = [int(v) for v in probe.stdout.strip().split(",")[:2]]
-    portrait = height > width
-    # Long-form: favor a crisp and small 480p preview over a 1080p upload rejection.
-    target_width, target_height = (486, 864) if portrait else (864, 486)
-    if seconds < 300:
-        target_width, target_height = ((720, 1280) if portrait else (1280, 720))
+    track = picture_track(path)
+    width, height = int(track["width"]), int(track["height"])
+    short_side = min(width, height)
     preview = path.with_name("stream_preview.mp4")
-    nominal_kbps = int((45_000_000 * 8 / seconds / 1000 - 160) * 0.84)
-    for shrink in (1.0, 0.70, 0.50):
-        bitrate = max(120, min(3200, int(nominal_kbps * shrink)))
-        run(["ffmpeg", "-y", "-i", str(path),
+    nominal_kbps = min(6000, int(46_000_000 * 8 / seconds / 1000 - 176))
+    for fraction in (1, .85, .70):
+        bitrate = max(120, int(nominal_kbps * fraction))
+        # Scale to the detail the file budget can reasonably preserve.
+        target_short_side = 1080 if bitrate >= 3500 else 720 if bitrate >= 1150 else 540 if bitrate >= 570 else 480
+        scale = min(1, target_short_side / short_side)
+        target_width, target_height = (max(2, round(side * scale / 2) * 2) for side in (width, height))
+        run(["ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", str(path),
+             "-map", "0:v:0", "-map", "0:a:0",
              "-vf", f"scale={target_width}:{target_height}:flags=lanczos,setsar=1",
-             "-c:v", "libx264", "-preset", "veryfast",
-             "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
-             "-bufsize", f"{bitrate * 2}k", "-pix_fmt", "yuv420p", "-bf", "0",
+             *video_encoder(), "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
+             "-bufsize", f"{bitrate * 2}k",
              *keyframe_options([entry["duration"] for entry in timeline]),
-             "-c:a", "copy",
-             "-movflags", "+faststart", str(preview)], timeout=1200)
-        if preview.stat().st_size < maximum:
+             "-c:a", "copy", "-movflags", "+faststart", str(preview)], timeout=1200)
+        if preview.stat().st_size < OBJECT_LIMIT:
             verify_render_geometry(preview, (target_width, target_height),
                                    sum(item["duration"] for item in timeline) or None)
-            print(f"[storage] preview {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
+            print(f"[storage] review copy {target_width}x{target_height}, {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
             return preview
-    raise RuntimeError("Preview could not fit under the 50 MB Supabase Free file limit. The master MP4 is saved as a GitHub Actions artifact.")
+    raise RuntimeError("Could not save an MP4 review copy within the 50 MB storage limit.")
 
 
-def upload_mp4(client, path: Path, video_id: str, timeline=(), *, preserve_picture=False) -> str:
+def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=False):
     bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     try:
         client.storage.get_bucket(bucket)
     except Exception as err:
         if "404" in str(err) or "not found" in str(err).lower():
             client.storage.create_bucket(bucket, options={"public": True})
-        else: raise
-    filename = f"{video_id}.mp4"
-    preview = storage_preview(path, timeline, preserve_picture=preserve_picture)
+        else:
+            raise
+    suffix = "-pace-v1" if pace_version else ""
+    filename = f"{video_id}{suffix}.mp4"
+    preview = storage_preview(path, timeline)
     validate_audio(preview, expected=ffprobe_duration(path))
     data = preview.read_bytes()
-    retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
-        file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
-    return client.storage.from_(bucket).get_public_url(filename)
+    manifest = save_upload_master(client, video_id, path, preview, bucket, filename)
+    try:
+        retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
+            file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
+    except Exception:
+        if manifest and not pace_version:
+            try:
+                remove_upload_master(client, video_id)
+            except Exception:
+                print(f"[storage] could not remove upload master for {video_id}", flush=True)
+        raise
+    track = picture_track(preview)
+    return client.storage.from_(bucket).get_public_url(filename), manifest, min(int(track["width"]), int(track["height"]))
 
 
 def upload_thumbnail(client, path: Path, video_id: str) -> str:
@@ -889,9 +915,6 @@ def process(video: dict[str, Any], supabase) -> None:
         size = (int(source["width"]), int(source["height"]))
         if mode == "rewrite":
             target = sum(round(float(item["duration"]) * 30) for item in originals) / 30
-        if parent.stat().st_size > 36_000_000:
-            available = max(0, 46_000_000 - parent.stat().st_size)
-            bitrate = max(180, int(available * 8 / sum(item["duration"] for item in originals) / 1000))
         print(f"[revision] scene {target_scene}: {mode}; reusing {len(original_scenes) - 1} other scenes", flush=True)
     narration_voice = VOICE
     if not parent or mode == "rewrite":
@@ -921,6 +944,10 @@ def process(video: dict[str, Any], supabase) -> None:
     elif parent:
         parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
         narration_voice = (stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None) or VOICE
+    if mode != "audio":
+        runtime = sum(float(item["duration"]) for item in original_timeline) if parent else sum(durations)
+        # Keep long masters practical on a shared free storage budget.
+        bitrate = min(8000, max(2700, int(260_000_000 * 8 / max(runtime, 1) / 1000 - 160)))
     recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
     catalog = {}
     rendered = []
@@ -955,7 +982,7 @@ def process(video: dict[str, Any], supabase) -> None:
         raw, clip_ids, lengths = [], [], []
         for shot, (frames, spoken) in enumerate(windows):
             try:
-                match = fetch_broll({**scene, "spoken": spoken, "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
+                match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
             except TemporaryRenderError:
                 if keep_audio and scene.get("footage_override") and not raw:
                     raise
@@ -1029,7 +1056,7 @@ def process(video: dict[str, Any], supabase) -> None:
     thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
 
     save_fields(supabase, video, progress_note="Saving MP4 preview")
-    storage_url = upload_mp4(supabase, final, video_id, timeline, preserve_picture=bool(parent))
+    storage_url, upload_master, preview_resolution = upload_mp4(supabase, final, video_id, timeline)
     raw_scenes = video.get("scenes")
     if isinstance(raw_scenes, str):
         raw_scenes = json.loads(raw_scenes)
@@ -1039,8 +1066,9 @@ def process(video: dict[str, Any], supabase) -> None:
         raw_scenes = decode(video.get("script")).get("scenes")
     chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
-                thumbnail_url=thumbnail_url, actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v7", scene_timeline=timeline, youtube_chapters=chapters, narration_voice=narration_voice,
+                thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
+                actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v8", scene_timeline=timeline, youtube_chapters=chapters, narration_voice=narration_voice,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 and thumbnail ready for review.", error_message=None)
@@ -1102,7 +1130,10 @@ def repair_preview_pace(client, video_id: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
     source = directory / "original_preview.mp4"
-    source.write_bytes(retry_io(lambda: bucket.download(preview_filename(video)), "download original preview"))
+    if details.get("upload_master"):
+        download_upload_master(client, video_id, details["upload_master"], source)
+    else:
+        source.write_bytes(retry_io(lambda: bucket.download(preview_filename(video)), "download original preview"))
     original_duration = ffprobe_duration(source)
     scenes, _, _ = video_details(video)
     words = sum(len(scene["narration"].split()) for scene in scenes)
@@ -1110,20 +1141,14 @@ def repair_preview_pace(client, video_id: str) -> None:
     adjusted = directory / "final_video.mp4"
     print(f"[pace] Retiming {original_duration:.2f}s at {speed:.3f}x.", flush=True)
     revised, duration = speed_up_preview(source, adjusted, timeline, speed)
-    preview = storage_preview(adjusted, revised)
-    validate_audio(preview, expected=duration)
-    print(f"[pace] Audio and picture verified at {duration:.2f}s. Saving preview.", flush=True)
-    filename = f"{video_id}-pace-v1.mp4"
-    data = preview.read_bytes()
-    retry_io(lambda: bucket.upload(filename, data, file_options={"content-type": "video/mp4", "upsert": "true"}),
-             "save retimed preview")
+    url, upload_master, preview_resolution = upload_mp4(client, adjusted, video_id, revised, pace_version=True)
     chapters = [{**chapter, "start": int(chapter["start"] / speed)} for chapter in details.get("youtube_chapters") or []]
     if any(right["start"] - left["start"] < 10 for left, right in zip(chapters, chapters[1:])):
         chapters = []
-    url = bucket.get_public_url(filename).rstrip("?")
     save_fields(client, video, guard_preview=True, video_url=url, storage_url=url, scene_timeline=revised,
+                upload_master=upload_master, preview_resolution=preview_resolution,
                 youtube_chapters=chapters, actual_duration_seconds=duration, narration_pace_version=1,
-                render_version="studio-v7-pace-v1", progress_note="Faster narration preview ready for review.")
+                render_version="studio-v8-pace-v1", progress_note="Faster narration preview ready for review.")
     print(f"[pace] {video_id} preview ready; {speed:.3f}x, {original_duration:.2f}s to {duration:.2f}s, "
           f"{words * 60 / original_duration:.1f} to {words * 60 / duration:.1f} words per minute. Awaiting review.", flush=True)
 
@@ -1167,11 +1192,16 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
         return
     try:
         if master is None:
-            # Fetch only this job's trusted storage object, never a row-supplied URL.
             master = directory / youtube_filename(str(details.get("title") or ""))
-            bucket = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
-            content = retry_io(lambda: bucket.download(preview_filename(video)), "download approved MP4")
-            master.write_bytes(content)
+            if details.get("upload_master"):
+                download_upload_master(supabase, str(video["id"]), details["upload_master"], master)
+            else:
+                # Legacy renders and masters small enough to use for review share this object.
+                bucket = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
+                content = retry_io(lambda: bucket.download(preview_filename(video)), "download approved MP4")
+                master.write_bytes(content)
+            picture = picture_track(master)
+            print(f"[youtube] approved file {picture['width']}x{picture['height']}, {master.stat().st_size:,} bytes", flush=True)
         validate_audio(master)
         def record_progress(percent):
             try:

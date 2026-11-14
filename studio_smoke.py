@@ -15,6 +15,7 @@ from pathlib import Path
 from supabase import create_client
 from studio_maintenance import metadata
 from studio_media import verify_thumbnail
+from studio_master import MASTER_BUCKET, download_upload_master, remove_upload_master
 from studio_publish import has_approval
 from studio_retry import TemporaryRenderError
 from worker import ROOT, fetch_broll, process, render_job, verify_render_geometry
@@ -64,6 +65,7 @@ def main() -> int:
 
     video_id = str(row["id"])
     disposable_ids = [video_id]
+    master_ids = []
     try:
         process(row, client)
         result = client.table("videos").select("*").eq("id", video_id).single().execute()
@@ -72,7 +74,7 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
-        assert stored.get("render_version") == "studio-v7"
+        assert stored.get("render_version") == "studio-v8"
         assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
         assert stored["scene_timeline"][0]["footage"], "the ocean narration selected no related stock media"
         # Simulate missing direct matches while exercising the real contextual stock lookup.
@@ -100,9 +102,30 @@ def main() -> int:
                                                             "scenes": portrait_draft}).execute().data[0]
                 render_id = str(portrait["id"])
                 disposable_ids.append(render_id)
-                with patch("worker.fetch_broll", side_effect=lambda scene, *args:
-                           None if scene["logical_scene"] == 2 else fetch_broll(scene, *args)):
+                from worker import run
+                def portrait_review_copy(master, timeline):
+                    review = master.with_name("test_review.mp4")
+                    run(["ffmpeg", "-y", "-v", "error", "-i", str(master), "-vf",
+                         "scale=720:1280:flags=lanczos,setsar=1", "-c:v", "libx264", "-c:a", "copy", str(review)])
+                    return review
+
+                master_ids.append(render_id)
+                with (
+                    patch("worker.fetch_broll", side_effect=lambda scene, *args:
+                          None if scene["logical_scene"] == 2 else fetch_broll(scene, *args)),
+                    patch("worker.storage_preview", side_effect=portrait_review_copy),
+                    patch("studio_master.PART_BYTES", 500_000),
+                ):
                     process(portrait, client)
+                    portrait_meta = metadata(client.table("videos").select("*").eq("id", render_id).single().execute().data)
+                    assert portrait_meta["upload_master"]["parts"] > 1
+                    approved_file = ROOT / render_id / "recovered_master.mp4"
+                    download_upload_master(client, render_id, portrait_meta["upload_master"], approved_file)
+                    assert approved_file.read_bytes() == (ROOT / render_id / "final_video.mp4").read_bytes()
+                    verify_render_geometry(approved_file, (1080, 1920))
+                    assert client.storage.get_bucket(MASTER_BUCKET).public is False
+                    print("PASS: Multi-part 1080p upload master restored byte for byte from private storage.")
+                size = (720, 1280)
                 portrait_meta = metadata(client.table("videos").select("*").eq("id", render_id).single().execute().data)
                 assert portrait_meta["scene_timeline"][1]["narration_cards"] > 0
                 assert not portrait_meta["scene_timeline"][1]["footage"]
@@ -167,6 +190,11 @@ def main() -> int:
         return 4
     finally:
         for disposable_id in reversed(disposable_ids):
+            if disposable_id in master_ids:
+                try:
+                    remove_upload_master(client, disposable_id)
+                except Exception:
+                    print("WARNING: Could not remove disposable upload master", disposable_id)
             for bucket, suffix in (("renders", ".mp4"), ("thumbnails", ".jpg")):
                 try:
                     client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET" if bucket == "renders" else "SUPABASE_THUMBNAIL_BUCKET", bucket)).remove([disposable_id + suffix])
