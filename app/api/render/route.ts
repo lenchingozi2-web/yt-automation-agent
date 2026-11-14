@@ -38,6 +38,9 @@ export async function POST(request: Request) {
         if (meta.publish_approved_at && ["pending", "uploading"].includes(video.publish_status ?? "")) {
           return NextResponse.json({ ok: true, message: "This upload is already in the queue.", video });
         }
+        if (meta.narration_pace_version && body.previewVersion !== video.render_version) {
+          throw new StudioRequestError("This preview was updated. Reopen it and review the new version before approving.", 409);
+        }
         const action = youtubePublishAction(video);
         if (!action) throw new StudioRequestError("Choose a completed video with a saved MP4.", 409);
         if (action === "recheck" && body.checkedYouTube !== true) {
@@ -63,8 +66,10 @@ export async function POST(request: Request) {
         const update = client.from("videos").update({ scenes: packedScenes() }).eq("id", id).eq("status", "completed");
         const statusGuard = typeof meta.publish_status === "string" ? update.eq(field, meta.publish_status) : update.is(field, null);
         const approvalField = "scenes->0->_studio->>publish_approved_at";
+        const versionField = "scenes->0->_studio->>render_version";
+        const versionGuard = typeof meta.render_version === "string" ? statusGuard.eq(versionField, meta.render_version) : statusGuard.is(versionField, null);
         const guarded = typeof original.scenes === "string" ? update.eq("scenes", original.scenes) :
-          typeof meta.publish_approved_at === "string" ? statusGuard.eq(approvalField, meta.publish_approved_at) : statusGuard.is(approvalField, null);
+          typeof meta.publish_approved_at === "string" ? versionGuard.eq(approvalField, meta.publish_approved_at) : versionGuard.is(approvalField, null);
         const { data, error } = await guarded.select("*").maybeSingle();
         if (error) throw error;
         if (!data) {

@@ -199,7 +199,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
 
   async function retry(video: StudioVideo, publish = false, publishAt?: string) {
     return action(video.id, async () => {
-      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true, publishAt, checkedYouTube: video.publish_status === "upload_uncertain" } : {}) });
+      const result = await post<RenderResult>("/api/render", { id: video.id, ...(publish ? { action: "publish", approved: true, publishAt, previewVersion: video.render_version, checkedYouTube: video.publish_status === "upload_uncertain" } : {}) });
       if (result.video) updateVideo(result.video);
       setFeedback({ kind: "success", message: result.message, detail: result.note });
       void refresh(true);

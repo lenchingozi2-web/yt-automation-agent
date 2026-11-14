@@ -15,8 +15,9 @@ from studio_retry import TemporaryRenderError
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
-RATE = os.getenv("EDGE_TTS_RATE", "-4%")
-AUDIO_VERSION = "natural-phrases-v3"
+RATE = os.getenv("EDGE_TTS_RATE", "+3%")
+AUDIO_VERSION = "natural-phrases-v4"
+MIN_NARRATION_WPM = 140
 
 
 def probe(path: Path) -> dict:
@@ -57,7 +58,7 @@ def write_srt(cues: list[tuple[float, float, str]], path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Path:
+def scale_captions(captions: str, tempo: float, duration: float) -> str:
     def seconds(stamp: str) -> float:
         hours, minutes, seconds, millis = map(int, re.split("[:,]", stamp))
         return hours * 3600 + minutes * 60 + seconds + millis / 1000
@@ -68,8 +69,12 @@ def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Pat
         return f"{srt_stamp(start)} --> {srt_stamp(end)}"
 
     stamp = r"\d{2}:\d{2}:\d{2},\d{3}"
-    target.write_text(re.sub(rf"^({stamp}) --> ({stamp})$", retime, source.read_text(encoding="utf-8"),
-                             flags=re.MULTILINE), encoding="utf-8")
+    return re.sub(rf"^({stamp}) --> ({stamp})$", retime, captions, flags=re.MULTILINE)
+
+
+def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Path:
+    captions = scale_captions(source.read_text(encoding="utf-8"), tempo, duration)
+    target.write_text(captions, encoding="utf-8")
     return target
 
 
@@ -186,10 +191,14 @@ def recover_in_phrases(text: str, mp3: Path, wav: Path, voice: str) -> list:
                         append_phrase(phrase[midpoint:])
                         return
                 with wave.open(str(part), "rb") as audio:
-                    frames = audio.getnframes()
-                    joined.writeframes(audio.readframes(frames))
-                boundaries.extend((elapsed + start, elapsed + end, word) for start, end, word in timings)
-                elapsed += frames / 48000
+                    sample_rate = audio.getframerate()
+                    first = max(0, round((timings[0][0] - .15) * sample_rate))
+                    last = min(audio.getnframes(), round((timings[-1][1] + .24) * sample_rate))
+                    audio.setpos(first)
+                    joined.writeframes(audio.readframes(last - first))
+                offset = elapsed - first / sample_rate
+                boundaries.extend((offset + start, offset + end, word) for start, end, word in timings)
+                elapsed += (last - first) / sample_rate
 
             while words:
                 end = next((i for i in range(min(12, len(words)), 3, -1)

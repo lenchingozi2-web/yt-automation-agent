@@ -159,8 +159,24 @@ class MediaRegression(unittest.TestCase):
 
     def test_approximate_runtime_respects_narration_and_short_cap(self):
         self.assertAlmostEqual(sum(scene_durations([260, 265, 245], 720, approximate=True)), 770)
-        self.assertAlmostEqual(sum(scene_durations([140, 150], 720, approximate=True)), 322.2333, places=3)
+        self.assertAlmostEqual(sum(scene_durations([140, 150], 720, approximate=True)), 290)
+        self.assertAlmostEqual(sum(scene_durations([70, 70], 180, approximate=True, words=300)), 128.5667, places=3)
         self.assertAlmostEqual(sum(scene_durations([100, 98], 180, approximate=True, ceiling=180)), 180)
+
+    def test_saved_preview_speedup_retimes_picture_audio_and_edit_points(self):
+        from worker import speed_up_preview
+        with TemporaryDirectory() as tmp:
+            source, output = Path(tmp) / "preview.mp4", Path(tmp) / "faster.mp4"
+            ffmpeg("-f", "lavfi", "-i", "testsrc2=s=160x90:r=30",
+                   "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                   "-t", "4.4", "-c:v", "libx264", "-c:a", "aac", source)
+            captions = "1\n00:00:00,550 --> 00:00:01,100\nHello.\n"
+            timeline = [{"start": start, "duration": 2.2, "captions": captions} for start in (0, 2.2)]
+            revised, duration = speed_up_preview(source, output, timeline, 1.1)
+            self.assertEqual(duration, 4)
+            self.assertEqual([entry["start"] for entry in revised], [0, 2])
+            self.assertIn("00:00:00,500 --> 00:00:01,000", revised[0]["captions"])
+            self.assertGreater(energy(output, 440), energy(output, 484) * 10)
 
     def test_scene_narration_has_exact_samples_at_fractional_frame_boundaries(self):
         with TemporaryDirectory() as tmp:
@@ -240,8 +256,8 @@ class MediaRegression(unittest.TestCase):
                 audio, srt = make_audio({"scene_number": 9, "narration": line}, directory)
             self.assertEqual(calls[:2], [line, line])
             self.assertEqual(calls.count("These are all the words in the second phrase."), 2)
-            self.assertGreater(validate_audio(audio), 4.3)
-            self.assertIn("00:00:02,", srt.read_text())
+            self.assertAlmostEqual(validate_audio(audio), 4.12, places=2)
+            self.assertIn("00:00:01,840", srt.read_text())
             captions = " ".join(line for line in srt.read_text().splitlines() if line and "-->" not in line and not line.isdecimal())
             self.assertEqual(captions, line)
 

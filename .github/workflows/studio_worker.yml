@@ -2,6 +2,10 @@ name: Studio Render Worker
 on:
   workflow_dispatch:
     inputs:
+      repair_pace_id:
+        type: string
+        description: Speed up one unapproved preview while keeping its picture and audio synchronized
+        required: false
       retry_narration_id:
         type: string
         description: Retry one recoverable render without publishing
@@ -40,6 +44,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+          REPAIR_PACE_ID: ${{ inputs.repair_pace_id || (github.event_name == 'push' && contains(github.event.head_commit.message, '[repair-ancient-medicine-pace]') && 'cfe2f611-8043-4610-b503-3d3cc548e984') || '' }}
           RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
           REDESIGN_PWS_THUMBNAIL: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '' }}
@@ -54,7 +59,7 @@ jobs:
           url = (os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""
           work = True
-          if url and key and not os.getenv("RETRY_NARRATION_ID") and not os.getenv("THUMBNAIL_VIDEO_ID") and os.getenv("REDESIGN_PWS_THUMBNAIL") != "true":
+          if url and key and not os.getenv("REPAIR_PACE_ID") and not os.getenv("RETRY_NARRATION_ID") and not os.getenv("THUMBNAIL_VIDEO_ID") and os.getenv("REDESIGN_PWS_THUMBNAIL") != "true":
               headers = {"apikey": key, "Authorization": "Bearer " + key}
               def read(query):
                   request = Request(url + "/rest/v1/videos?" + query, headers=headers)
@@ -101,10 +106,13 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REPAIR_PACE_ID: ${{ inputs.repair_pace_id || (github.event_name == 'push' && contains(github.event.head_commit.message, '[repair-ancient-medicine-pace]') && 'cfe2f611-8043-4610-b503-3d3cc548e984') || '' }}
           RETRY_NARRATION_ID: ${{ inputs.retry_narration_id }}
           THUMBNAIL_VIDEO_ID: ${{ inputs.thumbnail_video_id }}
         run: |
-          if [ -n "$RETRY_NARRATION_ID" ]; then
+          if [ -n "$REPAIR_PACE_ID" ]; then
+            python worker.py --repair-pace "$REPAIR_PACE_ID"
+          elif [ -n "$RETRY_NARRATION_ID" ]; then
             python worker.py --retry-narration "$RETRY_NARRATION_ID"
           elif [ -n "$THUMBNAIL_VIDEO_ID" ]; then
             python worker.py --thumbnail-only "$THUMBNAIL_VIDEO_ID"

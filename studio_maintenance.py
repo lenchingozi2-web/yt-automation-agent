@@ -42,6 +42,11 @@ def metadata(row: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def preview_filename(row: dict[str, Any]) -> str:
+    suffix = "-pace-v1" if metadata(row).get("narration_pace_version") == 1 else ""
+    return f"{row['id']}{suffix}.mp4"
+
+
 def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
     data = metadata(row)
     youtube_url = str(data.get("youtube_url") or "")
@@ -87,9 +92,11 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
     data = metadata(row)
     if archive_video:
         bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
-        if not urlsplit(str(data.get("video_url") or data.get("storage_url"))).path.endswith(f"/{bucket}/{video_id}.mp4"):
+        filename = preview_filename(row)
+        if not urlsplit(str(data.get("video_url") or data.get("storage_url"))).path.endswith(f"/{bucket}/{filename}"):
             raise ValueError("Preview does not belong to this production.")
-        client.storage.from_(bucket).remove([video_id + ".mp4"])
+        client.storage.from_(bucket).remove(
+            [filename] if filename == f"{video_id}.mp4" else [filename, f"{video_id}.mp4"])
         save_fields(client, row, video_url=None, storage_url=None,
                     preview_expired_at=now.isoformat())
     if archive_thumbnail:

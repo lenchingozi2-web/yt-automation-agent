@@ -10,7 +10,7 @@ import wave
 from pathlib import Path
 
 from studio_audio import validate_audio
-from studio_maintenance import metadata
+from studio_maintenance import metadata, preview_filename
 from studio_retry import retry_io
 
 
@@ -55,7 +55,7 @@ def prepare_revision(client, video, details, directory: Path):
     path = directory / "source_preview.mp4"
     if not path.is_file():
         bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
-        contents = retry_io(lambda: bucket.download(parent_id + ".mp4"), "download source preview")
+        contents = retry_io(lambda: bucket.download(preview_filename(row)), "download source preview")
         temporary = path.with_suffix(".part")
         temporary.write_bytes(contents)
         temporary.replace(path)

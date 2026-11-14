@@ -30,8 +30,9 @@ from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import contextual_searches, create_thumbnail, footage_intent, footage_relevance, narration_motion, prepare_stock_image, verify_thumbnail, visual_words
 from studio_thumbnail_art import make_prader_willi_thumbnail
-from studio_audio import BACKUP_VOICE, VOICE, NarrationUnavailable, make_audio, validate_audio, probe, retime_srt, spoken_shots
-from studio_maintenance import metadata as stored_metadata
+from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, VOICE, NarrationUnavailable,
+                          make_audio, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
+from studio_maintenance import metadata as stored_metadata, preview_filename
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
@@ -256,24 +257,20 @@ def video_size(scene):
     return (1080, 1920) if scene.get("format") == "9:16" else (1920, 1080)
 
 
-def scene_durations(natural: list[float], target: float | None, *, approximate: bool = False, ceiling: float | None = None) -> list[float]:
+def scene_durations(natural: list[float], target: float | None, *, approximate: bool = False,
+                    ceiling: float | None = None, words: int = 0) -> list[float]:
     if not natural or any(not math.isfinite(seconds) or seconds <= 0 for seconds in natural):
         raise ValueError("Narration has invalid scene durations.")
-    if target is None:
-        return [math.ceil(seconds * 30) / 30 for seconds in natural]
     natural_total = sum(natural)
     if approximate:
-        tolerance = min(90, max(5, target * .10))
-        lower = target - tolerance
-        upper = min(target + tolerance, ceiling or math.inf)
-        if natural_total < lower:
-            target = min(lower, natural_total / .90)
-        elif natural_total > upper:
-            target = max(upper, natural_total / 1.10)
-        else:
-            target = natural_total
+        upper = target + min(90, max(5, target * .10)) if target is not None else math.inf
+        target = min(natural_total, max(upper, natural_total / 1.10))
+        if words:
+            target = min(target, max(words * 60 / MIN_NARRATION_WPM, natural_total / 1.18))
         if ceiling is not None:
             target = min(ceiling, target)
+    if target is None:
+        return [math.ceil(seconds * 30) / 30 for seconds in natural]
     tempo = natural_total / target
     if not .80 <= tempo <= 1.25:
         raise ValueError(f"The narration is about {natural_total:.0f}s at normal speed, too far from the "
@@ -630,7 +627,7 @@ def redesign_uploaded_thumbnail(video_id: str, client) -> None:
         # Older jobs didn't record measured geometry. Read the same preview that went to YouTube.
         saved_video = directory / "thumbnail_source.mp4"
         saved_video.write_bytes(client.storage.from_(
-            os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4"))
+            os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(preview_filename(video)))
         ratio, _ = verify_render_geometry(saved_video)
     path = make_prader_willi_thumbnail(directory / "thumbnail.jpg", ratio=ratio)
     # Keep Studio's saved thumbnail in sync so later retries restore the NEW image.
@@ -706,7 +703,7 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     return result, ratio, merged
 
 
-def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
+def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False, **changes: Any) -> None:
     """Update existing columns and embed optional fields in available JSON."""
     if "progress_note" in changes:
         changes["worker_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
@@ -736,8 +733,21 @@ def save_fields(client, row: dict[str, Any], **changes: Any) -> None:
     if not payload: raise RuntimeError("videos table has no supported status column.")
     for attempt in range(3):
         try:
-            answer = client.table("videos").update(payload).eq("id", row["id"]).execute()
+            query = client.table("videos").update(payload).eq("id", row["id"])
+            if guard_preview:
+                scenes = row["scenes"]
+                query = query.eq("status", "completed")
+                if isinstance(scenes, str):
+                    query = query.eq("scenes", scenes)
+                else:
+                    data = stored_metadata(row)
+                    query = (query.is_("scenes->0->_studio->>publish_approved_at", "null")
+                             .is_("scenes->0->_studio->>narration_pace_version", "null")
+                             .eq("scenes->0->_studio->>video_url", data["video_url"]))
+            answer = query.execute()
             if not answer.data:
+                if guard_preview:
+                    raise ValueError("This preview changed during the pacing repair. Refresh Studio before retrying.")
                 raise RuntimeError("Could not persist video status.")
             break
         except Exception:
@@ -876,7 +886,8 @@ def process(video: dict[str, Any], supabase) -> None:
                     raise
                 print("[narration] Switching the full render to the backup neural voice.", flush=True)
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
-                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None)
+                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None,
+                                    words=sum(len(scene["narration"].split()) for scene in selected))
     elif parent:
         parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
         narration_voice = (stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None) or VOICE
@@ -907,7 +918,7 @@ def process(video: dict[str, Any], supabase) -> None:
         else:
             audio, srt, natural = audio_plan[index]
         seconds = float(entry["duration"]) if keep_audio else durations[index]
-        tempo = natural / seconds if not keep_audio and target is not None else 1
+        tempo = natural / seconds if not keep_audio else 1
         if not keep_audio and abs(tempo - 1) > .0001:
             srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
         windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
@@ -1006,6 +1017,80 @@ def process(video: dict[str, Any], supabase) -> None:
     print(f"[completed] {video_id}", flush=True)
 
 
+def speed_up_preview(source: Path, target: Path, timeline: list[dict], speed: float) -> tuple[list[dict], float]:
+    revised = []
+    source_frames = 0
+    frames = 0
+    for entry in timeline:
+        source_frames += round(float(entry["duration"]) * 30)
+        end = round(source_frames / speed)
+        duration = (end - frames) / 30
+        revised.append({**entry, "start": round(frames / 30, 6), "duration": round(duration, 6),
+                        "captions": scale_captions(entry["captions"], speed, duration)})
+        frames = end
+    track = picture_track(source)
+    if not frames or abs(source_frames - int(track["nb_frames"])) > 1:
+        raise ValueError("The saved edit points do not match the original video.")
+    duration = frames / 30
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-i", str(source),
+         "-map", "0:v:0", "-map", "0:a:0",
+         "-vf", f"setpts=PTS/{speed:.8f},fps=30,tpad=stop_mode=clone:stop_duration=0.1",
+         "-af", f"atempo={speed:.8f},apad=whole_len={frames * 1600},atrim=end_sample={frames * 1600}",
+         "-frames:v", str(frames), "-ar", "48000", *video_encoder(),
+         "-c:a", "aac", "-b:a", "160k", *keyframe_options([item["duration"] for item in revised]),
+         "-movflags", "+faststart", str(target)], timeout=1200)
+    verify_render_geometry(target, (int(track["width"]), int(track["height"])), duration)
+    validate_audio(target, expected=duration)
+    return revised, duration
+
+
+def repair_preview_pace(client, video_id: str) -> None:
+    """Speed up picture and narration together, then switch the unapproved preview."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", video_id, re.I):
+        raise ValueError("Invalid Studio video ID")
+    rows = client.table("videos").select("*").eq("id", video_id).eq("status", "completed").limit(1).execute().data or []
+    if not rows:
+        raise ValueError("Completed Studio video not found.")
+    video = rows[0]
+    details = stored_metadata(video)
+    if (has_approval(details) or details.get("publish_approved_at") or details.get("publish_requested")
+            or details.get("youtube_url") or details.get("youtube_id") or details.get("youtube_video_id")
+            or details.get("publish_status") not in (None, "", "awaiting_review")):
+        raise ValueError("Only an unapproved preview can be retimed.")
+    if details.get("narration_pace_version") == 1:
+        print("[pace] This preview already has the pacing fix.", flush=True)
+        return
+    timeline = details.get("scene_timeline")
+    if not isinstance(timeline, list) or not timeline or not details.get("video_url"):
+        raise ValueError("The preview has no saved edit points.")
+    directory = ROOT / video_id
+    directory.mkdir(parents=True, exist_ok=True)
+    bucket = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
+    source = directory / "original_preview.mp4"
+    source.write_bytes(retry_io(lambda: bucket.download(preview_filename(video)), "download original preview"))
+    original_duration = ffprobe_duration(source)
+    scenes, _, _ = video_details(video)
+    words = sum(len(scene["narration"].split()) for scene in scenes)
+    speed = min(1.18, max(1.10, MIN_NARRATION_WPM * original_duration / (words * 60)))
+    adjusted = directory / "final_video.mp4"
+    revised, duration = speed_up_preview(source, adjusted, timeline, speed)
+    preview = storage_preview(adjusted, revised)
+    validate_audio(preview, expected=duration)
+    filename = f"{video_id}-pace-v1.mp4"
+    data = preview.read_bytes()
+    retry_io(lambda: bucket.upload(filename, data, file_options={"content-type": "video/mp4", "upsert": "true"}),
+             "save retimed preview")
+    chapters = [{**chapter, "start": int(chapter["start"] / speed)} for chapter in details.get("youtube_chapters") or []]
+    if any(right["start"] - left["start"] < 10 for left, right in zip(chapters, chapters[1:])):
+        chapters = []
+    url = bucket.get_public_url(filename).rstrip("?")
+    save_fields(client, video, guard_preview=True, video_url=url, storage_url=url, scene_timeline=revised,
+                youtube_chapters=chapters, actual_duration_seconds=duration, narration_pace_version=1,
+                render_version="studio-v7-pace-v1", progress_note="Faster narration preview ready for review.")
+    print(f"[pace] {video_id} preview ready; {speed:.3f}x, {original_duration:.2f}s to {duration:.2f}s, "
+          f"{words * 60 / original_duration:.1f} to {words * 60 / duration:.1f} words per minute. Awaiting review.", flush=True)
+
+
 def safe_publish_error(error: Exception) -> tuple[str, str]:
     if isinstance(error, PublishTimePassed):
         return "failed", "The scheduled time passed before upload. Choose a new release time or publish now."
@@ -1045,7 +1130,7 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
             # Fetch only this job's trusted storage object, never a row-supplied URL.
             master = directory / youtube_filename(str(details.get("title") or ""))
             bucket = supabase.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders"))
-            content = retry_io(lambda: bucket.download(str(video["id"]) + ".mp4"), "download approved MP4")
+            content = retry_io(lambda: bucket.download(preview_filename(video)), "download approved MP4")
             master.write_bytes(content)
         validate_audio(master)
         def record_progress(percent):
@@ -1136,6 +1221,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--drain", action="store_true")
     parser.add_argument("--publish-only", action="store_true")
     parser.add_argument("--retry-narration", metavar="STUDIO_VIDEO_ID")
+    parser.add_argument("--repair-pace", metavar="STUDIO_VIDEO_ID")
     parser.add_argument("--thumbnail-only", metavar="STUDIO_VIDEO_ID")
     parser.add_argument("--redesign-thumbnail", metavar="ORIGINAL_STUDIO_VIDEO_ID")
     parser.add_argument("--max-jobs", type=int, default=3)
@@ -1159,6 +1245,9 @@ def main(argv: list[str] | None = None) -> None:
         save_fields(supabase, rows[0], thumbnail_publish_attempts=0)
         if not apply_uploaded_thumbnail(rows[0], supabase, youtube_id):
             raise SystemExit(1)
+        return
+    if args.repair_pace:
+        repair_preview_pace(supabase, args.repair_pace)
         return
     if args.retry_narration:
         if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.retry_narration, re.I):
