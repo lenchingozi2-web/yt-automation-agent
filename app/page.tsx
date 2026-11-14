@@ -14,7 +14,7 @@ import { SceneEditor } from "./components/scene-editor";
 type Quota = { used: number; limit: number };
 type StorageInfo = {
   buckets: { bytes: number; available: boolean; partial: boolean }[];
-  retention: { published_preview_days: number; published_thumbnail_days: number };
+  retention: { published_preview_hours: number; published_thumbnail_days: number };
   immediate_dispatch_available: boolean;
 };
 type QueueData = { videos: StudioVideo[]; quota: Quota };
@@ -260,7 +260,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <article className="metric">
             <div className="metric-label"><HardDrive size={17} /> Media storage</div>
             <strong>{storageLabel}</strong>
-            {storage && <p>Uploaded previews expire after {storage.retention.published_preview_days} days. Unpublished previews stay available.</p>}
+            {storage && <p>Uploaded previews expire after {storage.retention.published_preview_hours} hours. Unpublished previews stay available.</p>}
             <button className="text-button" disabled={storageLoading} onClick={() => void refreshStorage()}>
               {storageLoading ? "Checking storage…" : "Refresh usage"}
             </button>

@@ -38,7 +38,7 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     if existing:
         print("[automation] Daily video already queued; no duplicate created.", flush=True)
         return existing[0]
-    limit = max(1, min(20, int(os.getenv("STUDIO_DAILY_LIMIT", "3"))))
+    limit = max(1, min(20, int(os.getenv("STUDIO_DAILY_LIMIT", "6"))))
     quota = client.table("videos").select("id", count="exact").gte("created_at", start).execute()
     if (quota.count or 0) >= limit:
         print("[automation] Daily allowance reached; keeping existing jobs.", flush=True)

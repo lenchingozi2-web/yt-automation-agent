@@ -20,8 +20,8 @@ export async function GET(request: Request) {
         count: files.length, available: true, partial: files.length >= 1000 });
     }
     return NextResponse.json({ ok: true, buckets, retention: {
-      published_preview_days: 7, published_thumbnail_days: 90, unpublished: "Retained until safely backed up or manually removed.",
-      metadata: "Retained indefinitely.", cleanup: "Scheduled daily through GitHub Actions.",
+      published_preview_hours: 12, published_thumbnail_days: 90, unpublished: "Retained until safely backed up or manually removed.",
+      metadata: "Retained indefinitely.", cleanup: "Scheduled every 15 minutes through GitHub Actions.",
     }, immediate_dispatch_available: studioDispatchAvailable() },
       { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

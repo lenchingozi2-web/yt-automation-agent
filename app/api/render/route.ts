@@ -29,6 +29,7 @@ export async function POST(request: Request) {
       const packedScenes = () => typeof original.scenes === "string" ? JSON.stringify(scenes) : scenes;
       const first = scenes[0];
       const meta = (first._studio && typeof first._studio === "object" ? first._studio : {}) as Record<string, unknown>;
+      if (meta.discard_requested_at) throw new StudioRequestError("This production is being deleted.", 409);
       if (publishing) {
         if (body.approved !== true) throw new StudioRequestError("Approve this version from the video preview before uploading.", 400);
         const video = normalizeVideo(original);
@@ -86,7 +87,7 @@ export async function POST(request: Request) {
         }
         first._studio = { ...meta, render_attempts: 0, progress_note: "Queued for rendering" };
         const { data, error } = await client.from("videos").update({ status: "pending", error_message: null, scenes: packedScenes() })
-          .eq("id", id).eq("status", original.status).select("*").maybeSingle();
+          .eq("id", id).eq("status", original.status).is("scenes->0->_studio->>discard_requested_at", null).select("*").maybeSingle();
         if (error) throw error;
         if (!data) throw new StudioRequestError("This render changed while you were viewing it. Refresh the queue.", 409);
         saved = data;

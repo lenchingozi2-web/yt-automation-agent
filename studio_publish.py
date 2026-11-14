@@ -55,7 +55,7 @@ def publication_due(row: dict[str, Any], version: str, now: datetime) -> bool:
     if row.get("status") != "completed" or not version:
         return False
     data = metadata(row)
-    if (data.get("youtube_url") or data.get("youtube_id") or data.get("youtube_video_id")
+    if (data.get("discard_requested_at") or data.get("youtube_url") or data.get("youtube_id") or data.get("youtube_video_id")
             or not (data.get("video_url") or data.get("storage_url"))):
         return False
     if not has_approval(data):

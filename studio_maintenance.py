@@ -1,4 +1,4 @@
-"""Conservative retention: never delete a video without a confirmed YouTube copy."""
+"""Expire uploaded previews and support an explicit cleanup of failed Studio productions."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-PREVIEW_DAYS = max(1, int(os.getenv("STUDIO_PUBLISHED_PREVIEW_DAYS", "7")))
+PREVIEW_HOURS = max(1, int(os.getenv("STUDIO_PUBLISHED_PREVIEW_HOURS", "12")))
 THUMBNAIL_DAYS = max(30, int(os.getenv("STUDIO_PUBLISHED_THUMBNAIL_DAYS", "90")))
 
 
@@ -47,37 +47,41 @@ def preview_filename(row: dict[str, Any]) -> str:
     return f"{row['id']}{suffix}.mp4"
 
 
+def confirmed_upload(data: dict[str, Any]) -> bool:
+    youtube_id = str(data.get("youtube_id") or data.get("youtube_video_id") or "")
+    youtube_url = str(data.get("youtube_url") or "")
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", youtube_id) or
+                re.fullmatch(r"https://(?:www\.)?youtube\.com/(?:watch\?v=|shorts/)[A-Za-z0-9_-]{11}", youtube_url))
+
+
+def timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
     data = metadata(row)
-    youtube_url = str(data.get("youtube_url") or "")
-    youtube_id = str(data.get("youtube_id") or data.get("youtube_video_id") or "")
-    if row.get("status") != "completed" or not (re.fullmatch(r"[\w-]{11}", youtube_id) or
-            re.fullmatch(r"https://(?:www\.)?youtube\.com/(?:watch\?v=|shorts/)[\w-]{11}", youtube_url)):
+    if row.get("status") != "completed" or not confirmed_upload(data):
         return False, False
-    timestamp = data.get("published_at") or data.get("completed_at") or row.get("created_at")
-    if not isinstance(timestamp, str):
-        return False, False
-    try:
-        completed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if completed.tzinfo is None:
-            completed = completed.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return False, False
-    if data.get("publish_at"):
-        try:
-            release = datetime.fromisoformat(str(data["publish_at"]).replace("Z", "+00:00"))
-            if release.tzinfo is None:
-                release = release.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return False, False
-        completed = max(completed, release)
-    age = now - completed
+
+    uploaded = timestamp(data.get("published_at")) or timestamp(data.get("upload_confirmed_observed_at"))
     render_bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     thumb_bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
-    video_url = str(data.get("video_url") or data.get("storage_url") or "")
-    thumb_url = str(data.get("thumbnail_url") or "")
-    archive_video = age >= timedelta(days=PREVIEW_DAYS) and ("/" + render_bucket + "/") in video_url
-    archive_thumbnail = (age >= timedelta(days=THUMBNAIL_DAYS) and ("/" + thumb_bucket + "/") in thumb_url
+    video_url = "" if data.get("preview_expired_at") else str(data.get("video_url") or data.get("storage_url") or "")
+    thumb_url = "" if data.get("thumbnail_expired_at") else str(data.get("thumbnail_url") or "")
+    archive_video = (uploaded is not None and now - uploaded >= timedelta(hours=PREVIEW_HOURS)
+                     and ("/" + render_bucket + "/") in video_url)
+    thumbnail_since = uploaded or timestamp(data.get("completed_at")) or timestamp(row.get("created_at"))
+    if thumbnail_since and data.get("publish_at"):
+        release = timestamp(data["publish_at"])
+        thumbnail_since = max(thumbnail_since, release) if release else None
+    archive_thumbnail = (thumbnail_since is not None and now - thumbnail_since >= timedelta(days=THUMBNAIL_DAYS)
+                         and ("/" + thumb_bucket + "/") in thumb_url
                          and data.get("thumbnail_publish_status") not in {"pending", "retry", "failed"})
     return archive_video, archive_thumbnail
 
@@ -86,10 +90,15 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
     archive_video, archive_thumbnail = expiration_flags(row, now)
     video_id = str(row["id"])
     outcome = {"id": video_id, "video": archive_video, "thumbnail": archive_thumbnail}
-    if not (archive_video or archive_thumbnail) or dry_run:
+    data = metadata(row)
+    needs_observation = (confirmed_upload(data) and row.get("status") == "completed"
+                         and (data.get("video_url") or data.get("storage_url")) and not data.get("preview_expired_at")
+                         and not (timestamp(data.get("published_at")) or timestamp(data.get("upload_confirmed_observed_at"))))
+    if dry_run or not (archive_video or archive_thumbnail or needs_observation):
         return outcome
     from worker import save_fields
-    data = metadata(row)
+    if needs_observation:
+        save_fields(client, row, guard_snapshot=True, upload_confirmed_observed_at=now.isoformat())
     if archive_video:
         bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
         filename = preview_filename(row)
@@ -97,21 +106,102 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
             raise ValueError("Preview does not belong to this production.")
         client.storage.from_(bucket).remove(
             [filename] if filename == f"{video_id}.mp4" else [filename, f"{video_id}.mp4"])
-        save_fields(client, row, video_url=None, storage_url=None,
+        save_fields(client, row, guard_snapshot=True, video_url=None, storage_url=None,
                     preview_expired_at=now.isoformat())
     if archive_thumbnail:
         bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
         if not urlsplit(str(data.get("thumbnail_url"))).path.endswith(f"/{bucket}/{video_id}.jpg"):
             raise ValueError("Thumbnail does not belong to this production.")
         client.storage.from_(bucket).remove([video_id + ".jpg"])
-        save_fields(client, row, thumbnail_url=None,
+        save_fields(client, row, guard_snapshot=True, thumbnail_url=None,
                     thumbnail_expired_at=now.isoformat())
     return outcome
+
+
+def video_rows(client: Any, statuses: list[str]):
+    offset, page_size = 0, 200
+    while True:
+        rows = (client.table("videos").select("*").in_("status", statuses)
+                .order("created_at").order("id").range(offset, offset + page_size - 1).execute().data or [])
+        yield from rows
+        if len(rows) < page_size:
+            return
+        offset += page_size
+
+
+def attention_action(row: dict[str, Any]) -> str | None:
+    data = metadata(row)
+    if row.get("status") in {"pending", "rendering"}:
+        return None
+    if confirmed_upload(data) or data.get("publish_status") == "uploaded":
+        return "dismiss_thumbnail" if data.get("thumbnail_publish_status") == "failed" else None
+    if row.get("status") == "failed" or data.get("publish_status") in {
+        "upload_uncertain", "failed", "auth_required", "not_configured", "retry",
+    }:
+        return "delete"
+    return None
+
+
+def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bool, include_new: bool) -> None:
+    from worker import guard_video_snapshot, save_fields
+    from studio_retry import retry_io
+
+    deleted = dismissed = deferred = removed = 0
+    cleanup_errors = []
+    for row in rows:
+        marked = bool(metadata(row).get("discard_requested_at"))
+        if not (marked or include_new):
+            continue
+        action = attention_action(row)
+        if not action:
+            continue
+        video_id = row["id"]
+        if action == "dismiss_thumbnail":
+            if not dry_run:
+                save_fields(client, row, guard_snapshot=True, thumbnail_publish_status="dismissed")
+            dismissed += 1
+            continue
+        if video_id in pinned:
+            deferred += 1
+            continue
+        if not dry_run:
+            if not marked:
+                try:
+                    save_fields(client, row, guard_snapshot=True, discard_requested_at=datetime.now(timezone.utc).isoformat(),
+                                publish_approved_at=None, publish_requested=False)
+                except ValueError:
+                    deferred += 1
+                    continue
+            print("[attention] removing local media for", video_id, flush=True)
+            cleaned = True
+            for setting, default, paths in (
+                ("SUPABASE_VIDEO_BUCKET", "renders", [f"{video_id}.mp4", f"{video_id}-pace-v1.mp4"]),
+                ("SUPABASE_THUMBNAIL_BUCKET", "thumbnails", [f"{video_id}.jpg"]),
+            ):
+                bucket = client.storage.from_(os.getenv(setting, default))
+                try:
+                    removed += len(retry_io(lambda: bucket.remove(paths), "remove discarded Studio media") or [])
+                except Exception as error:
+                    cleaned = False
+                    cleanup_errors.append(video_id)
+                    print("[attention] media removal failed", video_id, default, type(error).__name__, flush=True)
+            if not cleaned:
+                continue
+            changed = guard_video_snapshot(client.table("videos").delete().eq("id", video_id), row).execute().data
+            if not changed:
+                deferred += 1
+                continue
+        deleted += 1
+    print(f"[attention] {'dry run' if dry_run else 'complete'}: {deleted} deleted, {dismissed} thumbnail issues dismissed,"
+          f" {removed} storage objects removed, {deferred} deferred", flush=True)
+    if cleanup_errors:
+        raise RuntimeError("Could not remove all storage objects for: " + ", ".join(sorted(set(cleanup_errors))))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--clear-attention", action="store_true")
     args = parser.parse_args()
     from supabase import create_client
     url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
@@ -120,11 +210,13 @@ def main() -> None:
         raise RuntimeError("Missing Supabase URL or service-role key for maintenance")
     client = create_client(url, key)
     now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(days=PREVIEW_DAYS)).isoformat()
-    response = client.table("videos").select("*").eq("status", "completed").lt("created_at", cutoff).order("created_at").limit(1000).execute()
-    active = client.table("videos").select("scenes").in_("status", ["pending", "rendering"]).execute().data or []
-    pinned = {revision.get("parent_id") for row in active
-              if isinstance(revision := metadata(row).get("revision"), dict) and revision.get("original_media")}
+    pinned = {revision["parent_id"] for row in video_rows(client, ["pending", "rendering"])
+              if isinstance(revision := metadata(row).get("revision"), dict)
+              and revision.get("original_media") and revision.get("parent_id")}
+    rows = list(video_rows(client, ["completed", "failed"]))
+    if args.clear_attention or any(metadata(row).get("discard_requested_at") for row in rows):
+        clear_attention(client, rows, pinned, args.dry_run, args.clear_attention)
+    rows = [row for row in rows if row["status"] == "completed" and not metadata(row).get("discard_requested_at")]
     inventory = {}
     for setting, default in (("SUPABASE_VIDEO_BUCKET", "renders"), ("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")):
         storage = client.storage.from_(os.getenv(setting, default))
@@ -139,18 +231,18 @@ def main() -> None:
     print("[retention] storage inventory", json.dumps(inventory), flush=True)
     eligible = 0
     failed = 0
-    for row in response.data or []:
+    for row in rows:
         if row.get("id") in pinned:
             continue
         try:
             result = clean_row(client, row, now, args.dry_run)
             if result["video"] or result["thumbnail"]:
                 eligible += 1
-                print("[retention]", result, "dry-run" if args.dry_run else "archived", flush=True)
+                print("[retention]", result, "dry-run" if args.dry_run else "deleted", flush=True)
         except Exception as error:
             failed += 1
             print("[retention]", row.get("id"), type(error).__name__, flush=True)
-    print("[retention] eligible", eligible, "of", len(response.data or []), flush=True)
+    print("[retention] eligible", eligible, "of", len(rows), flush=True)
     if failed:
         raise RuntimeError(f"Retention failed for {failed} production(s).")
 

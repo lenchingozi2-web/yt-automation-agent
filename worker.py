@@ -703,7 +703,33 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     return result, ratio, merged
 
 
-def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False, **changes: Any) -> None:
+def guard_video_snapshot(query, row: dict[str, Any]):
+    query = query.eq("status", row["status"])
+    # Guard operational fields without placing a full production script in the REST URL.
+    fields = ("publish_status", "publish_approved_at", "published_at", "publish_heartbeat_at",
+              "worker_heartbeat_at", "thumbnail_publish_status", "thumbnail_publish_attempts",
+              "render_version", "video_url", "storage_url", "thumbnail_url", "youtube_url", "discard_requested_at")
+    for container in ("scenes", "metadata", "script"):
+        value = row.get(container)
+        prefix = container
+        if container == "scenes" and isinstance(value, list):
+            value = decode(value[0].get("_studio")) if value and isinstance(value[0], dict) else {}
+            prefix += "->0->_studio"
+        if not isinstance(value, dict):
+            continue
+        for field in fields:
+            column = f"{prefix}->>{field}"
+            current = value.get(field)
+            query = query.is_(column, "null") if current is None else query.eq(column, str(current))
+    for field in fields:
+        if field in row:
+            value = row[field]
+            query = query.is_(field, "null") if value is None else query.eq(field, value)
+    return query
+
+
+def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False,
+                guard_snapshot: bool = False, **changes: Any) -> None:
     """Update existing columns and embed optional fields in available JSON."""
     if "progress_note" in changes:
         changes["worker_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
@@ -734,6 +760,8 @@ def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False, **c
     for attempt in range(3):
         try:
             query = client.table("videos").update(payload).eq("id", row["id"])
+            if guard_snapshot:
+                query = guard_video_snapshot(query, row)
             if guard_preview:
                 scenes = row["scenes"]
                 query = query.eq("status", "completed")
@@ -748,6 +776,8 @@ def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False, **c
             if not answer.data:
                 if guard_preview:
                     raise ValueError("This preview changed during the pacing repair. Refresh Studio before retrying.")
+                if guard_snapshot:
+                    raise ValueError("The production changed during cleanup.")
                 raise RuntimeError("Could not persist video status.")
             break
         except Exception:
@@ -1120,7 +1150,7 @@ def safe_publish_error(error: Exception) -> tuple[str, str]:
 
 def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, thumbnail: Path | None = None) -> None:
     details = stored_metadata(video)
-    if (not has_approval(details) or details.get("youtube_url")
+    if (not has_approval(details) or details.get("discard_requested_at") or details.get("youtube_url")
             or details.get("youtube_id") or details.get("youtube_video_id")):
         return
     directory = ROOT / str(video["id"])
@@ -1128,10 +1158,13 @@ def publish_saved(video: dict[str, Any], supabase, master: Path | None = None, t
     version = credential_version()
     new_auth = details.get("publish_status") == "auth_required" and details.get("publish_auth_version") != version
     attempts = 1 if new_auth else int(details.get("publish_attempts") or 0) + 1
-    save_fields(supabase, video, publish_status="uploading", publish_attempts=attempts,
-                publish_requested=False, publish_auth_version=version,
-                publish_error=None, publish_heartbeat_at=datetime.now(timezone.utc).isoformat(),
-                progress_note="MP4 ready. Preparing the YouTube upload.")
+    try:
+        save_fields(supabase, video, guard_snapshot=True, publish_status="uploading", publish_attempts=attempts,
+                    publish_requested=False, publish_auth_version=version,
+                    publish_error=None, publish_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+                    progress_note="MP4 ready. Preparing the YouTube upload.")
+    except ValueError:
+        return
     try:
         if master is None:
             # Fetch only this job's trusted storage object, never a row-supplied URL.

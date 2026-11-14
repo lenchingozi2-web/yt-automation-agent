@@ -2,7 +2,7 @@
 
 The dashboard and scheduled producer use one Supabase `videos` queue and one FFmpeg renderer.
 
-- Daily production: 08:17 UTC (09:17 Nigeria), with retries at 10:17 and 12:17 UTC. A deterministic daily job ID prevents repeated runs from generating duplicate videos. Default: one 60-second portrait video per day within the existing three-video daily allowance. GitHub schedules can start late.
+- Daily production: 08:17 UTC (09:17 Nigeria), with retries at 10:17 and 12:17 UTC. A deterministic daily job ID prevents repeated runs from generating duplicate videos. Default: one 60-second portrait video per day within the six-video daily allowance shared with manual production. GitHub schedules can start late.
 - The daily producer dispatches the render workflow with its short-lived repository token, so queue polling does not cancel scheduled production. Daily topics use the LenxiQ brand pillars and exclude recent video titles. Generation uses current Groq production chat models for speed, with available Gemini text models as fallback. There are no interactive approvals or repository history commits in CI.
 - Manual Generate video saves the job on the server before responding. Review mode opens the scene editor. The worker checks the queue on its fallback schedule; an optional Vercel GH_PAT/GITHUB_TOKEN with Actions write access enables immediate dispatch.
 - Narration: `en-US-AndrewMultilingualNeural`, rate `-2%`, configurable with EDGE_TTS_VOICE/EDGE_TTS_RATE. Three attempts use the same neural voice. No gTTS fallback or silent substitution. Atomic audio caching includes text, voice and rate. Real word boundaries drive five-word captions.
@@ -16,7 +16,7 @@ The dashboard and scheduled producer use one Supabase `videos` queue and one FFm
 
 ## Storage and retention
 
-Previews stay below the Supabase Free 50 MB object limit; new jobs reserve space below 800 MiB in the render bucket. Only media with a saved YouTube copy can expire: MP4 after seven days, thumbnail after 90 days. Unpublished media is retained. Rows and scripts remain. Public renders/thumbnails buckets retain the existing application's access model. Masters are uploaded as Actions artifacts only for private repositories; this repository is public.
+Previews stay below the Supabase Free 50 MB object limit; new jobs reserve space below 800 MiB in the render bucket. Only media with a saved YouTube copy can expire: MP4 becomes eligible for permanent deletion 12 hours after the confirmed YouTube upload, and the cleanup job runs every 15 minutes. Thumbnails follow their 90-day retention policy. Unpublished media is retained. Rows and scripts remain. Public renders/thumbnails buckets retain the existing application's access model. Masters are uploaded as Actions artifacts only for private repositories; this repository is public.
 
 ## Configuration
 

@@ -113,7 +113,7 @@ export async function recentTitles(client: SupabaseClient) {
   if (error) throw error;
   return [...new Set((data || []).map((row) => String(row.title || "").slice(0, 150)).filter(Boolean))];
 }
-export const STUDIO_DAILY_LIMIT = Math.max(1, Math.min(20, Number(process.env.STUDIO_DAILY_LIMIT || 3) || 3));
+export const STUDIO_DAILY_LIMIT = Math.max(1, Math.min(20, Number(process.env.STUDIO_DAILY_LIMIT || 6) || 6));
 export function lagosStartOfDay(): string {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Africa/Lagos", day: "2-digit", month: "2-digit", year: "numeric" }).formatToParts(new Date());
   const get = (kind: string) => parts.find(p => p.type === kind)?.value || "";
