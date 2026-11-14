@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]')
         with:
           node-version: '24'
       - uses: actions/setup-python@v5
@@ -46,7 +46,7 @@ jobs:
           RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py
       - name: Verify a sourced briefing script without queueing a video
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -54,6 +54,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           STUDIO_SCRIPT_TRACE: '1'
           STUDIO_PUBLIC_FIXTURE_TRACE: '1'
+          DRAFT_MATRIX: ${{ contains(github.event.head_commit.message, '[verify-draft-matrix]') }}
           HEALTH_DRAFT_CHECK: ${{ contains(github.event.head_commit.message, '[verify-health-draft]') }}
         run: |
           python - <<'PYTHON'
@@ -71,22 +72,32 @@ jobs:
           ideas = response.json()
           assert {idea["topic_area"] for idea in ideas} == {"health", "education", "intelligence"}
           health_check = os.getenv("HEALTH_DRAFT_CHECK") == "true"
-          target = 300 if health_check else 720
-          lead = next(idea for idea in ideas if idea["topic_area"] == ("health" if health_check else "education"))
-          print("Verified briefing date and all three topics:", lead["briefing_date"], flush=True)
-          result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
-                                  input=json.dumps(dict(brief="Explain the selected study using its exact findings and limitations.",
-                                      seconds=target, ratio="16:9", recent=[], briefing=lead)),
-                                  text=True, stdout=subprocess.PIPE, timeout=290, check=True)
-          draft = json.loads(result.stdout)
-          assert draft["duration_seconds"] == target and draft["format"] == "16:9"
-          assert all(link in draft["description"] for link in lead["references"])
-          ctas = [index for index, scene in enumerate(draft["scenes"])
-                  if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
-          assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65
-          assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
-          assert draft.get("community_post")
-          count = sum(len(scene["narration"].split()) for scene in draft["scenes"])
-          assert count >= target * 1.65
-          print(f"PASS: {target // 60}-minute briefing draft verified with {len(draft['scenes'])} scenes, {count} words, one mid-video CTA, chapter markers and named sources.", flush=True)
+          by_topic = {idea["topic_area"]: idea for idea in ideas}
+          fixtures = [(300, "16:9", by_topic["health"])] if health_check else [(720, "16:9", by_topic["education"])]
+          if os.getenv("DRAFT_MATRIX") == "true":
+              reported_story = {"topic_area": "health", "title": "Gut bacteria and CAR T-cell therapy",
+                                "hook_summary": "The lead study examined gut bacteria in a mouse lymphoma model.",
+                                "references": ["https://pubmed.ncbi.nlm.nih.gov/42485357/", "https://pubmed.ncbi.nlm.nih.gov/36641624/"]}
+              fixtures = [(600, "16:9", reported_story), (60, "9:16", by_topic["education"]),
+                          (300, "16:9", by_topic["intelligence"]), (720, "16:9", by_topic["education"])]
+          print("Verified briefing date and all three topics:", ideas[0]["briefing_date"], flush=True)
+          for target, ratio, lead in fixtures:
+              print(f"Checking {lead['topic_area']} at {target}s ({ratio})", flush=True)
+              result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
+                                      input=json.dumps(dict(brief="Explain the selected study using its exact findings and limitations.",
+                                          seconds=target, ratio=ratio, recent=[], briefing=lead)),
+                                      text=True, stdout=subprocess.PIPE, timeout=240, check=True)
+              draft = json.loads(result.stdout)
+              assert draft["duration_seconds"] == target and draft["format"] == ratio
+              assert all(link in draft["description"] for link in lead["references"])
+              assert any(1 in scene.get("source_ids", []) for scene in draft["scenes"])
+              assert draft.get("community_post")
+              count = sum(len(scene["narration"].split()) for scene in draft["scenes"])
+              assert count >= target * 1.65
+              if target >= 300:
+                  ctas = [index for index, scene in enumerate(draft["scenes"])
+                          if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
+                  assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65
+                  assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
+              print(f"PASS: {lead['topic_area']} {target // 60}-minute draft, {len(draft['scenes'])} scenes, {count} words, exact source links.", flush=True)
           PYTHON

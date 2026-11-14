@@ -160,7 +160,10 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
     "A second paper examined checklists in another setting. The results describe each team separately, and neither paper says every hospital should follow the same steps.",
   ];
   const draftInput = { title: "The missing detail between shifts", description: "Two teams studied how staff hand over their work.",
-    scenes: narration.map((line, index) => ({ narration: line, search_queries: ["hospital staff handover"], source_ids: index < 2 ? [1] : index === 3 ? [2] : [] })) };
+    scenes: [{ narration: "  " }, ...narration.map((line, index) => ({
+      narration: index === 0 ? line.replace("writing in the Example Journal ", "") : line,
+      search_queries: index === 0 ? [] : ["hospital staff handover"], source_ids: index < 2 ? ["1", 999] : index === 3 ? [2] : [],
+    }))] };
   let lookups = 0;
   context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
     if (input.includes("europepmc")) {
@@ -188,6 +191,9 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
   });
   assert.equal(lookups, 2);
   assert.match(draft.scenes[0].narration, /Example Journal/);
+  assert.equal(draft.scenes.length, narration.length);
+  assert.deepEqual(draft.scenes[0].source_ids, [1]);
+  assert.ok(draft.scenes[0].search_queries.length);
   assert.deepEqual(draft.sources?.map((source) => source.url), references);
   assert.deepEqual(draft.description.split("\n").slice(-2), references.map((url, index) => ["Example Journal", "Example Education Journal"][index] + " — " + url));
 });
