@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - studio_smoke.py
+      - src/lib/studio-research.ts
   workflow_dispatch:
 permissions:
   contents: read
