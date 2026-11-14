@@ -13,10 +13,8 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: '9,24,39,54 * * * *'
-  push:
-    branches: [main]
-    paths: [studio_maintenance.py, .github/workflows/studio_maintenance.yml]
+    # 23:00 UTC is midnight in Africa/Lagos.
+    - cron: '0 23 * * *'
 permissions:
   contents: read
 concurrency:
@@ -42,16 +40,11 @@ jobs:
           STUDIO_PUBLISHED_PREVIEW_HOURS: '12'
           STUDIO_PUBLISHED_THUMBNAIL_DAYS: '90'
         run: |
-          if [ "${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[clear-studio-attention]') }}" = "true" ]; then
-            python studio_maintenance.py --clear-attention
-          elif [ "${{ inputs.clear_attention }}" = "true" ]; then
-            if [ "${{ inputs.dry_run }}" = "true" ]; then
-              python studio_maintenance.py --clear-attention --dry-run
-            else
-              python studio_maintenance.py --clear-attention
-            fi
-          elif [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.dry_run }}" = "true" ]; then
-            python studio_maintenance.py --dry-run
-          else
-            python studio_maintenance.py
+          args=()
+          if [ "${{ inputs.clear_attention }}" = "true" ]; then
+            args+=(--clear-attention)
           fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python studio_maintenance.py "${args[@]}"

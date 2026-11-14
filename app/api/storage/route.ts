@@ -21,7 +21,7 @@ export async function GET(request: Request) {
     }
     return NextResponse.json({ ok: true, buckets, retention: {
       published_preview_hours: 12, published_thumbnail_days: 90, unpublished: "Retained until safely backed up or manually removed.",
-      metadata: "Retained indefinitely.", cleanup: "Scheduled every 15 minutes through GitHub Actions.",
+      metadata: "Retained indefinitely.", cleanup: "Scheduled daily at midnight WAT.",
     }, immediate_dispatch_available: studioDispatchAvailable() },
       { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
