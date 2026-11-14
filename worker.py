@@ -1032,13 +1032,18 @@ def speed_up_preview(source: Path, target: Path, timeline: list[dict], speed: fl
     if not frames or abs(source_frames - int(track["nb_frames"])) > 1:
         raise ValueError("The saved edit points do not match the original video.")
     duration = frames / 30
-    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-i", str(source),
-         "-map", "0:v:0", "-map", "0:a:0",
-         "-vf", f"setpts=PTS/{speed:.8f},fps=30,tpad=stop_mode=clone:stop_duration=0.1",
+    picture = target.with_suffix(".picture.mp4")
+    # Keep the video transcode independent so audio filtering cannot stall the picture encoder.
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-threads", "2", "-filter_threads", "1", "-i", str(source),
+         "-map", "0:v:0", "-an", "-vf", f"setpts=PTS/{speed:.8f},fps=30,tpad=stop_mode=clone:stop_duration=0.1",
+         "-frames:v", str(frames), *video_encoder(), "-preset", "ultrafast", "-crf", "27",
+         "-maxrate", "580k", "-bufsize", "1160k",
+         *keyframe_options([item["duration"] for item in revised]), str(picture)], timeout=420)
+    run(["ffmpeg", "-y", "-v", "error", "-xerror", "-filter_threads", "1", "-i", str(picture), "-i", str(source),
+         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
          "-af", f"atempo={speed:.8f},apad=whole_len={frames * 1600},atrim=end_sample={frames * 1600}",
-         "-frames:v", str(frames), "-ar", "48000", *video_encoder(),
-         "-c:a", "aac", "-b:a", "160k", *keyframe_options([item["duration"] for item in revised]),
-         "-movflags", "+faststart", str(target)], timeout=1200)
+         "-ar", "48000", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(target)], timeout=180)
+    picture.unlink()
     verify_render_geometry(target, (int(track["width"]), int(track["height"])), duration)
     validate_audio(target, expected=duration)
     return revised, duration
@@ -1073,9 +1078,11 @@ def repair_preview_pace(client, video_id: str) -> None:
     words = sum(len(scene["narration"].split()) for scene in scenes)
     speed = min(1.18, max(1.10, MIN_NARRATION_WPM * original_duration / (words * 60)))
     adjusted = directory / "final_video.mp4"
+    print(f"[pace] Retiming {original_duration:.2f}s at {speed:.3f}x.", flush=True)
     revised, duration = speed_up_preview(source, adjusted, timeline, speed)
     preview = storage_preview(adjusted, revised)
     validate_audio(preview, expected=duration)
+    print(f"[pace] Audio and picture verified at {duration:.2f}s. Saving preview.", flush=True)
     filename = f"{video_id}-pace-v1.mp4"
     data = preview.read_bytes()
     retry_io(lambda: bucket.upload(filename, data, file_options={"content-type": "video/mp4", "upsert": "true"}),
