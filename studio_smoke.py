@@ -75,6 +75,13 @@ def main() -> int:
         assert stored.get("render_version") == "studio-v7"
         assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
         assert stored["scene_timeline"][0]["footage"], "the ocean narration selected no related stock media"
+        # Simulate missing direct matches while exercising the real contextual stock lookup.
+        with patch("worker.footage_intent", return_value=([], [], set())):
+            contextual = fetch_broll({"scene_number": 99, "narration": "Ocean waves approach the beach.",
+                                      "search_queries": ["ocean waves"], "format": "16:9"},
+                                     ROOT / video_id, set(), set(), {}, 0)
+        assert contextual and contextual[0].is_file(), "contextual ocean stock was not selected"
+        print("PASS: The worker selected contextual stock media when direct matches were unavailable.")
         from studio_audio import validate_audio
         for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
             validate_audio(scene_file)
@@ -99,7 +106,7 @@ def main() -> int:
                 portrait_meta = metadata(client.table("videos").select("*").eq("id", render_id).single().execute().data)
                 assert portrait_meta["scene_timeline"][1]["narration_cards"] > 0
                 assert not portrait_meta["scene_timeline"][1]["footage"]
-                print("PASS: An unmatched scene rendered with timed narration cards.")
+                print("PASS: An unmatched scene rendered with animated words, timed captions and intact narration.")
             path = ROOT / render_id / "preview_from_storage.mp4"
             path.write_bytes(client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(render_id + ".mp4"))
             poster = path.with_suffix(".jpg")

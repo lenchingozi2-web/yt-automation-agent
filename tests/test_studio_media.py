@@ -4,7 +4,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 from PIL import Image
 from studio_audio import spoken_shots, write_srt
-from studio_media import create_thumbnail, footage_intent, footage_relevance, narration_frame, verify_thumbnail
+from studio_media import contextual_searches, create_thumbnail, footage_intent, footage_relevance, narration_motion, verify_thumbnail
 
 
 def test_thumbnail_image():
@@ -38,7 +38,14 @@ if __name__ == "__main__":
         terms, subjects, words = footage_intent("forest trees", narration, ["mountain waterfall"], override=True)
         assert footage_relevance("mountain, landscape", subjects, words, terms[0], override=True) == 0
         assert footage_relevance("mountain, waterfall", subjects, words, terms[0], override=True) > 0
-        card = narration_frame(shots[1][1], path / "spoken.png", (1080, 1920))
+        assert contextual_searches("A better estimate was possible.", "A better estimate was possible.", "AI and kidney stones")[0] == "laboratory equipment"
+        assert contextual_searches("Students studied in groups.", "Students studied in groups.", "AI and kidney stones")[0] == "student notebook"
+        card = narration_motion(shots[1][1], path / "spoken.mp4", (1080, 1920), 90)
+        def frame_at(seconds):
+            return subprocess.check_output(["ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(card),
+                "-frames:v", "1", "-pix_fmt", "rgb24", "-threads", "1", "-f", "rawvideo", "-"], timeout=15)
+        first, settled = frame_at(0), frame_at(1.3)
+        assert len(first) == len(settled) > 0 and first != settled
         create_thumbnail(card, "Urine sample", path / "poster.jpg", ratio="9:16")
         verify_thumbnail(path / "poster.jpg", "9:16")
     print("Passed thumbnail and timed footage relevance checks")

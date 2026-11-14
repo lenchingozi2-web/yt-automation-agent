@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from functools import lru_cache
 import math
 import re
 import subprocess
@@ -80,34 +81,136 @@ def footage_relevance(tags: str, subjects: list, local: set, query: str, overrid
     return matches * 20 + overlap * 3 + hit
 
 
-def narration_frame(text: str, path: Path, size: tuple[int, int]) -> Path:
-    """Provide an original on-topic visual when the library has no suitable media."""
+CONTEXT_FOOTAGE = (
+    (r"\b(?:kidney|renal|urine|blood\s?spot|blood sample|microscop\w*|genetic\w*|specimen|biomarker\w*|laborator\w*)\b",
+     ("laboratory equipment", "laboratory scientist")),
+    (r"\b(?:health\w*|clinic\w*|doctor\w*|hospital\w*|patient\w*|diagnos\w*|treatment\w*|medic\w*|nurs\w*)\b",
+     ("hospital corridor", "medical office")),
+    (r"\b(?:learn\w*|educat\w*|student\w*|pupil\w*|teach\w*|school\w*|classroom\w*|lesson\w*|recall)\b",
+     ("student notebook", "school classroom")),
+    (r"\b(?:artificial intelligence|ai|machine learning|comput\w*|software|algorithm\w*|robot\w*|neural network\w*|programming)\b",
+     ("computer workstation", "typing keyboard")),
+    (r"\b(?:ocean\w*|marine|sea|beach\w*|coast\w*)\b", ("ocean beach", "sea coast")),
+    (r"\b(?:forest\w*|woodland\w*|trek\w*|wildlife|ecolog\w*)\b", ("forest path", "woodland trees")),
+)
+
+
+def contextual_searches(spoken: str, narration: str, title: str = "") -> list[str]:
+    for text in (spoken, narration, title):
+        for pattern, searches in CONTEXT_FOOTAGE:
+            if re.search(pattern, text, re.I):
+                return list(searches)
+    return ["desk notebook", "abstract light"]
+
+
+@lru_cache(maxsize=4)
+def motion_background(size: tuple[int, int]) -> Image.Image:
     width, height = size
-    image = Image.new("RGB", size, "#10221f")
-    draw = ImageDraw.Draw(image)
-    margin = round(width * .14)
-    max_width = width - 2 * margin
-    copy = " ".join(text.split()[:20])
-    if len(text.split()) > 20:
-        copy = copy.rstrip(".,;:!?") + "…"
-    title_font = font(max(18, round(width * .051)))
-    lines = [""]
-    for word in copy.split():
-        if draw.textlength(word, font=title_font) > max_width:
-            while draw.textlength(word + "…", font=title_font) > max_width:
+    gradient = Image.new("RGB", (80, 80))
+    gradient.putdata([(round(10 + 14 * glow), round(22 + 44 * glow), round(30 + 40 * glow))
+                      for y in range(80) for x in range(80)
+                      for glow in [max(0, 1 - math.hypot((x - 66) / 75, (y - 16) / 60))]])
+    image = gradient.resize(size, Image.Resampling.BICUBIC)
+    draw = ImageDraw.Draw(image, "RGBA")
+    step = max(12, width // 26)
+    for y in range(step, height, step):
+        for x in range(step, width, step):
+            draw.ellipse((x, y, x + 2, y + 2), fill=(159, 228, 199, 40))
+    stroke = max(1, width // 750)
+    for ring in range(4):
+        radius = width * (.18 + ring * .065)
+        x, y = width * .88, height * .18
+        draw.arc((x - radius, y - radius, x + radius, y + radius), 30, 300,
+                 fill=(138, 226, 203, 56 - ring * 9), width=stroke)
+    return image
+
+
+def narration_motion(text: str, path: Path, size: tuple[int, int], frames: int) -> Path:
+    """Render staggered words and a moving accent on an editorial background."""
+    # Composite at a smaller resolution and let the regular scene renderer upscale it.
+    scale = min(1, 900 / max(size))
+    width, height = (max(2, round(side * scale / 2) * 2) for side in size)
+    background = motion_background((width, height))
+    margin = round(width * (.12 if height > width else .15))
+    tokens = text.split()
+    words = tokens[:20] or ["…"]
+    if len(tokens) > 20:
+        words[-1] = words[-1].rstrip(".,;:!?") + "…"
+    available = width - 2 * margin
+    font_size = round(width * (.067 if height > width else .053))
+    face = font(max(14, font_size))
+    while face.size > 14:
+        line_width, lines = 0, 1
+        gap = face.getlength(" ")
+        for word in words:
+            advance = face.getlength(word)
+            if line_width and line_width + gap + advance > available:
+                lines += 1
+                line_width = advance
+            else:
+                line_width += advance + (gap if line_width else 0)
+        if lines * face.size * 1.22 < height * .51:
+            break
+        face = font(max(14, face.size - 2))
+    space = round(face.getlength(" "))
+    spacing = round(face.size * 1.22)
+    layout = []
+    x, row = margin, 0
+    for word in words:
+        if face.getlength(word) > available:
+            while word and face.getlength(word + "…") > available:
                 word = word[:-1]
             word += "…"
-        line = (lines[-1] + " " + word).strip()
-        if draw.textlength(line, font=title_font) <= max_width or not lines[-1]:
-            lines[-1] = line
-        else:
-            lines.append(word)
-    spacing = round(title_font.size * 1.22)
-    top = round(height * .46) - len(lines) * spacing // 2
-    draw.rounded_rectangle((margin, top - spacing // 2, margin + max(6, width // 17), top - spacing // 2 + max(3, width // 210)), radius=3, fill="#e7c782")
-    for index, line in enumerate(lines):
-        draw.text((margin, top + index * spacing), line, font=title_font, fill="#f6f2e7")
-    image.save(path, "PNG")
+        advance = round(face.getlength(word))
+        if x + advance > width - margin and x > margin:
+            x, row = margin, row + 1
+        layout.append((word, x, row))
+        x += advance + space
+    top = round(height * .45) - row * spacing // 2
+    first_line = top - spacing // 2
+    reveal = min(24, max(1, round(frames * .58)))
+    settle = max(1, min(8, frames // 5))
+    temporary = path.with_suffix(".part.mp4")
+    command = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size",
+               f"{width}x{height}", "-framerate", "30", "-i", "-", "-an", "-c:v", "libx264", "-preset", "ultrafast",
+               "-crf", "17", "-threads", "2", "-bf", "0", "-pix_fmt", "yuv420p", str(temporary)]
+    try:
+        with subprocess.Popen(command, stdin=subprocess.PIPE) as encoder:
+            assert encoder.stdin is not None
+            stream = encoder.stdin
+            try:
+                settled_frame = b""
+                for frame in range(frames):
+                    if settled_frame:
+                        stream.write(settled_frame)
+                        continue
+                    image = background.copy()
+                    draw = ImageDraw.Draw(image, "RGBA")
+                    line_width = max(1, round(width * (.035 + .09 * min(1, frame / reveal))))
+                    draw.rounded_rectangle((margin, first_line, margin + line_width, first_line + max(3, width // 150)),
+                                           radius=2, fill="#e7c782")
+                    for index, (word, x, row) in enumerate(layout):
+                        start = index * reveal / len(layout)
+                        if frame < start:
+                            continue
+                        progress = min(1, (frame - start + 1) / settle)
+                        ease = 1 - (1 - progress) ** 3
+                        y = top + row * spacing + round((1 - ease) * face.size * .65)
+                        color = (235, 209, 149) if row == 0 else (248, 244, 232)
+                        draw.text((x, y), word, font=face, fill=(*color, round(255 * ease)), anchor="lt")
+                    pixels = image.tobytes()
+                    stream.write(pixels)
+                    if frame >= reveal + settle:
+                        settled_frame = pixels
+                stream.close()
+                if encoder.wait(timeout=30):
+                    raise RuntimeError("FFmpeg could not encode the narration animation")
+            except (BrokenPipeError, subprocess.TimeoutExpired):
+                encoder.kill()
+                raise
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
 
 

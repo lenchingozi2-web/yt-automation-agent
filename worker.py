@@ -28,7 +28,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
-from studio_media import create_thumbnail, footage_intent, footage_relevance, narration_frame, prepare_stock_image, verify_thumbnail
+from studio_media import contextual_searches, create_thumbnail, footage_intent, footage_relevance, narration_motion, prepare_stock_image, verify_thumbnail, visual_words
 from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import BACKUP_VOICE, VOICE, NarrationUnavailable, make_audio, validate_audio, probe, retime_srt, spoken_shots
 from studio_maintenance import metadata as stored_metadata
@@ -83,14 +83,13 @@ def usable_footage(path: Path) -> bool:
 async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict) -> str | None:
     """Download a correctly oriented HD variant without ever preferring 4K bloat."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
-    if not key:
-        raise ValueError("Pixabay access is missing from the render worker.")
+    if not key or catalog.get("pixabay_unavailable"):
+        return None
     portrait = str(scene.get("format", "16:9")) == "9:16"
     narration = scene["narration"]
     override = bool(scene.get("footage_override"))
     queries, subjects, local = footage_intent(scene.get("spoken", narration), narration, scene["search_queries"], override)
-    if not queries:
-        return None
+    contextual = [] if override else contextual_searches(scene.get("spoken", narration), narration, scene.get("video_title", ""))
     interrupted = False
     async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True) as client:
         async def search(kind: str, query: str) -> list:
@@ -98,7 +97,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             cache_key = (kind, query)
             if cache_key in catalog:
                 return catalog[cache_key]
-            if catalog.get("pixabay_cooldown", 0) > time.monotonic():
+            if catalog.get("pixabay_unavailable") or catalog.get("pixabay_cooldown", 0) > time.monotonic():
                 return []
             endpoint = "https://pixabay.com/api/" + ("videos/" if kind == "video" else "")
             try:
@@ -118,95 +117,112 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 catalog[cache_key] = payload["hits"]
             except httpx.HTTPStatusError as error:
                 if error.response.status_code in (401, 403):
-                    raise ValueError("Pixabay rejected the render worker’s credentials.") from None
+                    catalog["pixabay_unavailable"] = True
+                    print("[b-roll] Pixabay access unavailable; using local graphics where needed.", flush=True)
+                    return []
                 interrupted |= transient(error)
             except (httpx.TransportError, ValueError):
                 interrupted = True
             return catalog.get(cache_key, [])
 
-        for query in queries:
-            hits = await search("video", query)
-            candidates = []
-            for hit in hits:
-                if not isinstance(hit, dict):
-                    continue
-                tags = str(hit.get("tags", ""))
-                score = footage_relevance(tags, subjects, local, query, override)
-                clip_id = str(hit.get("id") or "")
-                if not score or not clip_id or clip_id in used:
-                    continue
-                duration = float(hit.get("duration") or 0)
-                if 0 < duration < 2.5:
-                    continue
-                variants = hit.get("videos", {})
-                if not isinstance(variants, dict):
-                    continue
-                for variant in variants.values():
-                    if not isinstance(variant, dict) or not variant.get("url"):
+        async def video(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
+            for query in terms:
+                hits = await search("video", query)
+                candidates = []
+                for hit in hits:
+                    if not isinstance(hit, dict):
                         continue
-                    width = int(variant.get("width", 0) or 0)
-                    height = int(variant.get("height", 0) or 0)
-                    if width < 1 or height < 1:
+                    tags = str(hit.get("tags", ""))
+                    score = footage_relevance(tags, groups, words, query, override or contextual_match)
+                    clip_id = str(hit.get("id") or "")
+                    if not score or not clip_id or clip_id in used:
                         continue
-                    vertical_hd = height > width and width >= 480 and height >= 720
-                    horizontal_hd = width >= height and width >= 1280 and height >= 720
-                    if horizontal_hd or (portrait and vertical_hd):
-                        candidates.append((-score, clip_id in recent, portrait and not vertical_hd, width * height,
-                                           {**variant, "clip_id": clip_id}))
-            eligible = sorted(candidates, key=lambda item: item[:4])
-            seen = set()
-            for _, _, _, _, variant in eligible:
-                clip_id = variant["clip_id"]
-                if clip_id in seen:
-                    continue
-                if len(seen) >= 6:
-                    break
-                seen.add(clip_id)
-                count = 0
-                usable = False
-                try:
-                    async with client.stream("GET", variant["url"]) as download:
-                        download.raise_for_status()
-                        with target.open("wb") as handle:
+                    duration = float(hit.get("duration") or 0)
+                    if 0 < duration < 2.5:
+                        continue
+                    variants = hit.get("videos", {})
+                    if not isinstance(variants, dict):
+                        continue
+                    for variant in variants.values():
+                        if not isinstance(variant, dict) or not variant.get("url"):
+                            continue
+                        width = int(variant.get("width", 0) or 0)
+                        height = int(variant.get("height", 0) or 0)
+                        if width < 1 or height < 1:
+                            continue
+                        vertical_hd = height > width and width >= 480 and height >= 720
+                        horizontal_hd = width >= height and width >= 1280 and height >= 720
+                        if horizontal_hd or (portrait and vertical_hd):
+                            candidates.append((-score, clip_id in recent, portrait and not vertical_hd, width * height,
+                                               {**variant, "clip_id": clip_id}))
+                eligible = sorted(candidates, key=lambda item: item[:4])
+                seen = set()
+                for _, _, _, _, variant in eligible:
+                    clip_id = variant["clip_id"]
+                    if clip_id in seen:
+                        continue
+                    if len(seen) >= 6:
+                        break
+                    seen.add(clip_id)
+                    count = 0
+                    usable = False
+                    try:
+                        async with client.stream("GET", variant["url"]) as download:
+                            download.raise_for_status()
+                            with target.open("wb") as handle:
+                                async for chunk in download.aiter_bytes(chunk_size=262144):
+                                    count += len(chunk)
+                                    if count > 60_000_000:
+                                        raise ValueError("Pixabay footage exceeds 60 MB safety limit")
+                                    handle.write(chunk)
+                        usable = count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target)
+                        if usable:
+                            return clip_id
+                    except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
+                        interrupted |= transient(error)
+                        print(f"[b-roll] skipping unusable clip ({type(error).__name__})", flush=True)
+                    finally:
+                        if not usable:
+                            target.unlink(missing_ok=True)
+            return None
+
+        async def photo(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
+            for query in terms[:3]:
+                candidates = []
+                for hit in await search("image", query):
+                    if not isinstance(hit, dict):
+                        continue
+                    score = footage_relevance(str(hit.get("tags", "")), groups, words, query, override or contextual_match)
+                    url = hit.get("largeImageURL") or hit.get("webformatURL")
+                    clip_id = f"photo-{hit.get('id', '')}"
+                    width, height = hit.get("imageWidth"), hit.get("imageHeight")
+                    if score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used and width and height:
+                        candidates.append((-score, clip_id in recent, portrait != (height > width), clip_id, url))
+                for _, _, _, clip_id, url in sorted(candidates)[:3]:
+                    try:
+                        async with client.stream("GET", url) as download:
+                            download.raise_for_status()
+                            data = bytearray()
                             async for chunk in download.aiter_bytes(chunk_size=262144):
-                                count += len(chunk)
-                                if count > 60_000_000:
-                                    raise ValueError("Pixabay footage exceeds 60 MB safety limit")
-                                handle.write(chunk)
-                    usable = count > 10000 and ffprobe_duration(target) > 0.5 and usable_footage(target)
-                    if usable:
+                                data.extend(chunk)
+                                if len(data) > 10_000_000:
+                                    raise ValueError("Pixabay image exceeds the size limit")
+                        prepare_stock_image(data, target.with_suffix(".png"), video_size(scene))
                         return clip_id
-                except (OSError, ValueError, httpx.HTTPError, subprocess.SubprocessError) as error:
-                    interrupted |= transient(error)
-                    print(f"[b-roll] skipping unusable clip ({type(error).__name__})", flush=True)
-                finally:
-                    if not usable:
-                        target.unlink(missing_ok=True)
-        for query in queries[:3]:
-            candidates = []
-            for hit in await search("image", query):
-                if not isinstance(hit, dict):
-                    continue
-                score = footage_relevance(str(hit.get("tags", "")), subjects, local, query, override)
-                url = hit.get("largeImageURL") or hit.get("webformatURL")
-                clip_id = f"photo-{hit.get('id', '')}"
-                width, height = hit.get("imageWidth"), hit.get("imageHeight")
-                if score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used and width and height:
-                    candidates.append((-score, clip_id in recent, portrait != (height > width), clip_id, url))
-            for _, _, _, clip_id, url in sorted(candidates)[:3]:
-                try:
-                    async with client.stream("GET", url) as download:
-                        download.raise_for_status()
-                        data = bytearray()
-                        async for chunk in download.aiter_bytes(chunk_size=262144):
-                            data.extend(chunk)
-                            if len(data) > 10_000_000:
-                                raise ValueError("Pixabay image exceeds the size limit")
-                    prepare_stock_image(data, target.with_suffix(".png"), video_size(scene))
-                    return clip_id
-                except (OSError, ValueError, httpx.HTTPError) as error:
-                    interrupted |= transient(error)
-                    print(f"[b-roll] skipping unusable photo ({type(error).__name__})", flush=True)
+                    except (OSError, ValueError, httpx.HTTPError) as error:
+                        interrupted |= transient(error)
+                        print(f"[b-roll] skipping unusable photo ({type(error).__name__})", flush=True)
+            return None
+
+        result = await video(queries, subjects, local, False) or await photo(queries, subjects, local, False)
+        if result:
+            return result
+        for query in contextual:
+            words = set(visual_words(query))
+            result = await video([query], [], words, True) or await photo([query], [], words, True)
+            if result:
+                print("[b-roll] selected contextual stock media", flush=True)
+                return result
     if interrupted:
         raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
@@ -216,7 +232,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
     fingerprint = hashlib.sha256(json.dumps([
-        "narration-match-v1", scene.get("format"), scene["narration"], scene.get("spoken"),
+        "narration-match-v2", scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
         scene["search_queries"], bool(scene.get("footage_override")),
     ]).encode()).hexdigest()
     if receipt.is_file():
@@ -332,14 +348,17 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
     frames = round(duration * 30)
     for i, source in enumerate(sources):
         still = source.suffix.lower() == ".png"
+        motion_card = source.name.startswith("spoken_")
         input_options = ["-loop", "1", "-framerate", "30"] if still else ["-stream_loop", "-1"]
         command += [*input_options, "-i", str(source)]
         length = shot_frames[i] if shot_frames is not None else round((i + 1) * frames / len(sources)) - round(i * frames / len(sources))
-        zoom = 1 if still else 1.06
+        zoom = 1 if still or motion_card else 1.06
         scaled_w, scaled_h = int(width * zoom) // 2 * 2, int(height * zoom) // 2 * 2
+        motion = (f"zoompan=z='1+0.06*on/{max(1, length - 1)}':x='iw/2-iw/(2*zoom)':"
+                  f"y='ih/2-ih/(2*zoom)':d=1:s={width}x{height}:fps=30," if still else "")
         filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
                        f"crop={width}:{height}:x='(iw-ow)*(0.5+0.45*sin(t/3+{i}))':y='(ih-oh)/2',"
-                       f"setsar=1,fps=30,trim=end_frame={length},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+                       f"{motion}setsar=1,fps=30,trim=end_frame={length},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
     filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
     font_size, margin_v = (64, 300) if height > width else (54, 100)
@@ -895,17 +914,17 @@ def process(video: dict[str, Any], supabase) -> None:
         raw, clip_ids, lengths = [], [], []
         for shot, (frames, spoken) in enumerate(windows):
             try:
-                match = fetch_broll({**scene, "spoken": spoken}, directory, used_footage, recent_footage, catalog, shot)
+                match = fetch_broll({**scene, "spoken": spoken, "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
             except TemporaryRenderError:
-                if not raw:
+                if keep_audio and scene.get("footage_override") and not raw:
                     raise
                 match = None
             if match:
                 source, clip_id = match
                 clip_ids.append(clip_id)
             else:
-                source = narration_frame(spoken, directory / f"spoken_{number:02d}_{shot:02d}.png",
-                                         size or video_size(scene))
+                source = narration_motion(spoken, directory / f"spoken_{number:02d}_{shot:02d}.mp4",
+                                          size or video_size(scene), frames)
             raw.append(source)
             lengths.append(frames)
         if keep_audio and scene.get("footage_override") and not clip_ids:
