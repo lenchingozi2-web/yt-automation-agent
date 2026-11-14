@@ -9,6 +9,7 @@ import os
 from copy import deepcopy
 import shutil
 import sys
+import traceback
 from unittest.mock import patch
 from pathlib import Path
 
@@ -136,10 +137,12 @@ def main() -> int:
             poster.write_bytes(client.storage.from_(os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(render_id + ".jpg"))
             verify_thumbnail(poster, ratio)
             measured_ratio, measured_seconds = verify_render_geometry(path, size)
-            assert abs(measured_seconds - target) <= 5
             assert measured_ratio == ratio
             if ratio == "9:16":
-                assert abs(measured_seconds - target) > 0.1, "expected a natural runtime for the shorter narration"
+                assert 5 <= measured_seconds < target - .1, f"expected a shorter natural runtime, got {measured_seconds:.3f}s"
+                assert abs(measured_seconds - portrait_meta["actual_duration_seconds"]) < .05, "review compression changed the runtime"
+            else:
+                assert abs(measured_seconds - target) <= 5, f"unexpected runtime {measured_seconds:.3f}s"
             print(f"PASS: Stored {measured_ratio} MP4, {size[0]}×{size[1]}, {measured_seconds:.3f}s against {target}s target, and matching thumbnail.")
         revised_draft = deepcopy(draft)
         revised_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
@@ -187,6 +190,7 @@ def main() -> int:
         return 0
     except Exception as error:
         print("FAILED: Real render:", type(error).__name__, str(error)[-1200:])
+        traceback.print_exc()
         return 4
     finally:
         for disposable_id in reversed(disposable_ids):
