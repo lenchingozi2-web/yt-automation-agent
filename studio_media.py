@@ -1,6 +1,7 @@
 """Build legible, format-matched thumbnails from a production's own footage."""
 from __future__ import annotations
 
+from io import BytesIO
 import math
 import re
 import subprocess
@@ -10,6 +11,112 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 
 THUMBNAIL_MAX_BYTES = 2_000_000
+
+VISUAL_STOP_WORDS = frozenset("""
+    about above after again against along also always among another any around because before being below between both
+    but can cannot could did does doing down each enough even every first for from further get getting give going had
+    has have having here how into its just keep last let like look made make many may might more most much must near
+    need next now off often once one only onto other our out over own really same say see should show some something
+    still such take tell than that the their them then there these they thing think this those though through together
+    too toward under until upon use used using very want was way well were what when where which while who why will
+    with within without would you your footage illustration scene video background context reveal study researchers
+    result research finding example group difference actual common data model system comparison method process approach
+""".split())
+
+# Each alternative names the visible subject or a concrete part of the same procedure.
+VISUAL_SUBJECTS = (
+    (r"\bocean waves?\b", ("ocean waves", "sea waves", "surf")),
+    (r"\b(?:kidney stones?|renal calculi|nephrolithiasis)\b", ("kidney stone", "renal calculus")),
+    (r"\b(?:urine tests?|urine samples?|urinalysis|urine collections?)\b", ("urine sample", "urine test", "specimen cup")),
+    (r"\b(?:blood\s?spots?|heel pricks?)\b", ("newborn heel prick", "blood sample", "heel blood test")),
+    (r"\b(?:newborns?|infants?|bab(?:y|ies))\b", ("newborn", "infant", "baby")),
+    (r"\b(?:genetic tests?|methylation|dna)\b", ("dna", "genetic test")),
+    (r"\b(?:microscopes?|microscopy)\b", ("microscope", "microscopy")),
+    (r"\b(?:classrooms?|pupils?|students?|teachers?|teaching)\b", ("classroom", "teacher", "student", "pupil", "lesson")),
+    (r"\b(?:wearables?|smart\s?watches?)\b", ("smartwatch", "fitness tracker", "wearable")),
+)
+
+
+def visual_words(text: str) -> list[str]:
+    words = re.findall(r"[a-z][a-z-]{2,}", text.casefold())
+    return [word[:-3] + "y" if word.endswith("ies") else
+            word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "is", "us")) else word
+            for word in words if word not in VISUAL_STOP_WORDS]
+
+
+def footage_intent(spoken: str, narration: str, queries: list[str], override: bool = False) -> tuple[list[str], list, set]:
+    local = set(visual_words(spoken))
+    scene = set(visual_words(narration))
+    subjects = [] if override else [alternatives for pattern, alternatives in VISUAL_SUBJECTS if re.search(pattern, spoken, re.I)]
+    planned = [(query, set(visual_words(query))) for query in queries if visual_words(query)]
+    if override and planned:
+        return [query for query, _ in planned][:5], [], set.union(*(words for _, words in planned))
+    focus = spoken
+    if len(local) < 2 and not subjects and not (local & set().union(*(words for _, words in planned))):
+        focus = narration
+        local = scene
+        subjects = [alternatives for pattern, alternatives in VISUAL_SUBJECTS if re.search(pattern, narration, re.I)]
+    primary = [alternatives[0] for alternatives in subjects]
+    ranked = sorted(planned, key=lambda pair: len(pair[1] & local), reverse=True)
+    related = [query for query, words in ranked if words & local or any(query in group for group in subjects)]
+    words = list(dict.fromkeys(visual_words(focus)))
+    derived = [" ".join(words[index:index + 3]) for index in (0, 3) if len(words[index:index + 3]) >= 2]
+    alternate = [alternatives[1] for alternatives in subjects if len(alternatives) > 1]
+    return list(dict.fromkeys(primary + related + alternate + derived))[:4], subjects, local
+
+
+def footage_relevance(tags: str, subjects: list, local: set, query: str, override: bool = False) -> int:
+    if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|\b(?:intro|outro)\b", tags, re.I):
+        return 0
+    words = set(visual_words(tags))
+    matches = sum(any(set(visual_words(term)) <= words for term in group) for group in subjects)
+    overlap = len(words & local)
+    requested = set(visual_words(query))
+    hit = len(words & requested)
+    if (subjects and not matches) or (not subjects and (not overlap or overlap < min(2, len(local)))):
+        return 0
+    if override and (not hit or hit < min(2, len(requested))):
+        return 0
+    return matches * 20 + overlap * 3 + hit
+
+
+def narration_frame(text: str, path: Path, size: tuple[int, int]) -> Path:
+    """Provide an original on-topic visual when the library has no suitable media."""
+    width, height = size
+    image = Image.new("RGB", size, "#10221f")
+    draw = ImageDraw.Draw(image)
+    margin = round(width * .14)
+    max_width = width - 2 * margin
+    copy = " ".join(text.split()[:20])
+    if len(text.split()) > 20:
+        copy = copy.rstrip(".,;:!?") + "…"
+    title_font = font(max(18, round(width * .051)))
+    lines = [""]
+    for word in copy.split():
+        if draw.textlength(word, font=title_font) > max_width:
+            while draw.textlength(word + "…", font=title_font) > max_width:
+                word = word[:-1]
+            word += "…"
+        line = (lines[-1] + " " + word).strip()
+        if draw.textlength(line, font=title_font) <= max_width or not lines[-1]:
+            lines[-1] = line
+        else:
+            lines.append(word)
+    spacing = round(title_font.size * 1.22)
+    top = round(height * .46) - len(lines) * spacing // 2
+    draw.rounded_rectangle((margin, top - spacing // 2, margin + max(6, width // 17), top - spacing // 2 + max(3, width // 210)), radius=3, fill="#e7c782")
+    for index, line in enumerate(lines):
+        draw.text((margin, top + index * spacing), line, font=title_font, fill="#f6f2e7")
+    image.save(path, "PNG")
+    return path
+
+
+def prepare_stock_image(data: bytes, path: Path, size: tuple[int, int]) -> None:
+    with Image.open(BytesIO(data)) as source:
+        if source.width * source.height > 16_000_000 or min(source.size) < 320:
+            raise ValueError("Unsuitable stock photo dimensions")
+        picture = ImageOps.exif_transpose(source).convert("RGB")
+        ImageOps.fit(picture, size, method=Image.Resampling.LANCZOS).save(path, "PNG")
 
 
 def thumbnail_size(ratio: str) -> tuple[int, int]:
@@ -71,7 +178,7 @@ def best_frame(sources: list[Path], output: Path, size: tuple[int, int], timesta
     best = None
     best_score = -math.inf
     for source in sources[:3]:
-        for timestamp in timestamps:
+        for timestamp in ((0,) if source.suffix.lower() == ".png" else timestamps):
             snapshot.unlink(missing_ok=True)
             try:
                 subprocess.run(

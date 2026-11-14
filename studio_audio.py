@@ -73,6 +73,30 @@ def retime_srt(source: Path, target: Path, tempo: float, duration: float) -> Pat
     return target
 
 
+def spoken_shots(source: Path, seconds: float, maximum: float, narration: str) -> list[tuple[int, str]]:
+    """Divide the final timeline into frame-exact windows and read their timed captions."""
+    def timestamp(value: str) -> float:
+        hours, minutes, seconds, millis = map(int, re.split(r"[:,]", value))
+        return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+    cues = []
+    for block in re.split(r"\n\s*\n", source.read_text(encoding="utf-8").strip()):
+        lines = block.splitlines()
+        if len(lines) < 3 or " --> " not in lines[1]:
+            continue
+        start, end = map(timestamp, lines[1].split(" --> "))
+        cues.append((start, end, " ".join(lines[2:])))
+    frames = max(1, round(seconds * 30))
+    count = max(1, (frames + round(maximum * 30) - 1) // round(maximum * 30))
+    windows = []
+    for index in range(count):
+        left = round(index * frames / count)
+        right = round((index + 1) * frames / count)
+        text = " ".join(caption for start, end, caption in cues if start < right / 30 and end > left / 30)
+        windows.append((right - left, text or narration))
+    return windows
+
+
 async def synthesize(text: str, path: Path, voice: str = VOICE) -> list[tuple[float, float, str]]:
     import edge_tts
     boundaries = []

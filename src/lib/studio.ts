@@ -1,4 +1,4 @@
-export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string };
+export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string; footage_override?: boolean };
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[]; community_post?: string };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
 export const PUBMED_SOURCE = /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/$/;
@@ -66,10 +66,16 @@ export function revisionMode(value: unknown, direction: string): RevisionMode {
   return "rewrite";
 }
 
-export function footageSearches(scene: Scene, direction: string): string[] {
+export function footageSubject(direction: string): string | undefined {
   const subject = /\b(?:show(?:ing)?|use|feature|depict(?:ing)?|cut to|replace\s+(?:the\s+)?(?:footage|visuals?|shots?|clips?|(?:scene\s+\d+))\s+with)\s+([^.!?\n]+)/i.exec(direction)?.[1]
     ?.replace(/^\s*(?:an?|the)\s+/i, "")
     .replace(/\b(?:instead|to (?:match|align)|that (?:matches|aligns))\b.*$/i, "").trim();
+  return subject && !/^(?:more |better |different )?(?:relevant|aligned|matching|appropriate|different|better|new|related)(?:\s+(?:footage|visuals?|clips?))?$/i.test(subject)
+    ? subject.split(/\s+/).slice(0, 6).join(" ").toLowerCase() : undefined;
+}
+
+export function footageSearches(scene: Scene, direction: string): string[] {
+  const subject = footageSubject(direction);
   const visualSubjects = [
     [/\b(?:blood\s?spot|heel prick|blood sample|blood test)\b/i, "blood sample laboratory"],
     [/\b(?:newborn|infant|baby)\b/i, "newborn hospital"],
@@ -79,7 +85,7 @@ export function footageSearches(scene: Scene, direction: string): string[] {
   ] as const;
   const relevant = visualSubjects.flatMap(([pattern, query]) => pattern.test(scene.narration) ? [query] : []);
   const terms = [
-    subject?.split(/\s+/).slice(0, 6).join(" "),
+    subject,
     ...relevant.slice(0, 2),
     ...scene.search_queries,
   ].filter((term): term is string => !!term && !/^(?:more |better |different )?(?:relevant|aligned|matching|appropriate|different|better|new|related)(?:\s+(?:footage|visuals?|clips?))?$/i.test(term));
@@ -107,7 +113,8 @@ export function normalizeDraft(value: unknown): Draft {
     return { scene_number: index + 1, narration: stringOf(r.narration || r.voiceover || r.text).trim(),
       search_queries: (Array.isArray(r.search_queries) ? r.search_queries : stringOf(r.search_queries || r.keywords).split(",")).filter((q: unknown): q is string => typeof q === "string" && !!q.trim()).map(q => q.trim()).slice(0, 5),
       estimated_duration: Number(r.estimated_duration) || 15, chapter_title: shortLine(r.chapter_title, 80),
-      source_ids: Array.isArray(r.source_ids) ? [...new Set(r.source_ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))].slice(0, 12) : [] };
+      source_ids: Array.isArray(r.source_ids) ? [...new Set(r.source_ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))].slice(0, 12) : [],
+      ...(r.footage_override === true ? { footage_override: true } : {}) };
   });
   const first = entries.length > 0 ? objectOf(entries[0]) : {};
   const ratio = [savedSettings.format, savedSettings.aspect_ratio, source.format, source.aspect_ratio,

@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Play, RefreshCw, Search, X } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Megaphone, Play, RefreshCw, Search, X } from "lucide-react";
 import { canRetryYouTubeThumbnail, groupProductions, youtubePublishAction, youtubeStudioUrl, type Draft, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
 import { communityPostFor, formatLagosPublishInput, formatYouTubeTime, parseLagosPublishTime, teaserDraft } from "@/src/lib/studio-growth";
 import { Modal, Notice, type Feedback } from "./studio-shell";
@@ -120,9 +120,9 @@ function RevisionForm({ video, busy, submit }: {
   </form>;
 }
 
-function Preview({ video, close, approve, revise, retryThumbnail, createShort, busy, feedback, latest, editable }: {
+function Preview({ video, close, approve, revise, retryThumbnail, promote, busy, feedback, latest, editable }: {
   video: StudioVideo; close: () => void; approve: (publishAt?: string) => Promise<boolean>;
-  createShort: (draft: Draft) => void;
+  promote: () => void;
   revise: (input: RevisionInput) => Promise<boolean>; retryThumbnail: () => Promise<boolean>; busy: boolean; feedback: Feedback | null;
   latest: boolean; editable: boolean;
 }) {
@@ -134,8 +134,6 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
   const [openedAt] = useState(Date.now);
   const [schedule, setSchedule] = useState(() => formatLagosPublishInput(video.publish_at));
   const [showSchedule, setShowSchedule] = useState(Boolean(video.publish_at));
-  const [copyState, setCopyState] = useState("");
-  const [teaserScene, setTeaserScene] = useState("1");
   const player = useRef<HTMLVideoElement>(null);
   const youtubeEdit = youtubeStudioUrl(video);
   const thumbnailFailed = video.thumbnail_publish_status === "failed";
@@ -146,8 +144,6 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
     : publishAction === "approve" ? "Approve & publish on YouTube" : "Retry YouTube upload";
   const scheduled = video.publish_at && Date.parse(video.publish_at) > openedAt;
   const releaseInvalid = showSchedule && (!release || Date.parse(release) < openedAt + 15 * 60_000);
-  const fullVideo = video.duration_seconds >= 300 || (video.actual_duration_seconds ?? 0) >= 300;
-  const selectedTeaser = fullVideo ? teaserDraft(video, Number(teaserScene)) : undefined;
   async function send() {
     setAttempted(true);
     if (await approve(release)) setConfirming(false);
@@ -200,28 +196,6 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
         <summary>Video chapters</summary>
         <ul>{video.youtube_chapters.map(({ start, title }) => <li key={start}>{formatYouTubeTime(start)} {title}</li>)}</ul>
       </details>}
-      {video.youtube_url && <details className="preview-sources">
-        <summary>Promote this video</summary>
-        {fullVideo && <p className="review-note">In YouTube Studio, preview an end screen from {formatYouTubeTime((video.actual_duration_seconds || video.duration_seconds) - 15)} and add a related video or playlist.</p>}
-        <label>YouTube post draft<textarea readOnly rows={4} value={communityPostFor(video)} /></label>
-        <button type="button" className="button button-secondary" onClick={async () => {
-          try { await navigator.clipboard.writeText(communityPostFor(video)); setCopyState("Post copied."); }
-          catch { setCopyState("Select the draft text to copy it."); }
-        }}>Copy post</button>
-        {copyState && <p className="review-note" role="status">{copyState}</p>}
-        {fullVideo && <div className="revision-panel">
-          <label>Teaser start scene
-            <select value={teaserScene} onChange={(event) => setTeaserScene(event.target.value)}>
-              {video.scenes.map((scene) => <option key={scene.scene_number} value={scene.scene_number}>
-                Scene {scene.scene_number}{scene.chapter_title ? " · " + scene.chapter_title : ""}
-              </option>)}
-            </select>
-          </label>
-          <button type="button" className="button button-secondary" disabled={!selectedTeaser || busy}
-            onClick={() => { if (selectedTeaser) { close(); createShort(selectedTeaser); } }}>Draft teaser Short</button>
-          <p className="review-note">{selectedTeaser ? "Review this portrait excerpt before rendering. After uploading it, select this video in the Short’s Related video field." : "Choose a scene with enough narration for an excerpt."}</p>
-        </div>}
-      </details>}
       {editing && <div className="revision-panel">
         {attempted && feedback?.kind === "error" && <Notice feedback={feedback} />}
         <p className="review-note">{video.scene_times?.length && video.video_url
@@ -251,6 +225,9 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
         {video.publish_error}{video.publish_status === "retry" && clock(video.publish_retry_at) && " Next attempt after " + clock(video.publish_retry_at) + "."}
       </p>}
       <div className="preview-actions">
+        {video.youtube_url && <button type="button" className="button button-secondary" onClick={promote}>
+          <Megaphone size={16} /> Promote this video
+        </button>}
         {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
         {youtubeEdit && <a className="button button-secondary" href={youtubeEdit} target="_blank" rel="noreferrer">YouTube Studio <ArrowUpRight size={17} /></a>}
         {editable && !!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
@@ -272,6 +249,52 @@ function Preview({ video, close, approve, revise, retryThumbnail, createShort, b
   </Modal>;
 }
 
+function PromotionDialog({ video, close, createShort, busy }: {
+  video: StudioVideo; close: () => void; createShort: (draft: Draft) => void; busy: boolean;
+}) {
+  const fullVideo = video.duration_seconds >= 300 || (video.actual_duration_seconds ?? 0) >= 300;
+  const teaserOptions = fullVideo ? video.scenes.flatMap((scene) => {
+    const draft = teaserDraft(video, scene.scene_number);
+    return draft ? [{ scene, draft }] : [];
+  }) : [];
+  const [teaserScene, setTeaserScene] = useState(() => teaserOptions[0]?.scene.scene_number ?? 0);
+  const [copyState, setCopyState] = useState("");
+  const post = communityPostFor(video);
+  const youtubeEdit = youtubeStudioUrl(video);
+  const selectedTeaser = teaserOptions.find(({ scene }) => scene.scene_number === teaserScene)?.draft;
+  return <Modal titleId="promotion-title" close={close} className="preview-dialog">
+    <header className="dialog-header">
+      <div><p>{video.title}</p><h2 id="promotion-title">Promote this video</h2></div>
+      <button type="button" className="icon-button" aria-label="Close promotion tools" onClick={close}><X size={20} /></button>
+    </header>
+    <div className="preview-body promotion-body">
+      <label>YouTube post draft<textarea readOnly rows={4} value={post} /></label>
+      <button type="button" className="button button-secondary" onClick={async () => {
+        try { await navigator.clipboard.writeText(post); setCopyState("Post copied."); }
+        catch { setCopyState("Select the draft text to copy it."); }
+      }}>Copy post</button>
+      <p className="review-note" role="status">{copyState || "Paste the draft into a YouTube Community post when the video is public."}</p>
+      {!!teaserOptions.length && <>
+        <label>Teaser start scene
+          <select value={teaserScene} onChange={(event) => setTeaserScene(Number(event.target.value))}>
+            {teaserOptions.map(({ scene }) => <option key={scene.scene_number} value={scene.scene_number}>
+              Scene {scene.scene_number}{scene.chapter_title ? " · " + scene.chapter_title : ""}
+            </option>)}
+          </select>
+        </label>
+        <button type="button" className="button button-secondary" disabled={!selectedTeaser || busy}
+          onClick={() => { if (selectedTeaser) { close(); createShort(selectedTeaser); } }}>Draft teaser Short</button>
+        <p className="review-note">Review the excerpt before rendering. After uploading the Short, use its Related video field to link this video.</p>
+      </>}
+      {fullVideo && <p className="review-note">In YouTube Studio, preview an end screen from {formatYouTubeTime((video.actual_duration_seconds || video.duration_seconds) - 15)} and add a related video or playlist.</p>}
+    </div>
+    <footer className="dialog-footer">
+      <a className="button button-secondary" href={video.youtube_url} target="_blank" rel="noreferrer">Open on YouTube <ArrowUpRight size={16} /></a>
+      {youtubeEdit && <a className="button button-secondary" href={youtubeEdit} target="_blank" rel="noreferrer">YouTube Studio <ArrowUpRight size={16} /></a>}
+    </footer>
+  </Modal>;
+}
+
 export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, feedback, reuse, createShort }: {
   videos: StudioVideo[]; loading: boolean; error: string; refreshing: boolean; refresh: () => void;
   busy: string | null; retry: (video: StudioVideo, publish?: boolean, publishAt?: string) => Promise<boolean>; feedback: Feedback | null;
@@ -284,11 +307,13 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
   const [search, setSearch] = useState("");
   const [shown, setShown] = useState(PAGE_SIZE);
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [promotionId, setPromotionId] = useState<string | null>(null);
   const query = useDeferredValue(search.trim().toLowerCase());
   const records = useMemo(() => groupProductions(videos).map((production) => ({ ...production, state: videoState(production.latest) })), [videos]);
   const filtered = records.filter(({ latest, state }) => (filter === "All" || state.filter === filter) && (!query || latest.title.toLowerCase().includes(query)));
   const previewGroup = records.find(({ versions }) => versions.some((version) => version.id === previewId));
   const preview = previewGroup?.versions.find((version) => version.id === previewId && version.status === "completed" && (version.video_url || version.youtube_url));
+  const promotion = videos.find((video) => video.id === promotionId && video.status === "completed" && video.youtube_url);
   const dateOf = (date?: string) => date && Number.isFinite(Date.parse(date)) ? dateFormat.format(new Date(date)) : "";
 
   return <section className="panel queue" id="queue" aria-labelledby="queue-title">
@@ -324,6 +349,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
         const problem = latest.status === "failed" ? latest.error_message : latest.publish_approved_at ? latest.publish_error : "";
         const progress = latest.status === "rendering" || latest.thumbnail_publish_status === "failed" ? latest.progress_note : "";
         const waiting = latest.status === "pending" ? clock(latest.created_at) : "";
+        const uploaded = versions.find((version) => version.status === "completed" && version.youtube_url);
         const renderedIn = latest.revision && latest.status === "completed" ? renderTime(latest) : "";
         return <li className="queue-row" key={id}>
           <Thumbnail video={playable || latest} />
@@ -343,6 +369,9 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
             </button>}
             {latest.youtube_url && !playable && <button className="button button-secondary" onClick={() => setPreviewId(latest.id)}>
               YouTube details
+            </button>}
+            {uploaded && <button type="button" className="button button-secondary" onClick={() => setPromotionId(uploaded.id)}>
+              <Megaphone size={15} /> Promote this video
             </button>}
             {latest.status === "failed" && <button className="button button-secondary" disabled={!!busy} onClick={() => void retry(latest)}>
               {busy === latest.id && <LoaderCircle className="spinner" size={16} />} Retry {latest.revision ? "revision" : "render"}
@@ -366,7 +395,9 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
     {preview && previewGroup && <Preview key={preview.id} video={preview} close={() => setPreviewId(null)}
       latest={preview.id === previewGroup.latest.id}
       editable={preview.id === previewGroup.latest.id || (previewGroup.latest.status === "failed" && preview.id === previewGroup.playable?.id)}
-      approve={(publishAt) => retry(preview, true, publishAt)} createShort={createShort} revise={(input) => revise(preview, input)}
+      approve={(publishAt) => retry(preview, true, publishAt)} promote={() => { setPreviewId(null); setPromotionId(preview.id); }}
+      revise={(input) => revise(preview, input)}
       retryThumbnail={() => retryThumbnail(preview)} busy={busy !== null} feedback={feedback} />}
+    {promotion && <PromotionDialog key={promotion.id} video={promotion} close={() => setPromotionId(null)} createShort={createShort} busy={busy !== null} />}
   </section>;
 }

@@ -3,7 +3,8 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 from PIL import Image
-from studio_media import create_thumbnail, verify_thumbnail
+from studio_audio import spoken_shots, write_srt
+from studio_media import create_thumbnail, footage_intent, footage_relevance, narration_frame, verify_thumbnail
 
 
 def test_thumbnail_image():
@@ -22,4 +23,22 @@ def test_thumbnail_image():
 
 if __name__ == "__main__":
     test_thumbnail_image()
-    print("Thumbnail generation smoke test passed")
+    narration = "A kidney stone forms. The laboratory examines a urine sample."
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp)
+        cues = path / "timed.srt"
+        write_srt([(0, 3.5, "A kidney stone forms."), (4.1, 7.9, "The laboratory examines a urine sample.")], cues)
+        shots = spoken_shots(cues, 8, 5, narration)
+        assert shots == [(120, "A kidney stone forms."), (120, "The laboratory examines a urine sample.")]
+        terms, subjects, words = footage_intent(shots[1][1], narration, ["mountain landscape", "kidney stone", "urine sample"])
+        assert terms[0] == "urine sample" and "mountain landscape" not in terms and "kidney stone" not in terms
+        assert footage_relevance("mountain, sunset, hospital", subjects, words, terms[0]) == 0
+        assert footage_relevance("kidney stone, anatomy", subjects, words, terms[0]) == 0
+        assert footage_relevance("urine sample, specimen cup, laboratory", subjects, words, terms[0]) > 0
+        terms, subjects, words = footage_intent("forest trees", narration, ["mountain waterfall"], override=True)
+        assert footage_relevance("mountain, landscape", subjects, words, terms[0], override=True) == 0
+        assert footage_relevance("mountain, waterfall", subjects, words, terms[0], override=True) > 0
+        card = narration_frame(shots[1][1], path / "spoken.png", (1080, 1920))
+        create_thumbnail(card, "Urine sample", path / "poster.jpg", ratio="9:16")
+        verify_thumbnail(path / "poster.jpg", "9:16")
+    print("Passed thumbnail and timed footage relevance checks")

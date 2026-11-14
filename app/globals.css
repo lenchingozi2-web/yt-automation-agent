@@ -286,5 +286,8 @@ h3 { font-weight: 620; }
 .preview-sources a { color: var(--gold, #e7c782); text-decoration: underline; }
 .preview-dialog[open] { display: flex; flex-direction: column; }
 .preview-body { overflow-y: auto; overscroll-behavior: contain; }
+.promotion-body { display: grid; gap: 10px; padding: 18px; }
+.promotion-body label { display: grid; gap: 6px; }
+.promotion-body .button { justify-self: start; }
 .preview-dialog .dialog-header, .preview-dialog .dialog-footer { flex-shrink: 0; }
 .revision-form :is(input, textarea, select), .preview-scenes select { width: 100%; }

@@ -28,9 +28,9 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from supabase import create_client
-from studio_media import create_thumbnail, verify_thumbnail
+from studio_media import create_thumbnail, footage_intent, footage_relevance, narration_frame, prepare_stock_image, verify_thumbnail
 from studio_thumbnail_art import make_prader_willi_thumbnail
-from studio_audio import BACKUP_VOICE, VOICE, NarrationUnavailable, make_audio, validate_audio, probe, retime_srt
+from studio_audio import BACKUP_VOICE, VOICE, NarrationUnavailable, make_audio, validate_audio, probe, retime_srt, spoken_shots
 from studio_maintenance import metadata as stored_metadata
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
@@ -86,52 +86,55 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     if not key:
         raise ValueError("Pixabay access is missing from the render worker.")
     portrait = str(scene.get("format", "16:9")) == "9:16"
-    queries = list(scene.get("search_queries", []))
-    context = str(scene.get("visual_context", scene.get("narration", ""))).lower()
-    medical = bool(re.search(r"\b(medical|health|hospital|doctor|patient|clinician|wearable)\b", context))
-    queries = [str(q).strip() for q in queries if str(q).strip()]
-    if medical:
-        queries = [q for q in queries if not re.search(r"nature|landscape|river|subscribe|green.?screen", q, re.I)]
+    narration = scene["narration"]
+    override = bool(scene.get("footage_override"))
+    queries, subjects, local = footage_intent(scene.get("spoken", narration), narration, scene["search_queries"], override)
     if not queries:
-        queries = [str(scene.get("visual_context") or scene.get("narration") or "").strip()[:70]]
+        return None
     interrupted = False
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5), follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True) as client:
+        async def search(kind: str, query: str) -> list:
+            nonlocal interrupted
+            cache_key = (kind, query)
+            if cache_key in catalog:
+                return catalog[cache_key]
+            if catalog.get("pixabay_cooldown", 0) > time.monotonic():
+                return []
+            endpoint = "https://pixabay.com/api/" + ("videos/" if kind == "video" else "")
+            try:
+                response = await client.get(endpoint, params={
+                    "key": key, "q": query[:100], "safesearch": "true", "per_page": 25,
+                    **({"video_type": "all"} if kind == "video" else {"image_type": "photo"}),
+                })
+                if response.status_code == 429:
+                    reset = response.headers.get("X-RateLimit-Reset", "60")
+                    seconds = min(120, max(1, int(reset))) if reset.isdigit() else 60
+                    catalog["pixabay_cooldown"] = time.monotonic() + seconds
+                    return []
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
+                    raise ValueError("Invalid Pixabay search response.")
+                catalog[cache_key] = payload["hits"]
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in (401, 403):
+                    raise ValueError("Pixabay rejected the render worker’s credentials.") from None
+                interrupted |= transient(error)
+            except (httpx.TransportError, ValueError):
+                interrupted = True
+            return catalog.get(cache_key, [])
+
         for query in queries:
-            if query not in catalog:
-                try:
-                    response = await client.get("https://pixabay.com/api/videos/", params={
-                        "key": key, "q": query[:100], "video_type": "all",
-                        "safesearch": "true", "per_page": 25,
-                    })
-                    response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
-                        raise ValueError("Invalid Pixabay search response.")
-                    catalog[query] = payload["hits"]
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code in (401, 403):
-                        raise ValueError("Pixabay rejected the render worker’s credentials.") from None
-                    interrupted |= transient(error)
-                    continue
-                except (httpx.TransportError, ValueError):
-                    interrupted = True
-                    continue
-            query_words = set(re.findall(r"[a-z]{3,}", query.lower()))
-            preferred = []
-            fallback = []
-            for hit in catalog[query]:
+            hits = await search("video", query)
+            candidates = []
+            for hit in hits:
                 if not isinstance(hit, dict):
                     continue
-                tags = str(hit.get("tags", "")).lower()
-                if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|intro|outro", tags):
-                    continue
-                if medical and not re.search(r"medic|doctor|patient|health|hospital|laborator|wearable|watch|fitness|heart|nurse|science|data|computer|technolog|artificial|brain|\bai\b", tags):
-                    continue
+                tags = str(hit.get("tags", ""))
+                score = footage_relevance(tags, subjects, local, query, override)
                 clip_id = str(hit.get("id") or "")
-                if not clip_id or clip_id in used:
+                if not score or not clip_id or clip_id in used:
                     continue
-                tag_words = set(re.findall(r"[a-z]{3,}", tags))
-                score = len(query_words & tag_words) * 3 + len(set(context.split()) & tag_words)
                 duration = float(hit.get("duration") or 0)
                 if 0 < duration < 2.5:
                     continue
@@ -145,18 +148,14 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     height = int(variant.get("height", 0) or 0)
                     if width < 1 or height < 1:
                         continue
-                    # Landscape must never select vertical media.
-                    # Portrait prefers true vertical; horizontal HD can be center cropped.
-                    if portrait and height > width and width >= 480 and height >= 720:
-                        preferred.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
-                    elif not portrait and width >= height and width >= 1280 and height >= 720:
-                        preferred.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
-                    elif portrait and width >= height and width >= 1280 and height >= 720:
-                        fallback.append((clip_id in recent, -score, width * height, {**variant, "clip_id": clip_id}))
-            # Try distinct candidate clips in ranked order, using the smallest adequate variant.
-            eligible = sorted(preferred, key=lambda item: item[:3]) + sorted(fallback, key=lambda item: item[:3])
+                    vertical_hd = height > width and width >= 480 and height >= 720
+                    horizontal_hd = width >= height and width >= 1280 and height >= 720
+                    if horizontal_hd or (portrait and vertical_hd):
+                        candidates.append((-score, clip_id in recent, portrait and not vertical_hd, width * height,
+                                           {**variant, "clip_id": clip_id}))
+            eligible = sorted(candidates, key=lambda item: item[:4])
             seen = set()
-            for _, _, _, variant in eligible:
+            for _, _, _, _, variant in eligible:
                 clip_id = variant["clip_id"]
                 if clip_id in seen:
                     continue
@@ -183,6 +182,31 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 finally:
                     if not usable:
                         target.unlink(missing_ok=True)
+        for query in queries[:3]:
+            candidates = []
+            for hit in await search("image", query):
+                if not isinstance(hit, dict):
+                    continue
+                score = footage_relevance(str(hit.get("tags", "")), subjects, local, query, override)
+                url = hit.get("largeImageURL") or hit.get("webformatURL")
+                clip_id = f"photo-{hit.get('id', '')}"
+                width, height = hit.get("imageWidth"), hit.get("imageHeight")
+                if score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used and width and height:
+                    candidates.append((-score, clip_id in recent, portrait != (height > width), clip_id, url))
+            for _, _, _, clip_id, url in sorted(candidates)[:3]:
+                try:
+                    async with client.stream("GET", url) as download:
+                        download.raise_for_status()
+                        data = bytearray()
+                        async for chunk in download.aiter_bytes(chunk_size=262144):
+                            data.extend(chunk)
+                            if len(data) > 10_000_000:
+                                raise ValueError("Pixabay image exceeds the size limit")
+                    prepare_stock_image(data, target.with_suffix(".png"), video_size(scene))
+                    return clip_id
+                except (OSError, ValueError, httpx.HTTPError) as error:
+                    interrupted |= transient(error)
+                    print(f"[b-roll] skipping unusable photo ({type(error).__name__})", flush=True)
     if interrupted:
         raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
@@ -191,18 +215,24 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
 def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: set[str], catalog: dict, shot: int):
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
-    if target.is_file() and receipt.is_file():
-        cached = receipt.read_text().strip()
-        if cached.isdigit() and cached not in used:
+    fingerprint = hashlib.sha256(json.dumps([
+        "narration-match-v1", scene.get("format"), scene["narration"], scene.get("spoken"),
+        scene["search_queries"], bool(scene.get("footage_override")),
+    ]).encode()).hexdigest()
+    if receipt.is_file():
+        cached, _, saved = receipt.read_text().strip().partition(":")
+        source = target.with_suffix(".png") if cached.startswith("photo-") else target
+        if saved == fingerprint and re.fullmatch(r"(?:photo-)?\d+", cached) and cached not in used and source.is_file():
             used.add(cached)
-            return target, cached
+            return source, cached
     receipt.unlink(missing_ok=True)
     target.unlink(missing_ok=True)
+    target.with_suffix(".png").unlink(missing_ok=True)
     clip_id = asyncio.run(fetch_pixabay(scene, target, used, recent, catalog))
     if clip_id:
-        receipt.write_text(clip_id)
+        receipt.write_text(f"{clip_id}:{fingerprint}")
         used.add(clip_id)
-        return target, clip_id
+        return (target.with_suffix(".png") if clip_id.startswith("photo-") else target), clip_id
     return None
 
 
@@ -288,7 +318,7 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
 
 
 def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt: Path, directory: Path,
-                 *, duration: float | None = None, normalized_audio=False, size=None, bitrate=None, tempo=1) -> Path:
+                 *, duration: float | None = None, normalized_audio=False, size=None, bitrate=None, tempo=1, shot_frames=None) -> Path:
     output = directory / f"rendered_{int(scene['scene_number']):02d}.mp4"
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     width, height = size or video_size(scene)
@@ -301,12 +331,15 @@ def render_scene(scene: dict[str, Any], raw: Path | list[Path], audio: Path, srt
     filters = []
     frames = round(duration * 30)
     for i, source in enumerate(sources):
-        command += ["-stream_loop", "-1", "-i", str(source)]
-        shot_frames = round((i + 1) * frames / len(sources)) - round(i * frames / len(sources))
-        scaled_w, scaled_h = int(width * 1.06) // 2 * 2, int(height * 1.06) // 2 * 2
+        still = source.suffix.lower() == ".png"
+        input_options = ["-loop", "1", "-framerate", "30"] if still else ["-stream_loop", "-1"]
+        command += [*input_options, "-i", str(source)]
+        length = shot_frames[i] if shot_frames is not None else round((i + 1) * frames / len(sources)) - round(i * frames / len(sources))
+        zoom = 1 if still else 1.06
+        scaled_w, scaled_h = int(width * zoom) // 2 * 2, int(height * zoom) // 2 * 2
         filters.append(f"[{i}:v:0]scale={scaled_w}:{scaled_h}:force_original_aspect_ratio=increase,"
                        f"crop={width}:{height}:x='(iw-ow)*(0.5+0.45*sin(t/3+{i}))':y='(ih-oh)/2',"
-                       f"setsar=1,fps=30,trim=end_frame={shot_frames},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+                       f"setsar=1,fps=30,trim=end_frame={length},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
     labels = "".join(f"[v{i}]" for i in range(len(sources)))
     filters.append(labels + f"concat=n={len(sources)}:v=1:a=0[visuals]")
     font_size, margin_v = (64, 300) if height > width else (54, 100)
@@ -649,9 +682,8 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
             chunks.append(" ".join(current))
         for chunk in chunks:
             result.append({"scene_number": len(result) + 1, "narration": chunk,
-                           "search_queries": queries, "format": ratio, "logical_scene": i + 1})
-    for item in result:
-        item["visual_context"] = (str(merged.get("title", "")) + " " + item["narration"])[:1200]
+                           "search_queries": queries, "format": ratio, "logical_scene": i + 1,
+                           "footage_override": item.get("footage_override") is True})
     return result, ratio, merged
 
 
@@ -859,28 +891,29 @@ def process(video: dict[str, Any], supabase) -> None:
         tempo = natural / seconds if not keep_audio and target is not None else 1
         if not keep_audio and abs(tempo - 1) > .0001:
             srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
-        count = max(1, math.ceil(seconds / SHOT_SECONDS))
-        raw, clip_ids = [], []
-        for shot in range(count):
-            queries = scene["search_queries"]
-            shifted = queries[shot % len(queries):] + queries[:shot % len(queries)] if queries else []
+        windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
+        raw, clip_ids, lengths = [], [], []
+        for shot, (frames, spoken) in enumerate(windows):
             try:
-                match = fetch_broll({**scene, "search_queries": shifted}, directory, used_footage, recent_footage, catalog, shot)
+                match = fetch_broll({**scene, "spoken": spoken}, directory, used_footage, recent_footage, catalog, shot)
             except TemporaryRenderError:
                 if not raw:
                     raise
-                break
-            if not match:
-                break
-            source, clip_id = match
+                match = None
+            if match:
+                source, clip_id = match
+                clip_ids.append(clip_id)
+            else:
+                source = narration_frame(spoken, directory / f"spoken_{number:02d}_{shot:02d}.png",
+                                         size or video_size(scene))
             raw.append(source)
-            clip_ids.append(clip_id)
-        if not raw:
-            raise ValueError(f"No suitable footage for scene {logical}. Edit its footage search terms and try again.")
+            lengths.append(frames)
+        if keep_audio and scene.get("footage_override") and not clip_ids:
+            raise ValueError(f"No stock media matched your requested footage for scene {logical}. Try a different search term.")
         clip = render_scene(scene, raw, audio, srt, directory, duration=seconds,
-                            normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo)
+                            normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo, shot_frames=lengths)
         for footage in raw:
-            if len(thumbnail_candidates) < 3:
+            if footage.name.startswith("raw_") and len(thumbnail_candidates) < 3:
                 thumbnail_candidates.append(footage)
             elif not parent:
                 footage.unlink(missing_ok=True)
@@ -889,7 +922,8 @@ def process(video: dict[str, Any], supabase) -> None:
         voice = clip.with_suffix(".wav")
         voices.append(voice)
         replacement_timeline.append({"scene_number": logical, "duration": round(round(seconds * 30) / 30, 6),
-                                     "captions": srt.read_text(encoding="utf-8"), "footage": clip_ids})
+                                     "captions": srt.read_text(encoding="utf-8"), "footage": clip_ids,
+                                     "narration_cards": len(windows) - len(clip_ids)})
     save_fields(supabase, video, progress_note="Joining scenes")
     if parent:
         start = round(float(originals[0]["start"]) * 30)

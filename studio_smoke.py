@@ -38,12 +38,12 @@ def main() -> int:
     except Exception:
         pass
     draft = [{
-        "scene_number": 1, "narration": "This is a short system verification video for Studio.",
+        "scene_number": 1, "narration": "Ocean waves roll toward the beach and wash over the sand.",
         "search_queries": ["ocean waves"], "format": "16:9",
         "_studio": {"aspect_ratio": "16:9", "thumbnail_title": "STUDIO VIDEO TEST", "duration_seconds": 10},
     }, {
-        "scene_number": 2, "narration": "The second scene checks that narration continues after the video cut.",
-        "search_queries": ["forest", "nature"], "format": "16:9",
+        "scene_number": 2, "narration": "Forest trees shade the woodland path along the hillside.",
+        "search_queries": ["forest trees", "woodland path"], "format": "16:9",
     }]
     base = {"title": "Studio disposable rendering test", "status": "rendering",
             "description": "Temporary integration test. Removed after validation.",
@@ -74,6 +74,7 @@ def main() -> int:
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
         assert stored.get("render_version") == "studio-v7"
         assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
+        assert stored["scene_timeline"][0]["footage"], "the ocean narration selected no related stock media"
         from studio_audio import validate_audio
         for scene_file in (ROOT / video_id).glob("rendered_*.mp4"):
             validate_audio(scene_file)
@@ -92,7 +93,13 @@ def main() -> int:
                                                             "scenes": portrait_draft}).execute().data[0]
                 render_id = str(portrait["id"])
                 disposable_ids.append(render_id)
-                process(portrait, client)
+                with patch("worker.fetch_broll", side_effect=lambda scene, *args:
+                           None if scene["logical_scene"] == 2 else fetch_broll(scene, *args)):
+                    process(portrait, client)
+                portrait_meta = metadata(client.table("videos").select("*").eq("id", render_id).single().execute().data)
+                assert portrait_meta["scene_timeline"][1]["narration_cards"] > 0
+                assert not portrait_meta["scene_timeline"][1]["footage"]
+                print("PASS: An unmatched scene rendered with timed narration cards.")
             path = ROOT / render_id / "preview_from_storage.mp4"
             path.write_bytes(client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(render_id + ".mp4"))
             poster = path.with_suffix(".jpg")
@@ -123,7 +130,8 @@ def main() -> int:
         visual_draft = deepcopy(draft)
         visual_draft[0]["_studio"]["revision"] = {"parent_id": video_id, "scene_number": 2,
                                                    "mode": "visual", "original_media": True}
-        visual_draft[1]["search_queries"] = ["mountain landscape", "waterfall"]
+        visual_draft[1]["search_queries"] = ["mountain waterfall", "waterfall"]
+        visual_draft[1]["footage_override"] = True
         visual_row = client.table("videos").insert({**payload, "scenes": visual_draft}).execute().data[0]
         visual_id = str(visual_row["id"])
         disposable_ids.append(visual_id)
@@ -142,6 +150,7 @@ def main() -> int:
         assert visual_meta["status"] == "completed" and visual_meta["publish_status"] == "awaiting_review"
         assert visual_meta["scene_timeline"][0] == stored["scene_timeline"][0]
         assert not has_approval(visual_meta) and not visual_meta.get("youtube_url")
+        assert visual_meta["scene_timeline"][1]["footage"]
         assert visual_meta["scene_timeline"][1]["footage"] != stored["scene_timeline"][1]["footage"]
         print("PASS: Footage-only edit recovered within one worker run, changed scene 2, and reused the original narration and scene 1.")
         print("PASS: Real MP4, thumbnail and targeted voice repair saved and validated without YouTube approval.")
