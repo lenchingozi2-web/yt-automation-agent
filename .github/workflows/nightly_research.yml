@@ -78,8 +78,8 @@ jobs:
               reported_story = {"topic_area": "health", "title": "Gut bacteria and CAR T-cell therapy",
                                 "hook_summary": "The lead study examined gut bacteria in a mouse lymphoma model.",
                                 "references": ["https://pubmed.ncbi.nlm.nih.gov/42485357/", "https://pubmed.ncbi.nlm.nih.gov/36641624/"]}
-              fixtures = [(600, "16:9", reported_story), (60, "9:16", by_topic["education"]),
-                          (300, "16:9", by_topic["intelligence"]), (720, "16:9", by_topic["education"])]
+              fixtures = [(720, "16:9", by_topic["education"]), (600, "16:9", reported_story),
+                          (60, "9:16", by_topic["education"]), (300, "16:9", by_topic["intelligence"])]
           print("Verified briefing date and all three topics:", ideas[0]["briefing_date"], flush=True)
           for target, ratio, lead in fixtures:
               print(f"Checking {lead['topic_area']} at {target}s ({ratio})", flush=True)
@@ -97,7 +97,7 @@ jobs:
               if target >= 300:
                   ctas = [index for index, scene in enumerate(draft["scenes"])
                           if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
-                  assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65
+                  assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65, (ctas, len(draft["scenes"]))
                   assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
               print(f"PASS: {lead['topic_area']} {target // 60}-minute draft, {len(draft['scenes'])} scenes, {count} words, exact source links.", flush=True)
           PYTHON

@@ -1,4 +1,4 @@
-import { addViewerPrompt, communityQuestion } from "./studio-growth.ts";
+import { addViewerPrompt, communityQuestion, withoutViewerPrompt } from "./studio-growth.ts";
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 
 type Json = Record<string, unknown>;
@@ -264,7 +264,7 @@ function usableNarration(scene: Json) {
 function normalizeWrittenScenes(raw: Json, evidence: Evidence[], briefing?: BriefingEvidence) {
   const scenes = normalizeDraft({ scenes: list(raw.scenes).flatMap((item) => {
     const scene = object(item);
-    const narration = usableNarration(scene);
+    const narration = withoutViewerPrompt(usableNarration(scene));
     if (!narration) return [];
     const sourceIds = list(scene.source_ids).map((id) => typeof id === "string" && /^\d+$/.test(id) ? Number(id) : id);
     return [{ ...scene, narration, source_ids: sourceIds }];

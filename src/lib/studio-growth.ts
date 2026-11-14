@@ -3,6 +3,11 @@ import type { Draft, StudioVideo } from "./studio.ts";
 const existingPrompt = /\b(?:like (?:this|the) video|hit (?:the )?like|(?:like and |and )subscribe|subscribe (?:to (?:this|the|our|my) channel|to LenxiQ|for more)|give (?:this|it) a like)\b/i;
 const CTA_FALLBACK = "If this breakdown helped, give the video a like and subscribe to LenxiQ for more stories like this.";
 
+export function withoutViewerPrompt(narration: string) {
+  if (!existingPrompt.test(narration)) return narration;
+  return (narration.match(/[^.!?]+[.!?]*|[.!?]+/g) ?? []).filter((sentence) => !existingPrompt.test(sentence)).join("").trim();
+}
+
 export function addViewerPrompt(draft: Draft, suggestion?: unknown): Draft {
   if (draft.duration_seconds < 300 || draft.scenes.length < 6 || draft.scenes.some(({ narration }) => existingPrompt.test(narration))) return draft;
   const proposed = typeof suggestion === "string" ? suggestion.replace(/\s+/g, " ").trim() : "";
