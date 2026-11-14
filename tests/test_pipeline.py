@@ -211,6 +211,54 @@ class ExternalRetryRegression(unittest.TestCase):
 
 
 class MediaRegression(unittest.TestCase):
+    def test_fixed_narration_gain_keeps_the_speakers_relative_dynamics(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source, output = directory / "narration.wav", directory / "leveled.wav"
+            ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+                   "-af", "volume='if(lt(t,2),0.22,2)':eval=frame", source)
+            prepare_scene_audio(source, output, 4)
+            quiet_change = energy(output, 440, 1) / energy(source, 440, 1)
+            strong_change = energy(output, 440, 3) / energy(source, 440, 3)
+            self.assertAlmostEqual(quiet_change / strong_change, 1, delta=.02)
+            self.assertEqual(validate_audio(output), 4)
+
+    def test_fresh_stock_beats_a_repeated_clip_across_search_terms(self):
+        import httpx
+        from worker import fetch_pixabay
+        requests = []
+
+        def variants(url):
+            return {"large": {"width": 1920, "height": 1080, "size": 14000, "url": url}}
+
+        def data(request):
+            if request.url.host == "pixabay.com":
+                query = request.url.params["q"]
+                hits = []
+                if request.url.path.endswith("/videos/"):
+                    if query == "ocean waves":
+                        hits = [{"id": 1, "duration": 8, "tags": "ocean wave beach", "videos": variants("https://stock.test/recent")}]
+                    elif query == "sea waves":
+                        hits = [{"id": 2, "duration": 8, "tags": "sea wave", "videos": variants("https://stock.test/fresh")}]
+                return httpx.Response(200, json={"hits": hits})
+            requests.append(request.url.path)
+            return httpx.Response(200, content=b"x" * 14_000)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(data))
+        with (
+            TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"PIXABAY_API_KEY": "fixture"}),
+            patch("worker.httpx.AsyncClient", return_value=client),
+            patch("worker.picture_track", return_value={"width": 1920, "height": 1080}),
+            patch("worker.ffprobe_duration", return_value=8),
+            patch("worker.usable_footage", return_value=True),
+        ):
+            scene = {"narration": "Ocean waves arrive at the coast.", "search_queries": ["ocean waves", "sea waves"],
+                     "footage_override": True}
+            selected = asyncio.run(fetch_pixabay(scene, Path(tmp) / "stock.mp4", set(), {"1"}, {}))
+        self.assertEqual(selected, "2")
+        self.assertEqual(requests, ["/fresh"])
+
     def test_requested_runtime_retimes_audio_and_captions_in_both_formats(self):
         self.assertEqual(sum(round(d * 30) for d in scene_durations([60.8, 61.9, 60.2], 180)), 5400)
         self.assertEqual(sum(round(d * 30) for d in scene_durations([234.1, 239.9, 242.7], 720)), 21600)

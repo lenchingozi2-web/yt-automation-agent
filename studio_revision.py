@@ -16,9 +16,21 @@ from studio_retry import retry_io
 
 
 def footage_history(client, video_id):
-    recent = client.table("videos").select("id,scenes").eq("status", "completed").order("created_at", desc=True).limit(10).execute()
-    return {str(clip) for row in recent.data or [] if row.get("id") != video_id
-            for item in metadata(row).get("scene_timeline", []) for clip in item.get("footage", [])}
+    rows = (client.table("videos").select("*").eq("status", "completed")
+            .order("created_at", desc=True).limit(24).execute().data or [])
+    seen = set()
+    footage = set()
+    for row in rows:
+        if row.get("id") == video_id:
+            continue
+        data = metadata(row)
+        revision = data.get("revision")
+        root = (revision.get("root_id") or revision.get("parent_id")) if isinstance(revision, dict) else None
+        seen.add(root or row["id"])
+        footage.update(str(clip) for item in (data.get("scene_timeline") or []) for clip in item.get("footage", []))
+        if len(seen) >= 15:
+            break
+    return footage
 
 
 def prepare_revision(client, video, details, directory: Path):

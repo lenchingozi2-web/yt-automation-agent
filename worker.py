@@ -30,8 +30,8 @@ from googleapiclient.http import MediaFileUpload
 from supabase import create_client
 from studio_media import contextual_searches, create_thumbnail, footage_intent, footage_relevance, narration_motion, prepare_stock_image, verify_thumbnail, visual_words
 from studio_thumbnail_art import make_prader_willi_thumbnail
-from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, VOICE, NarrationUnavailable,
-                          make_audio, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
+from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, PITCH, RATE, VOICE, NarrationUnavailable,
+                          make_audio, narration_gain, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
 from studio_maintenance import metadata as stored_metadata, preview_filename
 from studio_master import OBJECT_LIMIT, download_upload_master, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
@@ -107,6 +107,22 @@ def stock_video_variants(hit: dict, output: tuple[int, int]):
     return sorted(ranked, key=lambda item: (-item[0], not item[1], item[2], item[3]))
 
 
+def prioritize_footage(candidates, tried, limit: int):
+    """Try alternate assets before trying another encoding of the same stock clip."""
+    eligible = [candidate for candidate in sorted(candidates, key=lambda item: item[:-2])
+                if candidate[-1] not in tried]
+    unique = set()
+    first, alternate = [], []
+    for candidate in eligible:
+        clip_id = candidate[-2]
+        if clip_id in unique:
+            alternate.append(candidate)
+        else:
+            unique.add(clip_id)
+            first.append(candidate)
+    return (first + alternate)[:limit]
+
+
 async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict) -> str | None:
     """Choose stock media by relevance and usable detail after cropping."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
@@ -119,6 +135,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     queries, subjects, local = footage_intent(scene.get("spoken", narration), narration, scene["search_queries"], override)
     contextual = [] if override else contextual_searches(scene.get("spoken", narration), narration, scene.get("video_title", ""))
     interrupted = False
+    tried = set()
     async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True) as client:
         async def search(kind: str, query: str) -> list:
             nonlocal interrupted
@@ -130,7 +147,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             endpoint = "https://pixabay.com/api/" + ("videos/" if kind == "video" else "")
             try:
                 response = await client.get(endpoint, params={
-                    "key": key, "q": query[:100], "safesearch": "true", "per_page": 25,
+                    "key": key, "q": query[:100], "safesearch": "true", "per_page": 40,
                     **({"video_type": "all"} if kind == "video" else {"image_type": "photo"}),
                 })
                 if response.status_code == 429:
@@ -153,7 +170,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 interrupted = True
             return catalog.get(cache_key, [])
 
-        async def video(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
+        async def video(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
             for query in terms:
                 hits = await search("video", query)
                 candidates = []
@@ -163,28 +180,19 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     tags = str(hit.get("tags", ""))
                     score = footage_relevance(tags, groups, words, query, override or contextual_match)
                     clip_id = str(hit.get("id") or "")
-                    if not score or not clip_id or clip_id in used:
+                    if not score or not clip_id or clip_id in used or (clip_id in recent) != reuse:
                         continue
                     duration = float(hit.get("duration") or 0)
                     if 0 < duration < 2.5:
                         continue
                     for coverage, oriented, size, pixels, variant in stock_video_variants(hit, output):
-                        candidates.append((-score, -coverage, clip_id in recent, not oriented, size, pixels,
-                                           {**variant, "clip_id": clip_id}))
-                eligible = sorted(candidates, key=lambda item: item[:6])
-                seen = set()
-                for *_, variant in eligible:
-                    clip_id = variant["clip_id"]
-                    url = variant["url"]
-                    if url in seen:
-                        continue
-                    if len(seen) >= 6:
-                        break
-                    seen.add(url)
+                        candidates.append((-score, -coverage, not oriented, size, pixels, clip_id, variant["url"]))
+                for *_, clip_id, url in prioritize_footage(candidates, tried, 6):
+                    tried.add(url)
                     count = 0
                     usable = False
                     try:
-                        async with client.stream("GET", variant["url"]) as download:
+                        async with client.stream("GET", url) as download:
                             download.raise_for_status()
                             with target.open("wb") as handle:
                                 async for chunk in download.aiter_bytes(chunk_size=262144):
@@ -211,7 +219,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                             target.unlink(missing_ok=True)
             return None
 
-        async def photo(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
+        async def photo(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
             for query in terms[:3]:
                 candidates = []
                 for hit in await search("image", query):
@@ -221,9 +229,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     url = hit.get("largeImageURL") or hit.get("webformatURL")
                     clip_id = f"photo-{hit.get('id', '')}"
                     width, height = hit.get("imageWidth"), hit.get("imageHeight")
-                    if score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used and width and height:
-                        candidates.append((-score, clip_id in recent, portrait != (height > width), clip_id, url))
-                for _, _, _, clip_id, url in sorted(candidates)[:3]:
+                    if (score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used
+                            and (clip_id in recent) == reuse and width and height):
+                        candidates.append((-score, portrait != (height > width), clip_id, url))
+                for *_, clip_id, url in prioritize_footage(candidates, tried, 3):
+                    tried.add(url)
                     try:
                         async with client.stream("GET", url) as download:
                             download.raise_for_status()
@@ -239,15 +249,18 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                         print(f"[b-roll] skipping unusable photo ({type(error).__name__})", flush=True)
             return None
 
-        result = await video(queries, subjects, local, False) or await photo(queries, subjects, local, False)
-        if result:
-            return result
-        for query in contextual:
-            words = set(visual_words(query))
-            result = await video([query], [], words, True) or await photo([query], [], words, True)
+        for reuse in (False, True):
+            result = (await video(queries, subjects, local, False, reuse=reuse)
+                      or await photo(queries, subjects, local, False, reuse=reuse))
             if result:
-                print("[b-roll] selected contextual stock media", flush=True)
                 return result
+            for query in contextual:
+                words = set(visual_words(query))
+                result = (await video([query], [], words, True, reuse=reuse)
+                          or await photo([query], [], words, True, reuse=reuse))
+                if result:
+                    print("[b-roll] selected contextual stock media", flush=True)
+                    return result
     if interrupted:
         raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
@@ -257,7 +270,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
     fingerprint = hashlib.sha256(json.dumps([
-        "narration-match-v3", scene.get("picture_size"), scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
+        "narration-match-v4", scene.get("picture_size"), scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
         scene["search_queries"], bool(scene.get("footage_override")),
     ]).encode()).hexdigest()
     if receipt.is_file():
@@ -335,9 +348,8 @@ def video_encoder():
 def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
     filters = []
     if normalize:
-        filters += ["highpass=f=65", "equalizer=f=3200:t=q:w=1.3:g=-1",
-                    "loudnorm=I=-17:TP=-2:LRA=8"]
-    if abs(tempo - 1) > .0001:
+        filters += ["highpass=f=65", "bass=g=0.8:f=180", "equalizer=f=3400:t=q:w=1.2:g=-1.3"]
+    if abs((tempo - 1) * duration) > 1 / 30:
         while tempo > 2:
             filters.append("atempo=2")
             tempo /= 2
@@ -345,6 +357,10 @@ def prepare_scene_audio(audio, path, duration, *, normalize=True, tempo=1):
             filters.append("atempo=0.5")
             tempo *= 2
         filters.append(f"atempo={tempo:.6f}")
+    if normalize:
+        filters += ["aresample=48000", "aformat=channel_layouts=stereo"]
+        gain = narration_gain(audio, filters)
+        filters.append(f"volume={gain:.3f}dB")
     samples = round(duration * 48000)
     filters += ["aresample=48000", f"apad=whole_len={samples}", f"atrim=end_sample={samples}", "asetpts=N/SR/TB"]
     if normalize:
@@ -916,13 +932,17 @@ def process(video: dict[str, Any], supabase) -> None:
         if mode == "rewrite":
             target = sum(round(float(item["duration"]) * 30) for item in originals) / 30
         print(f"[revision] scene {target_scene}: {mode}; reusing {len(original_scenes) - 1} other scenes", flush=True)
-    narration_voice = VOICE
+    parent_audio = {}
+    if parent:
+        parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
+        parent_audio = stored_metadata(parent_row[0]) if parent_row else {}
+    narration_voice = parent_audio.get("narration_voice") or VOICE
+    narration_rate = parent_audio.get("narration_rate") or RATE
+    narration_pitch = parent_audio.get("narration_pitch") or ("+0Hz" if parent else PITCH)
+    voice_options = ({"rate": narration_rate, "pitch": narration_pitch}
+                     if (narration_rate, narration_pitch) != (RATE, PITCH) else {})
+
     if not parent or mode == "rewrite":
-        parent_voice = None
-        if parent:
-            parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
-            parent_voice = stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None
-        narration_voice = parent_voice or VOICE
         voices_to_try = [narration_voice] if parent else list(dict.fromkeys(filter(None, [VOICE, BACKUP_VOICE])))
         for index, voice in enumerate(voices_to_try):
             audio_plan = []
@@ -930,7 +950,8 @@ def process(video: dict[str, Any], supabase) -> None:
                 for number, scene in enumerate(selected, 1):
                     prefix = "Recovering narration" if index else "Preparing narration"
                     save_fields(supabase, video, progress_note=f"{prefix} {number} of {len(selected)}")
-                    audio, srt = make_audio(scene, directory, voice) if voice != VOICE else make_audio(scene, directory)
+                    args = (voice,) if voice != VOICE else ()
+                    audio, srt = make_audio(scene, directory, *args, **voice_options)
                     audio_plan.append((audio, srt, ffprobe_duration(audio)))
                 narration_voice = voice
                 break
@@ -941,9 +962,6 @@ def process(video: dict[str, Any], supabase) -> None:
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
                                     ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None,
                                     words=sum(len(scene["narration"].split()) for scene in selected))
-    elif parent:
-        parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
-        narration_voice = (stored_metadata(parent_row[0]).get("narration_voice") if parent_row else None) or VOICE
     if mode != "audio":
         runtime = sum(float(item["duration"]) for item in original_timeline) if parent else sum(durations)
         # Keep long masters practical on a shared free storage budget.
@@ -959,7 +977,8 @@ def process(video: dict[str, Any], supabase) -> None:
         entry = originals[index] if index < len(originals) else None
         save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
         if parent and mode == "audio":
-            audio, _ = make_audio(scene, directory, narration_voice) if narration_voice != VOICE else make_audio(scene, directory)
+            args = (narration_voice,) if narration_voice != VOICE else ()
+            audio, _ = make_audio(scene, directory, *args, **voice_options)
             duration = float(entry["duration"])
             voice = directory / f"revised_audio_{number:02d}.wav"
             prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
@@ -976,7 +995,7 @@ def process(video: dict[str, Any], supabase) -> None:
             audio, srt, natural = audio_plan[index]
         seconds = float(entry["duration"]) if keep_audio else durations[index]
         tempo = natural / seconds if not keep_audio else 1
-        if not keep_audio and abs(tempo - 1) > .0001:
+        if not keep_audio and abs(natural - seconds) > 1 / 30:
             srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
         windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
         raw, clip_ids, lengths = [], [], []
@@ -1068,7 +1087,8 @@ def process(video: dict[str, Any], supabase) -> None:
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
                 actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v8", scene_timeline=timeline, youtube_chapters=chapters, narration_voice=narration_voice,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v9", scene_timeline=timeline,
+                youtube_chapters=chapters, narration_voice=narration_voice, narration_rate=narration_rate, narration_pitch=narration_pitch,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 and thumbnail ready for review.", error_message=None)

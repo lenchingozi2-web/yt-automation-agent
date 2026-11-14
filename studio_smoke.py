@@ -75,7 +75,9 @@ def main() -> int:
         assert updated["status"] == "completed", "worker did not mark job completed"
         assert stored.get("video_url"), "no playable MP4 URL was saved"
         assert stored.get("thumbnail_url"), "no JPEG thumbnail URL was saved"
-        assert stored.get("render_version") == "studio-v8"
+        assert stored.get("render_version") == "studio-v9"
+        from studio_audio import PITCH, RATE
+        assert stored.get("narration_pitch") == PITCH and stored.get("narration_rate") == RATE
         assert len(stored["scene_timeline"]) == 2 and not has_approval(stored)
         assert stored["scene_timeline"][0]["footage"], "the ocean narration selected no related stock media"
         # Simulate missing direct matches while exercising the real contextual stock lookup.
@@ -157,6 +159,7 @@ def main() -> int:
         revised = metadata(client.table("videos").select("*").eq("id", revision_id).single().execute().data)
         assert revised["status"] == "completed" and revised["publish_status"] == "awaiting_review"
         assert not has_approval(revised) and not revised.get("youtube_url")
+        assert revised["narration_voice"] == stored["narration_voice"] and revised["narration_pitch"] == stored["narration_pitch"]
         assert revised["scene_timeline"] == stored["scene_timeline"], "an audio repair moved the scene or changed footage"
         assert client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(video_id + ".mp4") == mp4
         validate_audio(ROOT / revision_id / "final_video.mp4")
