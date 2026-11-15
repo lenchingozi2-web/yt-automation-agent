@@ -209,10 +209,42 @@ def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bo
         raise RuntimeError("Could not remove all storage objects for: " + ", ".join(sorted(set(cleanup_errors))))
 
 
+def delete_one_failed_video(client: Any, video_id: str, expected_title: str) -> None:
+    """Owner-authorized maintenance removal of one exact failed, unuploaded job."""
+    from studio_master import MASTER_BUCKET, bucket_exists
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", video_id, re.I):
+        raise ValueError("Invalid video id")
+    if not expected_title:
+        raise ValueError("Expected title required to prevent wrong-job removal")
+    rows = client.table("videos").select("*").eq("id", video_id).limit(1).execute().data or []
+    if not rows:
+        print("[single-delete] already absent:", video_id, flush=True)
+        return
+    row = rows[0]
+    if row.get("title", "").strip().casefold() != expected_title.strip().casefold():
+        raise ValueError("Video title does not match the explicitly selected failed production")
+    if row.get("status") != "failed" or attention_action(row) != "delete":
+        raise ValueError("Selected production is not a failed, unuploaded job; refusing delete")
+    active = list(video_rows(client, ["pending", "rendering"]))
+    pinned = {revision["parent_id"] for item in active
+              if isinstance(revision := metadata(item).get("revision"), dict)
+              and revision.get("original_media") and revision.get("parent_id")}
+    if video_id in pinned:
+        raise ValueError("A running revision uses this production")
+    clear_attention(client, [row], pinned, False, True,
+                    has_master_bucket=bucket_exists(client, MASTER_BUCKET))
+    remaining = client.table("videos").select("id").eq("id", video_id).execute().data or []
+    if remaining:
+        raise RuntimeError("The failed production record remains after cleanup")
+    print("[single-delete] verified database removal:", video_id, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clear-attention", action="store_true")
+    parser.add_argument("--delete-video-id")
+    parser.add_argument("--expected-title")
     args = parser.parse_args()
     from supabase import create_client
     from studio_master import MASTER_BUCKET, bucket_exists
@@ -221,6 +253,9 @@ def main() -> None:
     if not url or not key:
         raise RuntimeError("Missing Supabase URL or service-role key for maintenance")
     client = create_client(url, key)
+    if args.delete_video_id:
+        delete_one_failed_video(client, args.delete_video_id, args.expected_title or "")
+        return
     now = datetime.now(timezone.utc)
     pinned = {revision["parent_id"] for row in video_rows(client, ["pending", "rendering"])
               if isinstance(revision := metadata(row).get("revision"), dict)
