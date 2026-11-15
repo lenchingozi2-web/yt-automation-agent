@@ -158,6 +158,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, promote, busy,
       {video.video_url && <video key={playerVersion} ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
         className={video.format === "9:16" ? "vertical" : ""} aria-label={video.title}
         onCanPlay={() => setFailed(false)} onError={() => setFailed(true)} />}
+      {video.storage_saving_copy && <p className="review-note" role="status">Storage-saving copy: Studio preserved a ${video.preview_resolution ?? "lower-resolution"}p review MP4, but could not retain the separate full-resolution master within your storage budget. Approving YouTube upload will use this same review-quality file. Free storage and re-render if you need original high-definition output.</p>}
       {failed && <div className="media-error" role="alert">The preview could not load. <button type="button" className="text-button" onClick={() => {
         setFailed(false);
         setPlayerVersion((version) => version + 1);
