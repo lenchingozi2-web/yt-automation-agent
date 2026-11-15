@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from studio_retry import retry_io
@@ -55,7 +56,43 @@ def check_media_budget(client, video_id: str, *, required: int, preview_bucket: 
         raise ValueError("Studio media storage is nearly full. Clear expired media before rendering this video.")
 
 
-def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str):
+def reclaim_expired_uploaded_media(client, video_id: str) -> int:
+    """Safely reclaim only confirmed YouTube uploads past the retention window.
+
+    On-demand cleanup uses the same policy as nightly retention and never touches
+    unapproved videos or the source of an active revision.
+    """
+    from studio_maintenance import clean_row, expiration_flags, metadata, video_rows
+
+    now = datetime.now(timezone.utc)
+    pinned = set()
+    try:
+        for item in video_rows(client, ["pending", "rendering"]):
+            revision = metadata(item).get("revision")
+            if isinstance(revision, dict) and revision.get("original_media"):
+                pinned.update(str(revision.get(key)) for key in ("parent_id", "root_id") if revision.get(key))
+        reclaimed = 0
+        for row in video_rows(client, ["completed"]):
+            if str(row.get("id")) == video_id or str(row.get("id")) in pinned:
+                continue
+            archive_video, _ = expiration_flags(row, now)
+            if not archive_video:
+                continue
+            try:
+                outcome = clean_row(client, row, now)
+                reclaimed += bool(outcome["video"])
+            except Exception as error:
+                print(f"[storage] expired-upload cleanup skipped {row.get('id')}: {type(error).__name__}", flush=True)
+        if reclaimed:
+            print(f"[storage] reclaimed stored copies of {reclaimed} expired YouTube uploads", flush=True)
+        return reclaimed
+    except Exception as error:
+        print(f"[storage] retention probe unavailable: {type(error).__name__}", flush=True)
+        return 0
+
+
+def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str,
+                       *, allow_preview_only: bool = False):
     digest = ""
     if preview != master:
         with master.open("rb") as source:
@@ -63,8 +100,25 @@ def save_upload_master(client, video_id: str, master: Path, preview: Path, previ
     has_bucket = bucket_exists(client, MASTER_BUCKET)
     preview_bytes = preview.stat().st_size
     master_bytes = master.stat().st_size if digest else 0
-    check_media_budget(client, video_id, required=preview_bytes + master_bytes, preview_bucket=preview_bucket,
-                       preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
+    try:
+        check_media_budget(client, video_id, required=preview_bytes + master_bytes, preview_bucket=preview_bucket,
+                           preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
+    except ValueError:
+        # Free only media whose YouTube upload was confirmed at least 12 hours ago.
+        reclaim_expired_uploaded_media(client, video_id)
+        try:
+            check_media_budget(client, video_id, required=preview_bytes + master_bytes, preview_bucket=preview_bucket,
+                               preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
+        except ValueError:
+            # The saved review MP4 remains usable for owner-approved upload, but
+            # do not silently promise the original full-resolution master.
+            if not (allow_preview_only and digest):
+                raise
+            check_media_budget(client, video_id, required=preview_bytes, preview_bucket=preview_bucket,
+                               preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
+            print("[storage] capacity constrained: saving one review-quality MP4; full-resolution master not stored",
+                  flush=True)
+            return None
     if not digest:
         return None
     if not has_bucket:
