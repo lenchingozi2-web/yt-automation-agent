@@ -874,8 +874,7 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=F
     preview = storage_preview(path, timeline)
     validate_audio(preview, expected=ffprobe_duration(path))
     data = preview.read_bytes()
-    manifest = save_upload_master(client, video_id, path, preview, bucket, filename,
-                                  allow_preview_only=not pace_version)
+    manifest = save_upload_master(client, video_id, path, preview, bucket, filename)
     try:
         retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
             file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
@@ -1079,7 +1078,6 @@ def process(video: dict[str, Any], supabase) -> None:
 
     save_fields(supabase, video, progress_note="Saving MP4 preview")
     storage_url, upload_master, preview_resolution = upload_mp4(supabase, final, video_id, timeline)
-    storage_saving_copy = upload_master is None and final.stat().st_size >= OBJECT_LIMIT
     raw_scenes = video.get("scenes")
     if isinstance(raw_scenes, str):
         raw_scenes = json.loads(raw_scenes)
@@ -1090,14 +1088,12 @@ def process(video: dict[str, Any], supabase) -> None:
     chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
     save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
                 thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
-                storage_saving_copy=storage_saving_copy,
                 actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
                 completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v9", scene_timeline=timeline,
                 youtube_chapters=chapters, narration_voice=narration_voice, narration_rate=narration_rate, narration_pitch=narration_pitch,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
-                progress_note=("Storage-saving MP4 ready for review (the full-resolution master could not be retained)."
-                               if storage_saving_copy else "MP4 and thumbnail ready for review."), error_message=None)
+                progress_note="MP4 and thumbnail ready for review.", error_message=None)
     print(f"[completed] {video_id}", flush=True)
 
 
