@@ -16,9 +16,6 @@ on:
         default: true
   schedule:
     - cron: '17 8,10,12 * * *'
-  push:
-    branches: [main]
-    paths: [studio_automation.py, src/lib/studio-daily.ts, src/lib/studio-research.ts, .github/workflows/daily_video.yml]
 permissions:
   contents: read
   actions: write
@@ -27,7 +24,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   generate-and-queue:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[clear-studio-attention]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
