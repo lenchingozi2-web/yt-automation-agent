@@ -222,6 +222,16 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     });
   }
 
+  async function deleteVideo(video: StudioVideo) {
+    return action(video.id, async () => {
+      const result = await request<{ message: string; deletedId: string; objectsDeleted: number; bytesReclaimed: number }>(
+        "/api/videos?id=" + encodeURIComponent(video.id), { method: "DELETE" });
+      const reclaimed = result.bytesReclaimed > 0 ? " Freed " + (result.bytesReclaimed / 1048576).toFixed(1) + " MiB." : "";
+      setFeedback({ kind: "success", message: "Video deleted from Studio.", detail: result.message + reclaimed });
+      await Promise.all([refresh(true), refreshStorage()]);
+    });
+  }
+
   return (
     <div className="studio">
       <a className="skip-link" href="#workspace">Skip to workspace</a>
@@ -275,7 +285,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} retryThumbnail={retryThumbnail} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); edit(next); }} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
+          busy={busy} retry={retry} retryThumbnail={retryThumbnail} deleteVideo={deleteVideo} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); edit(next); }} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>
