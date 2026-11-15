@@ -291,3 +291,10 @@ h3 { font-weight: 620; }
 .promotion-body .button { justify-self: start; }
 .preview-dialog .dialog-header, .preview-dialog .dialog-footer { flex-shrink: 0; }
 .revision-form :is(input, textarea, select), .preview-scenes select { width: 100%; }
+
+/* Destructive actions are explicit but remain usable on small screens. */
+.button-danger { color: #fff0eb; background: #88362c; border: 1px solid #b75d50; }
+.button-danger:hover:not(:disabled) { background: #9d4033; }
+.delete-production { color: #ebaaa2; }
+.delete-production:hover:not(:disabled) { border-color: #c37d75; color: #ffc7bd; }
+@media (max-width: 420px) { .delete-production { min-width: 96px; } }
