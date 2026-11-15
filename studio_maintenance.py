@@ -209,6 +209,57 @@ def clear_attention(client: Any, rows: list[dict], pinned: set[str], dry_run: bo
         raise RuntimeError("Could not remove all storage objects for: " + ", ".join(sorted(set(cleanup_errors))))
 
 
+def cleanup_orphan_media(client: Any, now: datetime, dry_run: bool, *,
+                         has_master_bucket: bool) -> None:
+    """Remove old Studio files with no production record, including legacy orphans.
+
+    Never delete unidentified filenames, newly uploaded files, or anything whose
+    UUID still exists in the database. Storage objects must be deleted through
+    the Storage API, not by manipulating storage.objects in SQL.
+    """
+    from studio_master import MASTER_BUCKET, media_objects
+    from studio_retry import retry_io
+
+    current_ids = set()
+    offset = 0
+    while True:
+        batch = (client.table("videos").select("id").order("id")
+                 .range(offset, offset + 199).execute().data or [])
+        current_ids.update(str(row["id"]) for row in batch)
+        if len(batch) < 200:
+            break
+        offset += len(batch)
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    buckets = [
+        (os.getenv("SUPABASE_VIDEO_BUCKET", "renders"), rf"({uuid})(?:-pace-v1)?\\.mp4"),
+        (os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails"), rf"({uuid})\\.jpg"),
+    ]
+    if has_master_bucket:
+        buckets.append((MASTER_BUCKET, rf"({uuid})-[0-9a-f]{{64}}-\\d{{3}}\\.part"))
+    orphan_count = orphan_bytes = 0
+    for bucket_name, expression in buckets:
+        targets = []
+        for item in media_objects(client, bucket_name):
+            found = re.fullmatch(expression, str(item.get("name") or ""), re.I)
+            created = timestamp(item.get("created_at"))
+            if (not found or found.group(1) in current_ids or created is None
+                    or now - created < timedelta(hours=24)):
+                continue
+            targets.append(item)
+        if targets and not dry_run:
+            names = [item["name"] for item in targets]
+            for index in range(0, len(names), 100):
+                retry_io(lambda chunk=names[index:index + 100]: client.storage.from_(bucket_name).remove(chunk),
+                         "remove orphaned Studio media")
+            remaining = {item["name"] for item in media_objects(client, bucket_name)}
+            if any(name in remaining for name in names):
+                raise RuntimeError("Storage still contains orphaned files from " + bucket_name)
+        orphan_count += len(targets)
+        orphan_bytes += sum(int((item.get("metadata") or {}).get("size") or 0) for item in targets)
+    print(f"[retention] {'dry-run' if dry_run else 'verified'} orphan cleanup: "
+          f"{orphan_count} files, {orphan_bytes} bytes", flush=True)
+
+
 def delete_one_failed_video(client: Any, video_id: str, expected_title: str) -> None:
     """Owner-authorized maintenance removal of one exact failed, unuploaded job."""
     from studio_master import MASTER_BUCKET, bucket_exists
@@ -295,6 +346,7 @@ def main() -> None:
             failed += 1
             print("[retention]", row.get("id"), type(error).__name__, flush=True)
     print("[retention] eligible", eligible, "of", len(rows), flush=True)
+    cleanup_orphan_media(client, now, args.dry_run, has_master_bucket=has_master_bucket)
     if failed:
         raise RuntimeError(f"Retention failed for {failed} production(s).")
 
