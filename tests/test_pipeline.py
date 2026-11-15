@@ -543,8 +543,10 @@ class MediaRegression(unittest.TestCase):
 
 
 
+
+
 class StoragePressureRecoveryRegression(unittest.TestCase):
-    def test_compact_review_saved_when_master_exceeds_budget(self):
+    def test_never_downgrades_when_full_resolution_will_not_fit(self):
         from studio_master import save_upload_master
 
         with TemporaryDirectory() as tmp:
@@ -561,18 +563,12 @@ class StoragePressureRecoveryRegression(unittest.TestCase):
                   patch("studio_master.bucket_exists", return_value=True),
                   patch("studio_master.media_objects", side_effect=inventory),
                   patch("studio_master.reclaim_expired_uploaded_media", return_value=0) as cleanup):
-                self.assertIsNone(save_upload_master(
-                    client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True))
-                cleanup.assert_called_once_with(client, "current")
-                client.storage.from_.assert_not_called()
                 with self.assertRaisesRegex(ValueError, "nearly full"):
                     save_upload_master(client, "current", master, preview, "renders", "current.mp4")
-                preview.write_bytes(b"P" * 12)
-                with self.assertRaisesRegex(ValueError, "nearly full"):
-                    save_upload_master(
-                        client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True)
+                cleanup.assert_called_once_with(client, "current")
+                client.storage.from_.assert_not_called()
 
-    def test_expired_upload_reclamation_precedes_quality_fallback(self):
+    def test_expired_upload_reclamation_precedes_full_resolution_save(self):
         from studio_master import save_upload_master
 
         with TemporaryDirectory() as tmp:
@@ -595,7 +591,7 @@ class StoragePressureRecoveryRegression(unittest.TestCase):
                   patch("studio_master.media_objects", side_effect=inventory),
                   patch("studio_master.reclaim_expired_uploaded_media", side_effect=recover)):
                 manifest = save_upload_master(
-                    client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True)
+                    client, "current", master, preview, "renders", "current.mp4")
             self.assertIsNotNone(manifest)
             self.assertEqual(manifest["bytes"], 20)
             client.storage.from_.return_value.upload.assert_called_once()
