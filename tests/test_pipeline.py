@@ -541,6 +541,66 @@ class MediaRegression(unittest.TestCase):
 
 
 
+
+
+class StoragePressureRecoveryRegression(unittest.TestCase):
+    def test_compact_review_saved_when_master_exceeds_budget(self):
+        from studio_master import save_upload_master
+
+        with TemporaryDirectory() as tmp:
+            master = Path(tmp) / "master.mp4"
+            preview = Path(tmp) / "preview.mp4"
+            master.write_bytes(b"M" * 20)
+            preview.write_bytes(b"P" * 5)
+            client = Mock()
+
+            def inventory(_client, bucket, **kwargs):
+                return [{"name": "other.mp4", "metadata": {"size": 90}}] if bucket == "renders" else []
+
+            with (patch("studio_master.STORAGE_BUDGET", 100),
+                  patch("studio_master.bucket_exists", return_value=True),
+                  patch("studio_master.media_objects", side_effect=inventory),
+                  patch("studio_master.reclaim_expired_uploaded_media", return_value=0) as cleanup):
+                self.assertIsNone(save_upload_master(
+                    client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True))
+                cleanup.assert_called_once_with(client, "current")
+                client.storage.from_.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "nearly full"):
+                    save_upload_master(client, "current", master, preview, "renders", "current.mp4")
+                preview.write_bytes(b"P" * 12)
+                with self.assertRaisesRegex(ValueError, "nearly full"):
+                    save_upload_master(
+                        client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True)
+
+    def test_expired_upload_reclamation_precedes_quality_fallback(self):
+        from studio_master import save_upload_master
+
+        with TemporaryDirectory() as tmp:
+            master = Path(tmp) / "master.mp4"
+            preview = Path(tmp) / "preview.mp4"
+            master.write_bytes(b"M" * 20)
+            preview.write_bytes(b"P" * 5)
+            client = Mock()
+            usage = {"value": 90}
+
+            def inventory(_client, bucket, **kwargs):
+                return [{"name": "older.mp4", "metadata": {"size": usage["value"]}}] if bucket == "renders" else []
+
+            def recover(_client, _video_id):
+                usage["value"] = 20
+                return 1
+
+            with (patch("studio_master.STORAGE_BUDGET", 100),
+                  patch("studio_master.bucket_exists", return_value=True),
+                  patch("studio_master.media_objects", side_effect=inventory),
+                  patch("studio_master.reclaim_expired_uploaded_media", side_effect=recover)):
+                manifest = save_upload_master(
+                    client, "current", master, preview, "renders", "current.mp4", allow_preview_only=True)
+            self.assertIsNotNone(manifest)
+            self.assertEqual(manifest["bytes"], 20)
+            client.storage.from_.return_value.upload.assert_called_once()
+
+
 class DailyStorageBudgetRegression(unittest.TestCase):
     def test_scheduled_video_defers_when_private_masters_consume_headroom(self):
         from datetime import datetime, timezone
