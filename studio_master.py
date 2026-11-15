@@ -91,8 +91,7 @@ def reclaim_expired_uploaded_media(client, video_id: str) -> int:
         return 0
 
 
-def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str,
-                       *, allow_preview_only: bool = False):
+def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str):
     digest = ""
     if preview != master:
         with master.open("rb") as source:
@@ -110,15 +109,7 @@ def save_upload_master(client, video_id: str, master: Path, preview: Path, previ
             check_media_budget(client, video_id, required=preview_bytes + master_bytes, preview_bucket=preview_bucket,
                                preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
         except ValueError:
-            # The saved review MP4 remains usable for owner-approved upload, but
-            # do not silently promise the original full-resolution master.
-            if not (allow_preview_only and digest):
-                raise
-            check_media_budget(client, video_id, required=preview_bytes, preview_bucket=preview_bucket,
-                               preview_name=preview_name, master_digest=digest, has_master_bucket=has_bucket)
-            print("[storage] capacity constrained: saving one review-quality MP4; full-resolution master not stored",
-                  flush=True)
-            return None
+            raise
     if not digest:
         return None
     if not has_bucket:
