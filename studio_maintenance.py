@@ -231,11 +231,11 @@ def cleanup_orphan_media(client: Any, now: datetime, dry_run: bool, *,
         offset += len(batch)
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     buckets = [
-        (os.getenv("SUPABASE_VIDEO_BUCKET", "renders"), rf"({uuid})(?:-pace-v1)?\\.mp4"),
-        (os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails"), rf"({uuid})\\.jpg"),
+        (os.getenv("SUPABASE_VIDEO_BUCKET", "renders"), rf"({uuid})(?:-pace-v1)?\.mp4"),
+        (os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails"), rf"({uuid})\.jpg"),
     ]
     if has_master_bucket:
-        buckets.append((MASTER_BUCKET, rf"({uuid})-[0-9a-f]{{64}}-\\d{{3}}\\.part"))
+        buckets.append((MASTER_BUCKET, rf"({uuid})-[0-9a-f]{{64}}-\d{{3}}\.part"))
     orphan_count = orphan_bytes = 0
     for bucket_name, expression in buckets:
         targets = []
