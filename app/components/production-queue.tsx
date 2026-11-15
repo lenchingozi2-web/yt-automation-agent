@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Megaphone, Play, RefreshCw, Search, X } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Download, Film, LoaderCircle, Megaphone, Play, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { canRetryYouTubeThumbnail, groupProductions, youtubePublishAction, youtubeStudioUrl, type Draft, type RevisionMode, type StudioVideo } from "@/src/lib/studio";
 import { communityPostFor, formatLagosPublishInput, formatYouTubeTime, parseLagosPublishTime, teaserDraft } from "@/src/lib/studio-growth";
 import { Modal, Notice, type Feedback } from "./studio-shell";
@@ -295,10 +295,11 @@ function PromotionDialog({ video, close, createShort, busy }: {
   </Modal>;
 }
 
-export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, feedback, reuse, createShort }: {
+export function ProductionQueue({ videos, loading, error, refreshing, refresh, busy, retry, revise, retryThumbnail, deleteVideo, feedback, reuse, createShort }: {
   videos: StudioVideo[]; loading: boolean; error: string; refreshing: boolean; refresh: () => void;
   busy: string | null; retry: (video: StudioVideo, publish?: boolean, publishAt?: string) => Promise<boolean>; feedback: Feedback | null;
   retryThumbnail: (video: StudioVideo) => Promise<boolean>;
+  deleteVideo: (video: StudioVideo) => Promise<boolean>;
   revise: (video: StudioVideo, input: RevisionInput) => Promise<boolean>;
   reuse: (video: StudioVideo) => void;
   createShort: (draft: Draft) => void;
@@ -308,12 +309,14 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
   const [shown, setShown] = useState(PAGE_SIZE);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [promotionId, setPromotionId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const query = useDeferredValue(search.trim().toLowerCase());
   const records = useMemo(() => groupProductions(videos).map((production) => ({ ...production, state: videoState(production.latest) })), [videos]);
   const filtered = records.filter(({ latest, state }) => (filter === "All" || state.filter === filter) && (!query || latest.title.toLowerCase().includes(query)));
   const previewGroup = records.find(({ versions }) => versions.some((version) => version.id === previewId));
   const preview = previewGroup?.versions.find((version) => version.id === previewId && version.status === "completed" && (version.video_url || version.youtube_url));
   const promotion = videos.find((video) => video.id === promotionId && video.status === "completed" && video.youtube_url);
+  const deleting = videos.find(video => video.id === deletingId && ["completed", "failed"].includes(video.status));
   const dateOf = (date?: string) => date && Number.isFinite(Date.parse(date)) ? dateFormat.format(new Date(date)) : "";
 
   return <section className="panel queue" id="queue" aria-labelledby="queue-title">
@@ -354,7 +357,7 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
         return <li className="queue-row" key={id}>
           <Thumbnail video={playable || latest} />
           <div className="video-info">
-            <div className="video-meta"><span className={"status status-" + state.tone}>{state.label}</span><span>{latest.format}</span>{dateOf(latest.created_at) && <span>{dateOf(latest.created_at)}</span>}</div>
+            <div className="video-meta"><span className={"status status-" + state.tone}>{state.label}</span><span>{latest.format}</span>{dateOf(latest.created_at) && <span>{dateOf(latest.created_at)}</span>}{latest.automation === "daily" && <span title="Created by the scheduled GitHub Actions producer">Scheduled automatically</span>}</div>
             <h3>{latest.title}</h3>
             {latest.revision && <p>Scene {latest.revision.scene_number} revision{renderedIn && " · Rendered in " + renderedIn}</p>}
             {problem ? <p className="video-problem">{problem}</p> : progress ? <p role="status">{progress}</p>
@@ -377,6 +380,10 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
               {busy === latest.id && <LoaderCircle className="spinner" size={16} />} Retry {latest.revision ? "revision" : "render"}
             </button>}
             {latest.status === "completed" && <button className="text-button" onClick={() => reuse(latest)}>Reuse script</button>}
+            {["completed", "failed"].includes(latest.status) && <button type="button" className="button button-secondary delete-production"
+              disabled={!!busy} aria-label={"Delete Studio video " + latest.title} onClick={() => setDeletingId(latest.id)}>
+              <Trash2 size={15} /> Delete
+            </button>}
           </div>
           {versions.length > 1 && <details className="queue-versions">
             <summary>Versions ({versions.length})</summary>
@@ -386,6 +393,10 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
               </span>
               {version.status === "completed" && (version.video_url || version.youtube_url) && <button type="button" className="text-button" onClick={() => setPreviewId(version.id)}>
                 {version.video_url ? "Preview" : "YouTube details"}
+              </button>}
+              {version.id !== latest.id && ["completed", "failed"].includes(version.status) && <button type="button" className="text-button"
+                disabled={!!busy} aria-label={"Delete version " + version.title} onClick={() => setDeletingId(version.id)}>
+                <Trash2 size={14} /> Delete version
               </button>}
             </li>)}</ul>
           </details>}
@@ -399,5 +410,27 @@ export function ProductionQueue({ videos, loading, error, refreshing, refresh, b
       revise={(input) => revise(preview, input)}
       retryThumbnail={() => retryThumbnail(preview)} busy={busy !== null} feedback={feedback} />}
     {promotion && <PromotionDialog key={promotion.id} video={promotion} close={() => setPromotionId(null)} createShort={createShort} busy={busy !== null} />}
+    {deleting && <Modal titleId="delete-video-title" close={() => { if (!busy) setDeletingId(null); }} className="preview-dialog">
+      <header className="dialog-header">
+        <div><p>Permanent Studio deletion</p><h2 id="delete-video-title">Delete this video?</h2></div>
+        <button className="icon-button" aria-label="Close deletion confirmation" disabled={!!busy} onClick={() => setDeletingId(null)}><X size={20} /></button>
+      </header>
+      <div className="preview-body">
+        <p><strong>{deleting.title}</strong></p>
+        <p className="review-note">The production record, saved MP4, thumbnail and private upload master will be deleted from Supabase. This cannot be undone.</p>
+        {deleting.youtube_url && <p className="review-note">The uploaded YouTube video will NOT be deleted. Only its Studio record and stored copies are removed.</p>}
+      </div>
+      <footer className="dialog-footer">
+        <div className="preview-actions">
+          <button type="button" className="button button-secondary" disabled={!!busy} onClick={() => setDeletingId(null)}>Cancel</button>
+          <button type="button" className="button button-danger" disabled={!!busy} onClick={async () => {
+            if (await deleteVideo(deleting)) { setDeletingId(null); setPreviewId(null); setPromotionId(null); }
+          }}>
+            {busy === deleting.id ? <LoaderCircle className="spinner" size={16} /> : <Trash2 size={16} />}
+            {busy === deleting.id ? "Removing media…" : "Delete permanently"}
+          </button>
+        </div>
+      </footer>
+    </Modal>}
   </section>;
 }
