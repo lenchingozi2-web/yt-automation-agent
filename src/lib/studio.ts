@@ -8,7 +8,7 @@ export function isBriefingSource(url: string) {
 }
 export type RevisionMode = "audio" | "visual" | "rewrite";
 export type VideoRevision = { parent_id: string; root_id?: string; scene_number: number; mode: RevisionMode; original_media: boolean };
-export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; preview_resolution?: number; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; publish_retry_at?: string; publish_at?: string; youtube_chapters?: { start: number; title: string }[]; youtube_visibility_at_upload?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
+export type StudioVideo = Draft & { id: string; status: string; video_url?: string; youtube_url?: string; youtube_id?: string; thumbnail_url?: string; preview_expired_at?: string; preview_resolution?: number; storage_saving_copy?: boolean; error_message?: string; progress_note?: string; publish_status?: string; publish_error?: string; publish_approved_at?: string; publish_retry_at?: string; publish_at?: string; youtube_chapters?: { start: number; title: string }[]; youtube_visibility_at_upload?: string; thumbnail_publish_status?: string; actual_duration_seconds?: number; render_version?: string; automation?: string; created_at?: string; render_started_at?: string; completed_at?: string; revision?: VideoRevision; scene_times?: { scene_number: number; start: number }[]; };
 export function youtubeStudioUrl(video: StudioVideo) {
   return /^[A-Za-z0-9_-]{11}$/.test(video.youtube_id ?? "") ? `https://studio.youtube.com/video/${video.youtube_id}/edit` : "";
 }
@@ -175,6 +175,7 @@ export function normalizeVideo(raw: unknown): StudioVideo {
     thumbnail_publish_status: stringOf(meta.thumbnail_publish_status),
     actual_duration_seconds: Number(meta.actual_duration_seconds) || undefined,
     preview_resolution: Number(meta.preview_resolution) || undefined,
+    storage_saving_copy: meta.storage_saving_copy === true,
     render_version: stringOf(meta.render_version), automation: stringOf(meta.automation) };
 }
 
