@@ -1,0 +1,32 @@
+name: Studio one-time requested failed-video deletion
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/studio_oneoff_cleanup.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: studio-media-retention
+  cancel-in-progress: false
+jobs:
+  cleanup-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Delete only the failed newborn-screening video and verify its removal
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python studio_maintenance.py \
+            --delete-video-id f8f3902c-7175-5eab-9b46-b8eaecba47c2 \
+            --expected-title "How AI Is Boosting Newborn Metabolomic Screening for Rare Genetic Disorders"
