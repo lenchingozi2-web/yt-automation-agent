@@ -171,6 +171,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             return catalog.get(cache_key, [])
 
         async def video(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
+            nonlocal interrupted
             for query in terms:
                 hits = await search("video", query)
                 candidates = []
@@ -220,6 +221,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             return None
 
         async def photo(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
+            nonlocal interrupted
             for query in terms[:3]:
                 candidates = []
                 for hit in await search("image", query):
