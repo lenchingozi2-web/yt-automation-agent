@@ -540,6 +540,30 @@ class MediaRegression(unittest.TestCase):
                 validate_audio(audio)
 
 
+
+class DailyStorageBudgetRegression(unittest.TestCase):
+    def test_scheduled_video_defers_when_private_masters_consume_headroom(self):
+        from datetime import datetime, timezone
+        from studio_automation import queue_daily
+
+        client = Mock()
+        client.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value = SimpleNamespace(data=[])
+        client.table.return_value.select.return_value.eq.return_value.execute.return_value = SimpleNamespace(data=[])
+        client.table.return_value.select.return_value.gte.return_value.execute.return_value = SimpleNamespace(count=0)
+
+        def inventory(_client, bucket):
+            if bucket == "studio-masters":
+                return [{"metadata": {"size": 550 * 1024 * 1024}}]
+            return [{"metadata": {"size": 110 * 1024 * 1024}}]
+
+        with (patch("studio_automation.media_objects", side_effect=inventory),
+              patch("studio_automation.bucket_exists", return_value=True),
+              patch("studio_automation.generate_researched_draft") as generate):
+            result = queue_daily(client, now=datetime(2026, 11, 15, tzinfo=timezone.utc))
+        self.assertIsNone(result)
+        generate.assert_not_called()
+
+
 class PipelineRegression(unittest.TestCase):
     def test_saved_settings_beat_conflicting_database_defaults(self):
         _, ratio, details = video_details({"format": "16:9", "duration_seconds": 180, "scenes": [
