@@ -73,6 +73,52 @@ class UploadRegression(unittest.TestCase):
         self.assertEqual(request.next_chunk.call_count, 4)
 
 
+
+
+class PixabayInterruptionRegression(unittest.TestCase):
+    def test_broken_video_and_photo_downloads_raise_retryable_error(self):
+        """A network reset must not shadow the enclosing interrupted flag."""
+        import httpx
+        from unittest.mock import AsyncMock, MagicMock
+        from studio_retry import TemporaryRenderError
+        from worker import fetch_pixabay
+
+        for media_type in ("video", "image"):
+            with self.subTest(media_type=media_type), TemporaryDirectory() as tmp:
+                video_hit = {"id": 12, "tags": "learning", "duration":6,
+                             "videos": {"hd": {"url": "https://example.invalid/clip.mp4",
+                                               "width": 1920, "height": 1080, "size": 2_000_000}}}
+                photo_hit = {"id": 13, "tags": "learning",
+                             "largeImageURL": "https://example.invalid/photo.jpg",
+                             "imageWidth": 1920, "imageHeight": 1080}
+                client = MagicMock()
+                client.__aenter__ = AsyncMock(return_value=client)
+                client.__aexit__ = AsyncMock(return_value=False)
+
+                async def get_stock(endpoint, **kwargs):
+                    is_video = endpoint.endswith("/videos/")
+                    selected = media_type == ("video" if is_video else "image")
+                    hits = [video_hit if is_video else photo_hit] if selected else []
+                    return Mock(status_code=200, json=lambda: {"hits": hits},
+                                raise_for_status=lambda: None)
+
+                client.get = AsyncMock(side_effect=get_stock)
+                broken_stream = MagicMock()
+                broken_stream.__aenter__ = AsyncMock(side_effect=httpx.ReadError("simulated disconnect"))
+                broken_stream.__aexit__ = AsyncMock(return_value=False)
+                client.stream.return_value = broken_stream
+                scene = {"narration": "Learning improves through examples.",
+                         "search_queries": ["learning"], "picture_size": (1920, 1080)}
+                with (patch.dict(os.environ, {"PIXABAY_API_KEY": "test-key"}),
+                      patch("worker.httpx.AsyncClient", return_value=client),
+                      patch("worker.footage_intent", return_value=(["learning"], [], {"learning"})),
+                      patch("worker.contextual_searches", return_value=[]),
+                      patch("worker.footage_relevance", return_value=5)):
+                    with self.assertRaisesRegex(TemporaryRenderError, "interrupted"):
+                        asyncio.run(fetch_pixabay(scene, Path(tmp) / "raw.mp4", set(), set(), {}))
+                self.assertTrue(client.stream.called)
+
+
 class PictureQualityRegression(unittest.TestCase):
     def test_stock_selection_ranks_the_detail_remaining_after_the_crop(self):
         from worker import stock_video_variants
