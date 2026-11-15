@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from supabase import create_client
+from studio_master import MASTER_BUCKET, STORAGE_BUDGET, bucket_exists, media_objects
 
 BRAND = ("LenxiQ: practical AI in medicine and healthcare; learning and education; "
          "building AI products and agents; human intelligence and common sense.")
@@ -43,9 +44,16 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     if (quota.count or 0) >= limit:
         print("[automation] Daily allowance reached; keeping existing jobs.", flush=True)
         return None
-    objects = client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).list(options={"limit": 1000})
-    if sum(int((o.get("metadata") or {}).get("size") or 0) for o in objects) >= 800 * 1024 * 1024:
-        raise RuntimeError("Preview storage nearly full; archive older videos before producing another")
+    # Include private upload masters, not just public preview objects. Preserve
+    # headroom for the owner's manual videos instead of consuming it on automation.
+    preview_bytes = sum(int((o.get("metadata") or {}).get("size") or 0)
+                        for o in media_objects(client, os.getenv("SUPABASE_VIDEO_BUCKET", "renders")))
+    master_bytes = (sum(int((o.get("metadata") or {}).get("size") or 0)
+                        for o in media_objects(client, MASTER_BUCKET))
+                    if bucket_exists(client, MASTER_BUCKET) else 0)
+    if preview_bytes + master_bytes >= STORAGE_BUDGET - 160 * 1024 * 1024:
+        print("[automation] Skipping daily render: storage headroom reserved for manual production.", flush=True)
+        return None
     owners = {r["user_id"] for r in recent if r.get("user_id")}
     owner = os.getenv("STUDIO_OWNER_USER_ID", "")
     if not owner:
