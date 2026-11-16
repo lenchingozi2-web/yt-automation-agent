@@ -347,11 +347,11 @@ export async function researchedDraft(brief: string, duration: number, format: D
     // Long videos are written as successive chapters of ONE coherent script,
     // not as independent video productions. Small chapters fit provider output limits.
     const chapterSize = duration > 900 ? 15 : Math.ceil(count / 3);
-    const chapters = [];
+    const chapters: { count: number; purpose: string }[] = [];
     for (let offset = 0; offset < count; offset += chapterSize) {
-      const chapterIndex = chapters.length;
+      const chapterIndex: number = chapters.length;
       const last = offset + chapterSize >= count;
-      const purpose = chapterIndex === 0
+      const purpose: string = chapterIndex === 0
         ? "Introduce the original question, provide the key context and methods, and identify the evidence. Include the whole-video title, description, tags and thumbnail headline."
         : last
           ? "Complete the practical applications, limitations and final takeaway. Conclude the whole video once. Avoid a second introduction."
