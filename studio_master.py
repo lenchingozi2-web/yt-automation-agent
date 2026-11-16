@@ -56,6 +56,43 @@ def check_media_budget(client, video_id: str, *, required: int, preview_bucket: 
         raise ValueError("Studio media storage is nearly full. Clear expired media before rendering this video.")
 
 
+
+def preflight_long_video_storage(client, video_id: str, duration_seconds: float, preview_bucket: str = "renders") -> None:
+    """Reject only clearly impossible HD capacity, before costly long narration.
+
+    This is a lower bound, not a promise that final output will fit. The exact
+    byte total is still verified by save_upload_master after rendering.
+    """
+    if not 600 <= duration_seconds <= 1800:
+        return
+    # At even an extremely restrained 850 kb/s + one browser preview, a
+    # continuous 1080p long video cannot fit below this storage floor.
+    minimum_bytes = int(duration_seconds * 850_000 / 8) + min(46_000_000, int(duration_seconds * 30_000))
+    try:
+        has_master = bucket_exists(client, MASTER_BUCKET)
+        used = sum(int((item.get("metadata") or {}).get("size") or 0)
+                   for item in media_objects(client, preview_bucket)
+                   if item.get("name") != f"{video_id}.mp4")
+        if has_master:
+            used += sum(int((item.get("metadata") or {}).get("size") or 0)
+                        for item in media_objects(client, MASTER_BUCKET)
+                        if not str(item.get("name", "")).startswith(video_id + "-"))
+        available = max(0, STORAGE_BUDGET - used)
+    except Exception as error:
+        print(f"[storage] preliminary capacity check unavailable: {type(error).__name__}", flush=True)
+        return
+    print(f"[storage] long-form preliminary budget: {available // (1024 * 1024)} MiB free; "
+          f"absolute minimum {minimum_bytes // (1024 * 1024)} MiB "
+          f"for {duration_seconds / 60:.1f} minutes", flush=True)
+    if available < minimum_bytes:
+        raise ValueError(
+            f"Not enough Studio storage for a {duration_seconds / 60:.0f}-minute full-quality video. "
+            f"Only {available // (1024 * 1024)} MiB is free. "
+            f"At least {minimum_bytes // (1024 * 1024)} MiB is needed before narration begins. "
+            "Delete unused videos or confirmed-expired media; no video quality was reduced."
+        )
+
+
 def reclaim_expired_uploaded_media(client, video_id: str) -> int:
     """Safely reclaim only confirmed YouTube uploads past the retention window.
 
