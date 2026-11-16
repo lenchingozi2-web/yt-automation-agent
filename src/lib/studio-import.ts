@@ -69,7 +69,13 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
       if(!started&&!title&&marker&&!/^(opening|hook|intro|scene|narration|part|chapter|segment|script)/i.test(label))title=label;
       else if(/^(narration|voiceover|script)$/i.test(label))mode="speech";
       else if(/^(visuals?|footage|b-roll)$/i.test(label))mode="visual";
-      else{flush();current.heading=label.replace(/\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d/g,"").trim().slice(0,80);mode="speech";started=true;}
+      else {
+        const isInlineSpeech = Boolean(numbered && !marker && label.split(/\s+/).length >= 9);
+        flush();
+        current.heading = isInlineSpeech ? "Scene" : label.replace(/\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d/g, "").trim().slice(0, 80);
+        mode="speech";started=true;
+        if (isInlineSpeech) current.lines.push(label);
+      }
       continue;
     }
     if(/^\[(visual|b-roll|footage|camera|on.screen)/i.test(line)){current.visuals.push(line.replace(/^\[|\]$/g,""));continue;}
