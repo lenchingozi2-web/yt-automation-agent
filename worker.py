@@ -33,7 +33,7 @@ from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, PITCH, RATE, VOICE, NarrationUnavailable,
                           make_audio, narration_gain, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
 from studio_maintenance import metadata as stored_metadata, preview_filename
-from studio_master import OBJECT_LIMIT, download_upload_master, remove_upload_master, save_upload_master
+from studio_master import OBJECT_LIMIT, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
@@ -924,6 +924,11 @@ def process(video: dict[str, Any], supabase) -> None:
     size = None
     bitrate = None
     target = details.get("duration_seconds")
+    if not parent and target:
+        preflight_long_video_storage(
+            supabase, video_id, float(target),
+            os.getenv("SUPABASE_VIDEO_BUCKET", "renders"),
+        )
     audio_plan = []
     thumbnail_candidates = []
     if parent:
