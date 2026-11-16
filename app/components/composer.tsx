@@ -1,6 +1,6 @@
 import { type FormEvent, useRef, useState } from "react";
 import { ArrowRight, Clapperboard, FileText, LoaderCircle, Monitor, Smartphone, Sparkles } from "lucide-react";
-import { durationFromBrief, normalizeDraft, type Draft } from "@/src/lib/studio";
+import { durationFromBrief, type Draft } from "@/src/lib/studio";
 import { parseFullScript } from "@/src/lib/studio-import";
 
 const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [600, "10 minutes"], [720, "12 minutes"], [0, "Custom"]] as const;
