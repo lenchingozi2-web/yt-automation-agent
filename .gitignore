@@ -9,3 +9,6 @@ token.json
 *.srt
 node_modules/
 .next/
+
+# Verified model files are cached on the CI worker, not committed.
+.kokoro-models/
