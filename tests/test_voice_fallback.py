@@ -78,6 +78,22 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
             self.assertEqual(edge.call_count, 2, "Do not waste the phrase-recovery retries on a dead provider")
             self.assertEqual(sleep.call_count, 1)
 
+    def test_exhausted_provider_does_not_retry_entire_20_minute_job(self):
+        from worker import render_job
+        from studio_audio import NarrationUnavailable
+
+        video = {"id": "12345678-1234-1234-1234-123456789012",
+                 "status": "rendering", "scenes": [{"narration": "A saved video."}]}
+        with (
+            patch("worker.process", side_effect=NarrationUnavailable("neural providers unavailable")) as process,
+            patch("worker.save_fields") as save,
+            patch("worker.time.sleep") as sleep,
+        ):
+            self.assertFalse(render_job(video, object()))
+            self.assertEqual(process.call_count, 1)
+            sleep.assert_not_called()
+            self.assertTrue(any(call.kwargs.get("status") == "failed" for call in save.call_args_list))
+
     def test_fingerprints_distinguish_providers_and_cache_only_validated_audio(self):
         call_counter = {"count": 0}
         def fake_gemini(text, target, voice):
