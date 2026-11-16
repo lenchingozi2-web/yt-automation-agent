@@ -202,6 +202,9 @@ test("a briefing draft rechecks its selected reports and keeps all exact links i
 test("duration stated in a video brief can override the untouched default", () => {
   assert.equal(durationFromBrief("Generate a 10 minutes video on AI in education"), 600);
   assert.equal(durationFromBrief("Create a 12-minute video"), 720);
+  assert.equal(durationFromBrief("Create a 20-minute video"), 1200);
+  assert.equal(durationFromBrief("Create a 30-minute video"), 1800);
+  assert.equal(durationFromBrief("Create a 31-minute video"), undefined);
   assert.equal(durationFromBrief("Create a video about a 10-minute study break"), undefined);
 });
 
@@ -294,19 +297,65 @@ test("one paste parses metadata, narration and visual notes into the manual scen
   assert.match(draft.scenes[1].search_queries.join(" "), /developer working/);
 });
 
-test("long one-paste tutorial preserves every narration word and automatically creates successive parts", async () => {
+test("20-minute full-script import produces exactly one video with every word and chapter intact", async () => {
   const { parseFullScript } = await import("../src/lib/studio-import.ts");
   const sentences = Array.from({ length: 210 }, (_, i) =>
     "Step " + i + " explains one practical feature and shows precisely how viewers can follow along using their phone.");
   const script = "Title: Build a YouTube Engine\nDuration: 20 minutes\n\n## Scene 1 — Tutorial\nNarration:\n" + sentences.join(" ");
   const { drafts, notes } = parseFullScript(script);
-  assert.equal(drafts.length, 2);
-  assert.match(notes.join(" "), /without repasting/i);
-  assert.ok(drafts.every(d => d.duration_seconds <= 720 && d.scenes.length <= 60));
-  const actual = drafts.flatMap(d => d.scenes.map(s => s.narration)).join(" ").replace(/\s+/g, " ").trim();
+  assert.equal(drafts.length, 1, "The importer must not create a second production");
+  assert.ok(drafts[0].duration_seconds >= 1200 && drafts[0].duration_seconds <= 1800);
+  assert.ok(drafts[0].scenes.length > 60 && drafts[0].scenes.length <= 160);
+  assert.equal(drafts[0].title, "Build a YouTube Engine");
+  assert.equal(drafts[0].scenes[0].chapter_title, "Tutorial");
+  const actual = drafts[0].scenes.map(s => s.narration).join(" ").replace(/\s+/g, " ").trim();
   assert.equal(actual, sentences.join(" "));
-  assert.match(drafts[0].title, /Part 1 of 2/);
-  assert.match(drafts[1].title, /Part 2 of 2/);
+  assert.match(notes.join(" "), /ONE continuous MP4/);
+  assert.ok(!notes.join(" ").includes("Part 2"));
+});
+
+test("30-minute draft is one production, but exceeding the limit rejects without splitting or trimming", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const draft = JSON.stringify({ title: "Long masterclass", duration_seconds: 1800,
+    scenes: Array.from({ length: 120 }, (_, i) => ({
+      narration: "Lesson number " + i + " preserves the complete order of this continuous training session.",
+      search_queries: ["training lesson"] })) });
+  const result = parseFullScript(draft);
+  assert.equal(result.drafts.length, 1);
+  assert.equal(result.drafts[0].duration_seconds, 1800);
+  assert.equal(result.drafts[0].scenes.length, 120);
+  assert.match(result.drafts[0].scenes[119].narration, /Lesson number 119/);
+  assert.throws(() => parseFullScript(JSON.stringify({ title: "Too long", duration_seconds: 1801,
+    scenes: [{ narration: "This video must not be truncated or secretly split." }] })), /30 minutes/);
+  assert.throws(() => parseFullScript(JSON.stringify({ title: "Too many scenes", duration_seconds: 1200,
+    scenes: Array.from({ length: 161 }, () => ({ narration: "A continuous lesson." })) })), /160 scenes/);
+});
+
+test("multiline video description and visual directions never become spoken narration", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const script = [
+    "Title: Build It Once", "Duration: 20 minutes", "Format: 16:9",
+    "Description:", "Learn what GitHub does.", "Learn to connect storage.",
+    "---", "Scene 1 — Hook", "Narration:", "This is the original uninterrupted opening.",
+    "Visuals:", "Show a phone with a production dashboard.",
+    "---", "Scene 2 — Build", "Narration:",
+    "Next we configure the background worker and keep the same video flowing.",
+    "Visuals:", "Show a long rendering progress timeline.",
+    "---", "END OF SCRIPT"
+  ].join("\n");
+  const { drafts } = parseFullScript(script);
+  assert.equal(drafts.length, 1);
+  assert.match(drafts[0].description, /Learn to connect storage/);
+  assert.equal(drafts[0].scenes.length, 2);
+  assert.equal(drafts[0].duration_seconds, 1200);
+  assert.equal(drafts[0].scenes[0].chapter_title, "Hook");
+  assert.equal(drafts[0].scenes[1].chapter_title, "Build");
+  const narration = drafts[0].scenes.map(s => s.narration).join(" ");
+  assert.ok(!narration.includes("Learn what GitHub does"));
+  assert.ok(!narration.includes("Show a phone"));
+  assert.ok(!narration.includes("END OF SCRIPT"));
+  assert.match(narration, /uninterrupted opening/);
+  assert.match(narration, /same video flowing/);
 });
 
 test("JSON complete-draft imports keep saved settings and visual directions", async () => {
