@@ -6,10 +6,10 @@ design, and verifies duration / word coverage before the output is accepted.
 from __future__ import annotations
 
 import base64
-import io
 import os
 import re
 import subprocess
+import time
 import wave
 from pathlib import Path
 
@@ -20,6 +20,68 @@ VOICE = os.getenv("STUDIO_GEMINI_TTS_VOICE", "Charon")
 MODEL_ALLOWLIST = {"gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"}
 VOICE_ALLOWLIST = {"Charon", "Puck", "Kore", "Aoede", "Fenrir", "Orus", "Schedar", "Achird", "Algenib"}
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/"
+_last_request_at = 0.0
+
+
+class SpeechProviderError(RuntimeError):
+    """Public-safe status for the speech worker; never expose response bodies or keys."""
+
+    def __init__(self, status: int, *, category: str = "service error", retry_after: float = 0.0):
+        super().__init__(f"Gemini neural voice HTTP {status} ({category})")
+        self.status = status
+        self.category = category
+        self.retry_after = max(0.0, min(120.0, float(retry_after)))
+        self.retryable = (status in {408, 425, 429} or 500 <= status < 600) and category != "daily quota exhausted"
+
+
+def _rate_limit_error(response) -> SpeechProviderError:
+    status = int(response.status_code)
+    category = "temporary service issue" if status >= 500 else "request rejected"
+    retry_after = 0.0
+    if status == 429:
+        category = "rate limit"
+    if status in {401, 403}:
+        category = "API permissions or quota configuration"
+    try:
+        headers = response.headers
+        hint = headers.get("Retry-After") or headers.get("retry-after") or ""
+        if re.fullmatch(r"\d+(?:\.\d+)?", str(hint)):
+            retry_after = float(hint)
+    except (AttributeError, ValueError):
+        pass
+    if status == 429:
+        try:
+            payload = response.json()
+            error = payload.get("error") or {}
+            details = error.get("details") or []
+            message = str(error.get("message") or "").lower()
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                delay = str(item.get("retryDelay") or "")
+                found = re.fullmatch(r"(\d+(?:\.\d+)?)s", delay)
+                if found:
+                    retry_after = max(retry_after, float(found.group(1)))
+            quota_text = message + " " + " ".join(str(item.get("violations", "")) for item in details if isinstance(item, dict))
+            if re.search(r"per.?day|requests.?per.?day|\brpd\b|daily\s+quota", quota_text, re.I):
+                category = "daily quota exhausted"
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return SpeechProviderError(status, category=category, retry_after=retry_after)
+
+
+def _throttle() -> None:
+    """Pace the backup's free-tier requests without consuming paid resources."""
+    global _last_request_at
+    try:
+        spacing = float(os.getenv("STUDIO_GEMINI_TTS_INTERVAL_SECONDS", "12"))
+    except ValueError:
+        spacing = 12
+    spacing = max(5.0, min(30.0, spacing))
+    since = time.monotonic() - _last_request_at
+    if _last_request_at and since < spacing:
+        time.sleep(spacing - since)
+    _last_request_at = time.monotonic()
 
 
 def available() -> bool:
@@ -65,14 +127,15 @@ def generate(text: str, wav: Path, voice: str = VOICE) -> tuple[list[tuple[float
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
         },
     }
+    _throttle()
     response = requests.post(
         GEMINI_ENDPOINT + MODEL + ":generateContent",
         headers={"Content-Type": "application/json", "x-goog-api-key": key},
         json=payload, timeout=90,
     )
     if response.status_code != 200:
-        # Never print API keys, the raw request or personally identifying script text.
-        raise RuntimeError("Gemini narration temporarily unavailable (HTTP " + str(response.status_code) + ")")
+        # Classify the safe status and Retry-After. Never print raw responses or secrets.
+        raise _rate_limit_error(response)
     candidates = response.json().get("candidates") or []
     parts = (candidates[0].get("content") or {}).get("parts") or [] if candidates else []
     encoded = next((part.get("inlineData") for part in parts if part.get("inlineData")), None)
