@@ -409,3 +409,26 @@ test("complete paste preserves short inline scene narration and excludes explici
   assert.ok(!allSpoken.includes("Show a mobile phone"));
   assert.match(drafts[0].scenes[1].visual_notes || "", /dashboard/);
 });
+
+
+test("topic scout rejects unsupported sensational pitches and near-duplicate past videos", async () => {
+  const { evaluateTopic, rankTopicOptions } = await import("../src/lib/studio-topic-scoring.ts");
+  const primary = [
+    { title: "Unexpected learning effects in digital classrooms", text: "Researchers measured " + "learning results. ".repeat(20),
+      url: "https://eric.ed.gov/?id=EJ456", year: "2026", publisher: "Journal of Education" },
+    { title: "Cognitive offloading after AI assistance", text: "The authors compared " + "cognitive effort. ".repeat(20),
+      url: "https://pubmed.ncbi.nlm.nih.gov/456/", year: "2025", publisher: "Science Journal" },
+  ];
+  const strong = { angle: "Unexpected learning effects and cognitive offloading using AI", queries: ["cognitive offloading", "learning effects"], clinical: false };
+  const old = { angle: "Why AI changes studying habits", queries: ["AI learning"], clinical: false };
+  assert.equal(evaluateTopic(strong, primary, []).eligible, true);
+  assert.equal(evaluateTopic(strong, primary, []).primaryCount, 2);
+  assert.equal(evaluateTopic(strong, [primary[0]], []).eligible, false);
+  assert.equal(evaluateTopic(strong, [{ ...primary[0], url: "https://en.wikipedia.org/?curid=5" }, { ...primary[1], url: "https://en.wikipedia.org/?curid=6" }], []).eligible, false);
+  assert.equal(evaluateTopic(strong, primary, [strong.angle]).eligible, false);
+  const ranked = rankTopicOptions([
+    { option: old, sources: [{ ...primary[0], title: "AI studying habits" }] },
+    { option: strong, sources: primary },
+  ], []);
+  assert.deepEqual(ranked.map(x => x.option.angle), [strong.angle]);
+});
