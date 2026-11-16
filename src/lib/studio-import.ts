@@ -40,7 +40,7 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     if(inFence)continue;
     if(!line){if(mode==="speech")current.lines.push("");continue;}
     const clean=line.replace(/^#{1,6}\s*/,"").replace(/\*\*/g,"").trim();
-    const meta=/^(title|description|thumbnail(?:\s+(?:title|headline|text))?|tags|keywords|format|aspect\s*ratio|orientation|duration|length)\s*:\s*(.*)$/i.exec(clean);
+    const meta=/^(?:video\s+)?(title|description|thumbnail(?:\s+(?:title|headline|text))?|tags|keywords|format|aspect\s*ratio|orientation|duration|length)\s*:\s*(.*)$/i.exec(clean);
     if(meta&&!started){
       const key=meta[1].toLowerCase(),v=meta[2].trim();
       if(key==="title")title=v;
@@ -54,14 +54,17 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     }
     const times=/(\d{1,2}:\d\d)\s*[-–—]\s*(\d{1,2}:\d\d)/.exec(clean);
     if(times)timeline=Math.max(timeline,duration(times[2]));
-    const field=/^(narration|voice\s*over|voiceover|spoken|script|visuals?|b-roll|footage|on[- ]screen|camera|shots?|music|sfx|notes?|directions?)\s*:\s*(.*)$/i.exec(clean.replace(/^\[|\]$/g,""));
+    const field=/^(narration|voice\s*over|voiceover|spoken|script|visuals?(?:\s+(?:directions?|cues?|notes?))?|b-roll|footage|on[- ]screen(?:\s+(?:text|visuals?))?|camera|shots?|what\s+to\s+show|stage\s+directions?|music|sfx|notes?|directions?)\s*:\s*(.*)$/i.exec(clean.replace(/^\[|\]$/g,""));
     if(field){
       const isSpeech=/^(narration|voice|spoken|script)/i.test(field[1]);
-      mode=isSpeech?"speech":/^(visual|b-roll|footage|on-|camera|shot|direction)/i.test(field[1])?"visual":"skip";
+      mode=isSpeech?"speech":/^(visual|b-roll|footage|on-|camera|shot|direction|what to show|stage direction)/i.test(field[1])?"visual":"skip";
       if(mode==="speech"&&field[2]){current.lines.push(field[2]);started=true;}
       if(mode==="visual"&&field[2])current.visuals.push(field[2]);
       continue;
     }
+    if(/^(?:narration|voiceover|voice over|spoken|script)$/i.test(clean)){mode="speech";started=true;continue;}
+    if(/^(?:visuals?|b-roll|footage|visual directions?|on[- ]screen(?: visuals?)?|what to show)$/i.test(clean)){mode="visual";continue;}
+    if(/^(?:scene|segment|chapter)\s+\d+\s*:?$/i.test(clean)){flush();current.heading=clean;mode="speech";started=true;continue;}
     const marker=/^(?:#{1,5}\s+)(.+)$/.exec(line);
     const numbered=/^(?:(?:scene|segment|chapter|part)\s+\d+\s*(?:[:.\-–—]\s*|\s+)|\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d\s*[-–—:]?\s*)(.+)$/i.exec(clean);
     if(marker||numbered){
@@ -70,7 +73,7 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
       else if(/^(narration|voiceover|script)$/i.test(label))mode="speech";
       else if(/^(visuals?|footage|b-roll)$/i.test(label))mode="visual";
       else {
-        const isInlineSpeech = Boolean(numbered && !marker && label.split(/\s+/).length >= 9);
+        const isInlineSpeech = Boolean(numbered && !marker && (label.split(/\s+/).length >= 5 || /[.!?]["”]*$/.test(label)));
         flush();
         current.heading = isInlineSpeech ? "Scene" : label.replace(/\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d/g, "").trim().slice(0, 80);
         mode="speech";started=true;
