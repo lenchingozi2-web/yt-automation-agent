@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Film, HardDrive, LoaderCircle, Newspaper, Plus, Workflow } from "lucide-react";
 import { getSupabaseClient } from "@/src/lib/supabase";
 import { normalizeDraft, normalizeVideo, toSafeMessage, type Draft, type StudioVideo } from "@/src/lib/studio";
+import { MAX_VIDEO_SECONDS, MAX_VIDEO_MINUTES } from "@/src/lib/studio-limits";
 import { Brand, Notice, PolicyLinks, SignIn, type Feedback } from "./components/studio-shell";
 import { Composer } from "./components/composer";
 import { ProductionQueue, type RevisionInput } from "./components/production-queue";
@@ -105,9 +106,6 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [importRemaining, setImportRemaining] = useState<Draft[]>([]);
-  const [importIndex, setImportIndex] = useState(0);
-  const [importTotal, setImportTotal] = useState(0);
   const [topic, setTopic] = useState("");
   const [editorFeedback, setEditorFeedback] = useState<Feedback | null>(null);
   const actionLock = useRef(false);
@@ -134,24 +132,9 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     setEditorFeedback(null);
   }
 
-  function clearImport() { setImportRemaining([]); setImportIndex(0); setImportTotal(0); }
-  function openSingle(next: Draft) { clearImport(); edit(next); }
-  function importFull(first: Draft, remaining: Draft[] = [], notes: string[] = []) {
-    setImportRemaining(remaining);
-    setImportIndex(1);
-    setImportTotal(1 + remaining.length);
-    edit(first);
-    if (notes.length) setEditorFeedback({ kind: "success", message: "Entire script imported.", detail: notes.join(" ") });
-  }
-  function closeEditor() {
-    if (draft && importTotal > 1) setImportRemaining((items) => [draft, ...items]);
-    setDraft(null);
-  }
-  function continueImport() {
-    if (!importRemaining.length) return;
-    const [next, ...rest] = importRemaining;
-    setImportRemaining(rest);
+  function importFull(next: Draft, notes: string[] = []) {
     edit(next);
+    if (notes.length) setEditorFeedback({ kind: "success", message: "One complete video imported.", detail: notes.join(" ") });
   }
 
   async function action(key: string, perform: () => Promise<void>, inEditor = false) {
@@ -201,21 +184,12 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
       if (!draft.title.trim() || !draft.scenes.length || draft.scenes.some((scene) => !scene.narration.trim())) {
         throw new Error("Add a title and narration for every scene.");
       }
-      if (!Number.isInteger(draft.duration_seconds) || draft.duration_seconds < 60 || draft.duration_seconds > 720) {
-        throw new Error("Set a target duration between 60 and 720 seconds.");
+      if (!Number.isInteger(draft.duration_seconds) || draft.duration_seconds < 60 || draft.duration_seconds > MAX_VIDEO_SECONDS) {
+        throw new Error(`Set a target duration between 1 and ${MAX_VIDEO_MINUTES} minutes.`);
       }
       const result = await post<RenderResult>("/api/render", { ...draft, requestId: draftId.current });
-      if (importRemaining.length) {
-        const [next, ...rest] = importRemaining;
-        setImportRemaining(rest);
-        setImportIndex((index) => index + 1);
-        edit(next);
-        setEditorFeedback({ kind: "success", message: "Part queued successfully. Review the next part.", detail: result.note });
-      } else {
-        setDraft(null);
-        clearImport();
-        setFeedback({ kind: "success", message: result.message, detail: result.note });
-      }
+      setDraft(null);
+      setFeedback({ kind: "success", message: result.message, detail: result.note });
       void refresh(true);
     }, true);
   }
@@ -312,17 +286,16 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
             })}>{busy === "cleanup" ? "Starting cleanup…" : "Clean expired media"}</button>}
           </article>
         </section>
-        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(first, remaining, notes) => { setTopic(""); importFull(first, remaining, notes); }} />
-        {!draft && importRemaining.length > 0 && <button type="button" className="button button-secondary" onClick={continueImport}>Resume imported script — Part {importIndex} of {importTotal}</button>}
+        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(next, notes) => { setTopic(""); importFull(next, notes); }} />
         <Notice feedback={feedback} dismiss={() => setFeedback(null)} />
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} retryThumbnail={retryThumbnail} deleteVideo={deleteVideo} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); openSingle(next); }} reuse={(video) => { setTopic(""); openSingle(normalizeDraft(video)); }}
+          busy={busy} retry={retry} retryThumbnail={retryThumbnail} deleteVideo={deleteVideo} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); edit(next); }} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>
-      {draft && <SceneEditor draft={draft} change={setDraft} busy={busy} close={closeEditor} importProgress={importTotal > 1 ? { index: importIndex, total: importTotal } : undefined}
+      {draft && <SceneEditor draft={draft} change={setDraft} busy={busy} close={() => setDraft(null)}
         save={() => void saveDraft()} regenerate={() => void regenerate()} feedback={editorFeedback} />}
     </div>
   );
