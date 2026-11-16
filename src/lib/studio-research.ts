@@ -1,5 +1,6 @@
 import { addViewerPrompt, communityQuestion, withoutViewerPrompt } from "./studio-growth.ts";
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
+import { rankTopicOptions, type TopicOption } from "./studio-topic-scoring.ts";
 
 type Json = Record<string, unknown>;
 type Evidence = ResearchSource & { text: string; year?: string };
@@ -173,25 +174,72 @@ async function referenceSearch(query: string): Promise<Evidence[]> {
 }
 
 export async function research(brief: string, recent: string[] = []) {
+  const automatic = AUTOPICK.test(brief);
   const plan = await modelJson([
-    "Plan research for this video. Return JSON with angle, clinical (boolean), and queries (3 search strings, each 2 to 6 distinctive words).",
-    "Clinical is true if the subject touches health, medicine, care, diagnosis, treatments or claimed patient outcomes. Choose one concrete, distinctive angle and research its key questions.",
-    "When the brief asks you to pick a topic, choose a specific angle that differs in topic and scenario from the recent productions. Keep essential search terms simple.",
+    automatic
+      ? "Discover four DISTINCT fascinating, unusual, evidence-testable YouTube story angles. Return JSON { candidates: [{angle,clinical,queries:[two 2–5-word search queries],hook}], angle,clinical,queries }. The hook is an editorial hypothesis, never an invented finding."
+      : "Plan research for this video. Return JSON with angle, clinical (boolean), and queries (3 search strings, each 2 to 6 distinctive words).",
+    "Clinical is true only for medical, diagnostic, treatment, patient care or health claims; do not label software, technology or education topics clinical by default.",
+    "Prefer specific counterintuitive findings, surprising tradeoffs, useful demonstrations, new techniques, hidden mechanisms, and unexpected connections grounded in published evidence, not conspiracy or exaggerated predictions.",
+    "Search queries must identify real concepts likely to appear in scholarly article titles and abstracts. Avoid unrelated hype, generic AI terms, unsupported claims, and repeating the same topic in different words.",
+    "When proposing automatic topics, avoid previous titles AND similar angles, locations or scenarios. Primary source evidence and source recency matter more than a dramatic headline.",
     JSON.stringify({ brief, recent }),
-  ].join("\n"));
-  const angle = text(plan.angle).slice(0, 500) || (AUTOPICK.test(brief) ? "" : brief.slice(0, 500));
-  const queries = [...new Set(list(plan.queries).map((query) => text(query).slice(0, 110)).filter(Boolean))].slice(0, 3);
-  if (!angle || !queries.length) throw new Error("The research plan was incomplete. Try a more specific brief.");
-  const clinical = plan.clinical !== false || /\b(diagnos\w*|treatments?|patients?|clinica[lly]+|medic(?:al|ine)|health(?:care)?|symptoms?|therapy|drug dosage)\b/i.test(AUTOPICK.test(brief) ? angle : brief + " " + angle);
-  const searches = await Promise.allSettled(queries.flatMap((query) => clinical ? [medicalSearch(query, true)] : [educationSearch(query), medicalSearch(query, false), referenceSearch(query)]));
-  const unique = new Map<string, Evidence>();
-  for (const item of searches) {
-    if (item.status === "fulfilled") for (const source of item.value.slice(0, 3)) unique.set(source.url, source);
+  ].join("\n"), automatic ? 2200 : 1400);
+  const queryList = (value: unknown) => [...new Set(list(value).map((query) => text(query).slice(0, 110)).filter(Boolean))].slice(0, 3);
+  const medical = (title: string, flagged: unknown) =>
+    flagged === true || (flagged !== false &&
+      /\b(diagnos\w*|treatments?|patients?|clinica[lly]+|medic(?:al|ine)|health(?:care)?|symptoms?|therapy|drug dosage)\b/i.test(title));
+  const defaultAngle = text(plan.angle).slice(0, 500) || (automatic ? "" : brief.slice(0, 500));
+  const fallbackQueries = queryList(plan.queries);
+  const proposed = list(plan.candidates).slice(0, 4).flatMap((candidate): TopicOption[] => {
+    const item = object(candidate);
+    const angle = text(item.angle).slice(0, 220);
+    const queries = queryList(item.queries);
+    if (angle.length < 12 || queries.length < 2) return [];
+    return [{ angle, queries, clinical: medical(angle, item.clinical), hook: text(item.hook).slice(0, 230) }];
+  });
+  async function collect(option: TopicOption, perQuery = 3): Promise<Evidence[]> {
+    const queries = option.queries.slice(0, perQuery);
+    const tasks = queries.flatMap((query) => option.clinical
+      ? [medicalSearch(query, true), medicalSearch(query, false)]
+      : [educationSearch(query), medicalSearch(query, false), referenceSearch(query)]);
+    const searches = await Promise.allSettled(tasks);
+    const unique = new Map<string, Evidence>();
+    for (const result of searches) if (result.status === "fulfilled") {
+      for (const source of result.value.slice(0, 4)) unique.set(source.url, source);
+    }
+    return [...unique.values()];
   }
-  trace("Research found " + unique.size + " usable sources.");
-  if (unique.size < 2) throw new Error("Studio found too little source material to verify this script. Try a more specific topic or try again later.");
-  const evidence = [...unique.values()].slice(0, process.env.STUDIO_PREFER_GROQ === "1" ? 6 : 10).map((item, i) => ({ ...item, id: i + 1 }));
-  return { angle, evidence };
+  if (automatic && proposed.length) {
+    // Evidence-first: four plausible story pitches compete for actually
+    // retrieved, independent peer-reviewed or indexed research sources.
+    const evaluated = await Promise.all(proposed.map(async (option) => ({
+      option, sources: await collect(option, 2),
+    })));
+    const ranked = rankTopicOptions(evaluated, recent);
+    if (!ranked.length) {
+      trace("All " + evaluated.length + " research pitches lacked two independent indexed scholarly sources.");
+      throw new Error("No new topic passed the source-quality check today. Studio will not invent a fascinating discovery. Try a different niche or another research cycle.");
+    }
+    const selected = ranked[0];
+    const strongFirst = selected.sources.filter((source) =>
+      /^https:\/\/(?:pubmed\.ncbi\.nlm\.nih\.gov|eric\.ed\.gov)\//.test(source.url));
+    const context = selected.sources.filter((source) => !strongFirst.some((lead) => lead.url === source.url));
+    const evidence = [...strongFirst, ...context].slice(0, process.env.STUDIO_PREFER_GROQ === "1" ? 8 : 10)
+      .map((source, i) => ({ ...source, id: i + 1 }));
+    trace("Selected evidence-supported topic with " + selected.quality.primaryCount +
+      " indexed sources and " + selected.quality.recentEvidence + " recent studies.");
+    return { angle: selected.option.angle, evidence };
+  }
+  const angle = defaultAngle;
+  const queries = fallbackQueries;
+  if (!angle || !queries.length) throw new Error("The research plan was incomplete. Try a more specific brief.");
+  const evidence = await collect({ angle, queries,
+    clinical: medical(automatic ? angle : brief + " " + angle, plan.clinical) });
+  trace("Research found " + evidence.length + " usable sources.");
+  if (evidence.length < 2) throw new Error("Studio found too little source material to verify this script. Try a more specific topic or try again later.");
+  return { angle, evidence: evidence.slice(0, process.env.STUDIO_PREFER_GROQ === "1" ? 6 : 10)
+    .map((item, i) => ({ ...item, id: i + 1 })) };
 }
 
 function sourceList(evidence: Evidence[]): ResearchSource[] {
