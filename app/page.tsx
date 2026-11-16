@@ -105,6 +105,9 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [importRemaining, setImportRemaining] = useState<Draft[]>([]);
+  const [importIndex, setImportIndex] = useState(0);
+  const [importTotal, setImportTotal] = useState(0);
   const [topic, setTopic] = useState("");
   const [editorFeedback, setEditorFeedback] = useState<Feedback | null>(null);
   const actionLock = useRef(false);
@@ -129,6 +132,26 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
     draftId.current = crypto.randomUUID();
     setDraft(next);
     setEditorFeedback(null);
+  }
+
+  function clearImport() { setImportRemaining([]); setImportIndex(0); setImportTotal(0); }
+  function openSingle(next: Draft) { clearImport(); edit(next); }
+  function importFull(first: Draft, remaining: Draft[] = [], notes: string[] = []) {
+    setImportRemaining(remaining);
+    setImportIndex(1);
+    setImportTotal(1 + remaining.length);
+    edit(first);
+    if (notes.length) setEditorFeedback({ kind: "success", message: "Entire script imported.", detail: notes.join(" ") });
+  }
+  function closeEditor() {
+    if (draft && importTotal > 1) setImportRemaining((items) => [draft, ...items]);
+    setDraft(null);
+  }
+  function continueImport() {
+    if (!importRemaining.length) return;
+    const [next, ...rest] = importRemaining;
+    setImportRemaining(rest);
+    edit(next);
   }
 
   async function action(key: string, perform: () => Promise<void>, inEditor = false) {
@@ -182,8 +205,17 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
         throw new Error("Set a target duration between 60 and 720 seconds.");
       }
       const result = await post<RenderResult>("/api/render", { ...draft, requestId: draftId.current });
-      setDraft(null);
-      setFeedback({ kind: "success", message: result.message, detail: result.note });
+      if (importRemaining.length) {
+        const [next, ...rest] = importRemaining;
+        setImportRemaining(rest);
+        setImportIndex((index) => index + 1);
+        edit(next);
+        setEditorFeedback({ kind: "success", message: "Part queued successfully. Review the next part.", detail: result.note });
+      } else {
+        setDraft(null);
+        clearImport();
+        setFeedback({ kind: "success", message: result.message, detail: result.note });
+      }
       void refresh(true);
     }, true);
   }
@@ -280,16 +312,17 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
             })}>{busy === "cleanup" ? "Starting cleanup…" : "Clean expired media"}</button>}
           </article>
         </section>
-        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(next) => { setTopic(""); edit(next); }} />
+        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(first, remaining, notes) => { setTopic(""); importFull(first, remaining, notes); }} />
+        {!draft && importRemaining.length > 0 && <button type="button" className="button button-secondary" onClick={continueImport}>Resume imported script — Part {importIndex} of {importTotal}</button>}
         <Notice feedback={feedback} dismiss={() => setFeedback(null)} />
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
           error={error} refreshing={refreshing} refresh={() => void refresh(true)}
-          busy={busy} retry={retry} retryThumbnail={retryThumbnail} deleteVideo={deleteVideo} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); edit(next); }} reuse={(video) => { setTopic(""); edit(normalizeDraft(video)); }}
+          busy={busy} retry={retry} retryThumbnail={retryThumbnail} deleteVideo={deleteVideo} revise={revise} feedback={feedback} createShort={(next) => { setTopic(""); openSingle(next); }} reuse={(video) => { setTopic(""); openSingle(normalizeDraft(video)); }}
         />
       </main>
       <footer className="studio-footer"><span>LenxiQ Studio</span><PolicyLinks /></footer>
-      {draft && <SceneEditor draft={draft} change={setDraft} busy={busy} close={() => setDraft(null)}
+      {draft && <SceneEditor draft={draft} change={setDraft} busy={busy} close={closeEditor} importProgress={importTotal > 1 ? { index: importIndex, total: importTotal } : undefined}
         save={() => void saveDraft()} regenerate={() => void regenerate()} feedback={editorFeedback} />}
     </div>
   );
