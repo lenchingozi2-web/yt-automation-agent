@@ -177,7 +177,7 @@ export async function research(brief: string, recent: string[] = []) {
   const automatic = AUTOPICK.test(brief);
   const plan = await modelJson([
     automatic
-      ? "Discover four DISTINCT fascinating, unusual, evidence-testable YouTube story angles. Return JSON { candidates: [{angle,clinical,queries:[two 2–5-word search queries],hook}], angle,clinical,queries }. The hook is an editorial hypothesis, never an invented finding."
+      ? "Plan research for this video: Discover four DISTINCT fascinating, unusual, evidence-testable YouTube story angles. Return JSON { candidates: [{angle,clinical,queries:[two 2–5-word search queries],hook}], angle,clinical,queries }. The hook is an editorial hypothesis, never an invented finding."
       : "Plan research for this video. Return JSON with angle, clinical (boolean), and queries (3 search strings, each 2 to 6 distinctive words).",
     "Clinical is true only for medical, diagnostic, treatment, patient care or health claims; do not label software, technology or education topics clinical by default.",
     "Prefer specific counterintuitive findings, surprising tradeoffs, useful demonstrations, new techniques, hidden mechanisms, and unexpected connections grounded in published evidence, not conspiracy or exaggerated predictions.",
