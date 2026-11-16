@@ -14,6 +14,7 @@ import wave
 
 from studio_retry import TemporaryRenderError
 from studio_speech_backup import SpeechProviderError, generate as generate_gemini_speech
+from studio_kokoro import generate as generate_kokoro_speech
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
@@ -254,7 +255,7 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
     if not text:
         raise ValueError(f"Scene {number} has no narration")
-    if engine not in {"edge", "gemini"}:
+    if engine not in {"kokoro", "edge", "gemini"}:
         raise ValueError("Unknown narration engine")
     fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, engine, voice, rate, pitch, scene.get("format"), text]).encode()).hexdigest()
     audio = directory / f"scene_{number:02d}_{fingerprint[:16]}.wav"
@@ -269,10 +270,14 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
             pass
     temporary = audio.with_suffix(".part.mp3")
     decoded = audio.with_suffix(".part.wav")
-    attempts = 5 if engine == "gemini" else 3
+    attempts = 5 if engine == "gemini" else 2 if engine == "kokoro" else 3
     for attempt in range(attempts):
         try:
-            if engine == "gemini":
+            if engine == "kokoro":
+                boundaries, seconds = generate_kokoro_speech(text, decoded, voice)
+                validate_audio(decoded, words=len(text.split()))
+                complete_boundaries(boundaries, text, seconds)
+            elif engine == "gemini":
                 boundaries, seconds = generate_gemini_speech(text, decoded, voice)
                 validate_audio(decoded, words=len(text.split()))
                 complete_boundaries(boundaries, text, seconds)
@@ -305,7 +310,11 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
                 raise NarrationUnavailable(
                     f"{engine.capitalize()} narration failed at scene {number}: {reason}. Saved script is safe to retry."
                 ) from error
-            if engine == "gemini":
+            if engine == "kokoro":
+                # Offline engine failures normally indicate assets/memory rather than
+                # a rate limit. Do not wait for external quotas or loop indefinitely.
+                time.sleep(1)
+            elif engine == "gemini":
                 # Gemini rate quotas may need minute-scale backoff, not 1-2s.
                 # Never spin rapidly through exhausted free-tier requests.
                 delay = max(error.retry_after if isinstance(error, SpeechProviderError) else 0,
