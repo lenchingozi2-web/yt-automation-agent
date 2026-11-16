@@ -13,7 +13,7 @@ from pathlib import Path
 import wave
 
 from studio_retry import TemporaryRenderError
-from studio_speech_backup import generate as generate_gemini_speech
+from studio_speech_backup import SpeechProviderError, generate as generate_gemini_speech
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
@@ -269,7 +269,8 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
             pass
     temporary = audio.with_suffix(".part.mp3")
     decoded = audio.with_suffix(".part.wav")
-    for attempt in range(3):
+    attempts = 5 if engine == "gemini" else 3
+    for attempt in range(attempts):
         try:
             if engine == "gemini":
                 boundaries, seconds = generate_gemini_speech(text, decoded, voice)
@@ -292,17 +293,25 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
         except Exception as error:
             temporary.unlink(missing_ok=True)
             decoded.unlink(missing_ok=True)
-            reason = str(error) if isinstance(error, ValueError) else type(error).__name__
-            print(f"[narration] scene {number}, attempt {attempt + 1}: {reason}", flush=True)
-            # A missing audio payload across two requests means the Edge
-            # WebSocket service is failing, not that the narration is too long.
-            # Stop subdividing it into ever smaller requests and switch the
-            # entire video to the independent neural provider instead.
+            reason = str(error) if isinstance(error, (ValueError, SpeechProviderError)) else type(error).__name__
+            print(f"[narration] scene {number}, attempt {attempt + 1}/{attempts}: {reason}", flush=True)
             if engine == "edge" and type(error).__name__ == "NoAudioReceived" and attempt >= 1:
                 raise NarrationUnavailable(
-                    "Edge neural voice stopped returning audio on repeated requests; switching the whole video to backup speech."
+                    "Edge neural voice stopped returning audio on repeated requests."
                 ) from error
-            if attempt == 2:
-                raise NarrationUnavailable(f"{engine.capitalize()} neural narration was unavailable for scene {number} after automatic retries.") from error
-            time.sleep(2 ** attempt)
+            if isinstance(error, SpeechProviderError) and not error.retryable:
+                raise NarrationUnavailable(f"Gemini narration could not continue: {error}.") from error
+            if attempt == attempts - 1:
+                raise NarrationUnavailable(
+                    f"{engine.capitalize()} narration failed at scene {number}: {reason}. Saved script is safe to retry."
+                ) from error
+            if engine == "gemini":
+                # Gemini rate quotas may need minute-scale backoff, not 1-2s.
+                # Never spin rapidly through exhausted free-tier requests.
+                delay = max(error.retry_after if isinstance(error, SpeechProviderError) else 0,
+                            min(65, 15 * (2 ** attempt)))
+                print(f"[narration] Gemini voice retrying scene {number} after {delay:.0f}s cooldown.", flush=True)
+                time.sleep(delay)
+            else:
+                time.sleep(2 ** attempt)
     raise RuntimeError("Narration was not generated")
