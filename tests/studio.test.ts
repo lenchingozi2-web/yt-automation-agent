@@ -253,3 +253,81 @@ test("teaser reuses reviewed narration and schedule uses the displayed Lagos tim
   assert.equal(formatLagosPublishInput(stamp), "2026-12-01T08:15");
   assert.equal(parseLagosPublishTime("2026-02-31T08:15"), undefined);
 });
+
+
+test("one paste parses metadata, narration and visual notes into the manual scene editor", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const pasted = [
+    "Title: My AI YouTube Engine",
+    "Duration: 5 minutes",
+    "Format: 9:16",
+    "Thumbnail: I Built This!",
+    "Description: A step by step guide.",
+    "Tags: AI, Tutorial, YouTube",
+    "",
+    "## Scene 1 — Hook",
+    "Narration:",
+    "Imagine making a video using only your phone. Let me show you how it works.",
+    "Visuals:",
+    "A phone displaying an AI dashboard",
+    "",
+    "## Scene 2 — Build",
+    "Narration:",
+    "Open GitHub and create a new repository. Then connect your project to a deployment service.",
+    "B-roll:",
+    "A developer working at a laptop",
+  ].join("\n");
+  const { drafts } = parseFullScript(pasted, { format: "16:9" });
+  assert.equal(drafts.length, 1);
+  const draft = drafts[0];
+  assert.equal(draft.format, "9:16");
+  assert.equal(draft.duration_seconds, 300);
+  assert.equal(draft.title, "My AI YouTube Engine");
+  assert.equal(draft.thumbnail_title, "I Built This!");
+  assert.deepEqual(draft.tags, ["AI", "Tutorial", "YouTube"]);
+  assert.equal(draft.description, "A step by step guide.");
+  assert.equal(draft.scenes.length, 2);
+  assert.match(draft.scenes[0].narration, /Imagine making a video/);
+  assert.ok(!draft.scenes.some(s => /A phone displaying/.test(s.narration)));
+  assert.match(draft.scenes[0].visual_notes || "", /phone displaying/);
+  assert.equal(normalizeDraft(draft).scenes[0].visual_notes, draft.scenes[0].visual_notes);
+  assert.match(draft.scenes[1].search_queries.join(" "), /developer working/);
+});
+
+test("long one-paste tutorial preserves every narration word and automatically creates successive parts", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const sentences = Array.from({ length: 210 }, (_, i) =>
+    "Step " + i + " explains one practical feature and shows precisely how viewers can follow along using their phone.");
+  const script = "Title: Build a YouTube Engine\nDuration: 20 minutes\n\n## Scene 1 — Tutorial\nNarration:\n" + sentences.join(" ");
+  const { drafts, notes } = parseFullScript(script);
+  assert.equal(drafts.length, 2);
+  assert.match(notes.join(" "), /without repasting/i);
+  assert.ok(drafts.every(d => d.duration_seconds <= 720 && d.scenes.length <= 60));
+  const actual = drafts.flatMap(d => d.scenes.map(s => s.narration)).join(" ").replace(/\s+/g, " ").trim();
+  assert.equal(actual, sentences.join(" "));
+  assert.match(drafts[0].title, /Part 1 of 2/);
+  assert.match(drafts[1].title, /Part 2 of 2/);
+});
+
+test("JSON complete-draft imports keep saved settings and visual directions", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const script = JSON.stringify({ title: "Clinical innovation", format: "9:16", duration_seconds: 90,
+    thumbnail_title: "Learn AI", scenes: [{ narration: "Doctors evaluate the new device.",
+      visual_notes: "Display a clinical laboratory", search_queries: ["clinical lab"] }] });
+  const { drafts } = parseFullScript(script);
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].format, "9:16");
+  assert.equal(drafts[0].duration_seconds, 90);
+  assert.deepEqual(drafts[0].scenes[0].search_queries, ["clinical lab"]);
+  assert.equal(drafts[0].scenes[0].visual_notes, "Display a clinical laboratory");
+  assert.equal(parseFullScript(script, { format: "16:9", formatChosen: true }).drafts[0].format, "16:9");
+  assert.throws(() => parseFullScript('{"unrelated":true}'), /scenes array/);
+});
+
+test("plain paragraphs are accepted without inventing extra spoken visual instructions", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const { drafts } = parseFullScript("First we open GitHub and make a repository.\n\nNext we connect the app to our database.");
+  assert.equal(drafts[0].scenes.length, 1);
+  assert.match(drafts[0].scenes[0].narration, /Next we connect/);
+  assert.ok(drafts[0].scenes[0].search_queries.length);
+});
