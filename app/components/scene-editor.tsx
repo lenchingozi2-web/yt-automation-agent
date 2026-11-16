@@ -2,9 +2,9 @@ import { ArrowDown, ArrowUp, Clapperboard, LoaderCircle, Plus, RefreshCw, Trash2
 import type { Draft, Scene } from "@/src/lib/studio";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
-export function SceneEditor({ draft, change, busy, close, save, regenerate, feedback }: {
+export function SceneEditor({ draft, change, busy, close, save, regenerate, feedback, importProgress }: {
   draft: Draft; change: (draft: Draft) => void; busy: string | null; close: () => void; save: () => void;
-  regenerate: () => void; feedback: Feedback | null;
+  regenerate: () => void; feedback: Feedback | null; importProgress?: { index: number; total: number };
 }) {
   const working = busy === "save" || busy === "regenerate";
   function update(patch: Partial<Draft>) { change({ ...draft, ...patch }); }
@@ -24,11 +24,12 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
 
   return <Modal titleId="editor-title" close={safeClose} className="editor-dialog">
     <header className="dialog-header">
-      <div><p>{draft.scenes.length} {draft.scenes.length === 1 ? "scene" : "scenes"}</p><h2 id="editor-title">Scene editor</h2></div>
+      <div><p>{draft.scenes.length} {draft.scenes.length === 1 ? "scene" : "scenes"}{importProgress ? " · Part " + importProgress.index + " of " + importProgress.total : ""}</p><h2 id="editor-title">Scene editor</h2></div>
       <button className="icon-button" disabled={working} aria-label="Close editor" onClick={safeClose}><X size={20} /></button>
     </header>
     <form className="editor-form" onSubmit={(event) => { event.preventDefault(); save(); }}>
       <div className="editor-body">
+        {importProgress && <p className="review-note">Your complete script has been imported. This part is editable; after you queue it, the next part opens automatically. You do not have to paste again.</p>}
         <fieldset disabled={working} className="editor-details">
           <label className="editor-wide">Title<input required maxLength={100} value={draft.title} onChange={(event) => update({ title: event.target.value })} /></label>
           <label>Format<select value={draft.format} onChange={(event) => update({ format: event.target.value as Draft["format"] })}>
@@ -58,6 +59,7 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
             {scene.chapter_title && <label>Chapter title<input value={scene.chapter_title} maxLength={80}
               onChange={(event) => updateScene(index, { chapter_title: event.target.value })} /></label>}
             <label>Narration<textarea rows={3} required value={scene.narration} onChange={(event) => updateScene(index, { narration: event.target.value })} /></label>
+            {scene.visual_notes !== undefined && <label>Visual directions <small>Not spoken aloud; review search terms below</small><textarea rows={2} value={scene.visual_notes} onChange={(event) => updateScene(index, { visual_notes: event.target.value })} /></label>}
             <label>Footage search terms <small>Separated by commas</small><input value={scene.search_queries.join(",")}
               onChange={(event) => updateScene(index, { search_queries: event.target.value.split(",") })} /></label>
           </section>)}
@@ -69,11 +71,11 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
       <footer className="dialog-footer editor-footer">
         <Notice feedback={feedback} />
         <div>
-          <button type="button" className="button button-secondary" disabled={working} onClick={regenerate}>
+          {!importProgress && <button type="button" className="button button-secondary" disabled={working} onClick={regenerate}>
             {busy === "regenerate" ? <LoaderCircle className="spinner" size={17} /> : <RefreshCw size={17} />} Regenerate script
-          </button>
+          </button>}
           <button className="button button-primary" disabled={working || !draft.scenes.length}>
-            {busy === "save" ? <LoaderCircle className="spinner" size={17} /> : <Clapperboard size={17} />} {busy === "save" ? "Queuing…" : "Approve & render"}
+            {busy === "save" ? <LoaderCircle className="spinner" size={17} /> : <Clapperboard size={17} />} {busy === "save" ? "Queuing…" : importProgress ? "Approve & render this part" : "Approve & render"}
           </button>
         </div>
       </footer>
