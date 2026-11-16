@@ -940,6 +940,7 @@ def process(video: dict[str, Any], supabase) -> None:
     if parent:
         parent_row = supabase.table("videos").select("*").eq("id", revision["parent_id"]).limit(1).execute().data or []
         parent_audio = stored_metadata(parent_row[0]) if parent_row else {}
+    narration_engine = parent_audio.get("narration_engine") or "edge"
     narration_voice = parent_audio.get("narration_voice") or VOICE
     narration_rate = parent_audio.get("narration_rate") or RATE
     narration_pitch = parent_audio.get("narration_pitch") or ("+0Hz" if parent else PITCH)
@@ -947,22 +948,34 @@ def process(video: dict[str, Any], supabase) -> None:
                      if (narration_rate, narration_pitch) != (RATE, PITCH) else {})
 
     if not parent or mode == "rewrite":
-        voices_to_try = [narration_voice] if parent else list(dict.fromkeys(filter(None, [VOICE, BACKUP_VOICE])))
-        for index, voice in enumerate(voices_to_try):
+        from studio_speech_backup import VOICE as GEMINI_VOICE, available as gemini_available
+        # Switching providers restarts the ENTIRE narration, preventing audible
+        # mid-video changes in speaker, pitch or accent.
+        if parent:
+            voices_to_try = [(narration_engine, narration_voice)]
+        else:
+            voices_to_try = [("edge", VOICE)]
+            if gemini_available():
+                voices_to_try.append(("gemini", GEMINI_VOICE))
+            if BACKUP_VOICE and BACKUP_VOICE != VOICE:
+                voices_to_try.append(("edge", BACKUP_VOICE))
+        for index, (engine, voice) in enumerate(voices_to_try):
             audio_plan = []
             try:
                 for number, scene in enumerate(selected, 1):
                     prefix = "Recovering narration" if index else "Preparing narration"
-                    save_fields(supabase, video, progress_note=f"{prefix} {number} of {len(selected)}")
+                    save_fields(supabase, video, progress_note=f"{prefix} {number} of {len(selected)} ({engine} voice)")
                     args = (voice,) if voice != VOICE else ()
-                    audio, srt = make_audio(scene, directory, *args, **voice_options)
+                    provider_options = {"engine": engine} if engine != "edge" else voice_options
+                    audio, srt = make_audio(scene, directory, *args, **provider_options)
                     audio_plan.append((audio, srt, ffprobe_duration(audio)))
-                narration_voice = voice
+                narration_engine, narration_voice = engine, voice
                 break
             except NarrationUnavailable:
                 if index == len(voices_to_try) - 1:
                     raise
-                print("[narration] Switching the full render to the backup neural voice.", flush=True)
+                next_engine, _ = voices_to_try[index + 1]
+                print(f"[narration] {engine} speech unavailable; restarting all scenes with {next_engine} neural speech to keep the voice consistent.", flush=True)
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
                                     ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else (1800 if not parent else None),
                                     words=sum(len(scene["narration"].split()) for scene in selected))
@@ -982,7 +995,8 @@ def process(video: dict[str, Any], supabase) -> None:
         save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
         if parent and mode == "audio":
             args = (narration_voice,) if narration_voice != VOICE else ()
-            audio, _ = make_audio(scene, directory, *args, **voice_options)
+            audio, _ = make_audio(scene, directory, *args,
+                                  **({"engine": narration_engine} if narration_engine != "edge" else voice_options))
             duration = float(entry["duration"])
             voice = directory / f"revised_audio_{number:02d}.wav"
             prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
@@ -1092,7 +1106,8 @@ def process(video: dict[str, Any], supabase) -> None:
                 thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
                 actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
                 completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v9", scene_timeline=timeline,
-                youtube_chapters=chapters, narration_voice=narration_voice, narration_rate=narration_rate, narration_pitch=narration_pitch,
+                youtube_chapters=chapters, narration_voice=narration_voice, narration_engine=narration_engine,
+                narration_rate=narration_rate, narration_pitch=narration_pitch,
                 publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
                 publish_requested=False, publish_approved_at=None, publish_approved_by=None,
                 progress_note="MP4 and thumbnail ready for review.", error_message=None)
