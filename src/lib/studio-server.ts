@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { normalizeDraft, toSafeMessage, type Draft, type VideoRevision } from "@/src/lib/studio";
+import { MAX_VIDEO_SCENES, MAX_VIDEO_SECONDS, MAX_VIDEO_MINUTES, MIN_VIDEO_SECONDS } from "@/src/lib/studio-limits";
 
 export class StudioAuthError extends Error { constructor(message = "Please sign in to use Studio.") { super(message); } }
 const url = () => process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "";
@@ -70,9 +71,9 @@ export async function safeInsertVideo(client: SupabaseClient, approved: unknown,
   if (!draft.title.trim() || draft.scenes.length < 1 || draft.scenes.some(scene => !scene.narration.trim())) {
     throw new StudioRequestError("A title and narration for every scene are required.", 400);
   }
-  if (draft.scenes.length > 60) throw new StudioRequestError("Maximum 60 scenes per video.", 400);
-  if (draft.duration_seconds < 60 || draft.duration_seconds > 720) {
-    throw new StudioRequestError("Set a target duration between 60 and 720 seconds.", 400);
+  if (draft.scenes.length > MAX_VIDEO_SCENES) throw new StudioRequestError(`Maximum ${MAX_VIDEO_SCENES} scenes per video.`, 400);
+  if (!Number.isFinite(draft.duration_seconds) || draft.duration_seconds < MIN_VIDEO_SECONDS || draft.duration_seconds > MAX_VIDEO_SECONDS) {
+    throw new StudioRequestError(`Set a target duration between 1 and ${MAX_VIDEO_MINUTES} minutes.`, 400);
   }
   const { data: stored, error: storageError } = await client.storage.from(process.env.SUPABASE_VIDEO_BUCKET || "renders").list("", { limit: 1000 });
   if (!storageError && stored && stored.reduce((sum, obj) => sum + (Number(obj.metadata?.size) || 0), 0) >= 800 * 1024 * 1024) {
