@@ -35,7 +35,7 @@ export function evaluateTopic(option: TopicOption, sources: TopicSource[], recen
     (option.hook?.length ? 2 : 0) - similarity * 55 - Math.max(0, unique.length - primary.length) * 2;
   return { eligible, score, primaryCount: primary.length, recentEvidence, similarity };
 }
-export function rankTopicOptions<T extends TopicOption>(items: { option: T; sources: TopicSource[] }[],
+export function rankTopicOptions<T extends TopicOption, S extends TopicSource>(items: { option: T; sources: S[] }[],
                                                         recent: string[], year?: number) {
   return items.map((item) => ({ ...item, quality: evaluateTopic(item.option, item.sources, recent, year) }))
     .filter((item) => item.quality.eligible)
