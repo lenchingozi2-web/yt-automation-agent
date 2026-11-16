@@ -315,7 +315,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     }
   }
   const storyContext = briefing ? { references: briefing.references, leadTitle: evidence[0].title } : undefined;
-  const count = Math.max(4, Math.min(60, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
+  const count = Math.max(4, Math.min(120, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
   const totalTarget = Math.round(duration * 2.25);
   const perScene = Math.round(totalTarget / count);
   const lower = Math.max(14, perScene - 3);
@@ -344,15 +344,23 @@ export async function researchedDraft(brief: string, duration: number, format: D
   ].join("\n");
   const writeDraft = async (correction: string) => {
     if (duration < 300) return await modelJson(prompt + correction, Math.max(4200, Math.ceil(duration * 22)), 24000);
-    const first = Math.ceil(count / 3);
-    const second = Math.ceil((count - first) / 2);
-    const chapters = [
-      { count: first, purpose: "Introduce the central question, explain the lead report's background and methods in plain language, and name its publisher when describing the study. Supply title, description, tags and thumbnail_title for the whole video." },
-      { count: second, purpose: "Continue directly into the documented findings, their limitations and how the supporting evidence adds context. Open on the findings. Omit a fresh introduction and any closing call to action." },
-      { count: count - first - second, purpose: "Show viewers how to apply or think through the findings with several distinct clearly hypothetical examples. Give concrete steps, explain their limits and close the video. End with a short takeaway and a transition to more LenxiQ videos, so an end screen can appear during the final scene. Avoid repeating the study summary." },
-    ];
+    // Long videos are written as successive chapters of ONE coherent script,
+    // not as independent video productions. Small chapters fit provider output limits.
+    const chapterSize = duration > 900 ? 15 : Math.ceil(count / 3);
+    const chapters = [];
+    for (let offset = 0; offset < count; offset += chapterSize) {
+      const chapterIndex = chapters.length;
+      const last = offset + chapterSize >= count;
+      const purpose = chapterIndex === 0
+        ? "Introduce the original question, provide the key context and methods, and identify the evidence. Include the whole-video title, description, tags and thumbnail headline."
+        : last
+          ? "Complete the practical applications, limitations and final takeaway. Conclude the whole video once. Avoid a second introduction."
+          : "Continue the explanation with new verified evidence, limitations, practical reasoning and distinct examples. Build directly on what has already been explained; do not restart the video.";
+      chapters.push({ count: Math.min(chapterSize, count - offset), purpose });
+    }
     const chapterPrompt = prompt.replace(/^Plan around \d+ scenes.*$/m, "");
     const segments = [];
+    let priorContext = "";
     for (const [index, chapter] of chapters.entries()) {
       const instruction = [
         chapterPrompt,
@@ -360,16 +368,21 @@ export async function researchedDraft(brief: string, duration: number, format: D
         "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
         "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
         ...(index === 0 ? ["Also return viewer_prompt as one optional sentence under 25 words inviting viewers to like and subscribe, tied to this video's subject or payoff. Use a casual tone and make no factual claims. Keep it out of the scenes."] : []),
+        ...(priorContext ? ["Continuity from the previous chapter (do not repeat these lines; continue naturally): " + priorContext] : []),
         correction,
       ].join("\n");
       const budget = Math.max(2800, chapter.count * 210);
       const chapterWords = (value: Json) => list(value.scenes).reduce<number>((total, scene) => total + words(usableNarration(object(scene))), 0);
       const first = await modelJson(instruction, budget, 30000);
       const enough = chapterWords(first) >= chapter.count * perScene * .76 && (index !== 0 || text(first.title));
-      segments.push(enough ? first : await modelJson(instruction + `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${chapter.count * perScene} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000));
+      const completed = enough ? first : await modelJson(instruction +
+        `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${chapter.count * perScene} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000);
+      segments.push(completed);
+      priorContext = list(completed.scenes).slice(-2)
+        .map((entry) => usableNarration(object(entry))).filter(Boolean).join(" ").slice(-800);
     }
     return { ...segments[0], scenes: segments.flatMap((segment, chapter) => list(segment.scenes).map((scene, index) => ({
-      ...object(scene), chapter_title: index === 0 ? text(segment.chapter_title) || ["The question", "What the evidence shows", "Putting it into practice"][chapter] : undefined,
+      ...object(scene), chapter_title: index === 0 ? text(segment.chapter_title) || (chapter === 0 ? "The question" : chapter === segments.length - 1 ? "Putting it into practice" : "Continuing the explanation") : undefined,
     }))).map((scene, i) => ({
       ...scene, scene_number: i + 1,
     })) };
@@ -387,7 +400,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
       JSON.stringify(duration >= 300 ? { issues: problem } : { issues: problem, previous: prior }) : "";
     let raw: Json;
     if (auditedDraft && problem && duration >= 300) {
-      const numbers = [...new Set([...problem.matchAll(/\bscene\s+#?(\d{1,2})\b/gi)].map((match) => Number(match[1])))];
+      const numbers = [...new Set([...problem.matchAll(/\bscene\s+#?(\d{1,3})\b/gi)].map((match) => Number(match[1])))];
       const repair = await modelJson([
         EDITORIAL,
         "Fix every audit finding below. Return JSON with scenes (only changed scenes) and any changed title, thumbnail_title, or description.",
@@ -419,7 +432,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     const draft = { ...normalizeDraft({ ...raw, sources: sourceList(evidence) }), scenes, format, duration_seconds: duration };
     try {
       if (!text(raw.title)) throw new DraftStructureError("title", "Supply a clear video title.");
-      if (draft.scenes.length < 3 || draft.scenes.length > 60) throw new DraftStructureError("scene_count", "Provide between 3 and 60 narrated scenes.");
+      if (draft.scenes.length < 3 || draft.scenes.length > 160) throw new DraftStructureError("scene_count", "Provide between 3 and 160 narrated scenes.");
       if (AUTOPICK.test(brief) && recent.some((title) => title.trim().toLowerCase() === draft.title.trim().toLowerCase())) {
         throw new DraftStructureError("title", "Choose a title and angle distinct from the previous productions.");
       }
