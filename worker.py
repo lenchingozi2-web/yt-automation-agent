@@ -706,6 +706,8 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
         scenes = script.get("scenes", metadata.get("scenes", []))
     if not isinstance(scenes, list) or not scenes:
         raise ValueError("This video has no scenes; submit it from Scene Editor.")
+    if len(scenes) > 160:
+        raise ValueError("This production contains more than 160 logical scenes. Shorten or combine scenes before rendering.")
     first_metadata = decode(scenes[0].get("_studio")) if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict) else {}
     merged = {**first_metadata, **metadata, **script, **{k: v for k, v in row.items() if v is not None and v != ""}}
     ratios = (first_metadata.get("format"), first_metadata.get("aspect_ratio"),
@@ -714,7 +716,7 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     target = first_metadata.get("duration_seconds") or first_metadata.get("duration") or merged.get("duration_seconds") or merged.get("duration")
     if target is not None:
         seconds = float(target)
-        if not math.isfinite(seconds) or seconds <= 0 or seconds > 720:
+        if not math.isfinite(seconds) or seconds < 60 or seconds > 1800:
             raise ValueError("The saved video duration is invalid.")
         merged["duration_seconds"] = seconds
     result = []
@@ -851,7 +853,7 @@ def storage_preview(path: Path, timeline=()) -> Path:
              *video_encoder(), "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
              "-bufsize", f"{bitrate * 2}k",
              *keyframe_options([entry["duration"] for entry in timeline]),
-             "-c:a", "copy", "-movflags", "+faststart", str(preview)], timeout=1200)
+             "-c:a", "copy", "-movflags", "+faststart", str(preview)], timeout=max(1200, int(seconds * 3)))
         if preview.stat().st_size < OBJECT_LIMIT:
             verify_render_geometry(preview, (target_width, target_height),
                                    sum(item["duration"] for item in timeline) or None)
@@ -962,7 +964,7 @@ def process(video: dict[str, Any], supabase) -> None:
                     raise
                 print("[narration] Switching the full render to the backup neural voice.", flush=True)
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
-                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else None,
+                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else (1800 if not parent else None),
                                     words=sum(len(scene["narration"].split()) for scene in selected))
     if mode != "audio":
         runtime = sum(float(item["duration"]) for item in original_timeline) if parent else sum(durations)
