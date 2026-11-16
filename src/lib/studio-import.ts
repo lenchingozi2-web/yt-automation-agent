@@ -31,7 +31,7 @@ function keywords(narration: string, visuals:string[]): string[] {
 }
 function readContent(content:string): {draft:Draft; seconds:number; notes:string[]; formatFound:boolean} {
   let title="",description="",thumbnail="",format:Draft["format"]="16:9",formatFound=false,seconds=0,timeline=0;
-  let tags:string[]=[],mode:"speech"|"visual"|"skip"="speech",started=false,inFence=false,foundCode=false;
+  let tags:string[]=[],mode:"speech"|"visual"|"skip"|"description"="speech",started=false,inFence=false,foundCode=false;
   let current:Block={lines:[],visuals:[]};
   const blocks:Block[]=[];
   const flush=()=>{if(current.lines.some(Boolean))blocks.push(current);current={lines:[],visuals:[]};};
@@ -41,11 +41,12 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     if(inFence)continue;
     if(!line){if(mode==="speech")current.lines.push("");continue;}
     const clean=line.replace(/^#{1,6}\s*/,"").replace(/\*\*/g,"").trim();
+    if (/^(?:-{3,}|_{3,}|end of script)$/i.test(clean)) continue;
     const meta=/^(?:video\s+)?(title|description|thumbnail(?:\s+(?:title|headline|text))?|tags|keywords|format|aspect\s*ratio|orientation|duration|length)\s*:\s*(.*)$/i.exec(clean);
     if(meta&&!started){
       const key=meta[1].toLowerCase(),v=meta[2].trim();
       if(key==="title")title=v;
-      else if(key==="description")description=v;
+      else if(key==="description"){description=v;mode="description";}
       else if(key.startsWith("thumbnail"))thumbnail=v;
       else if(key==="tags"||key==="keywords")tags=v.split(/[,;]/).map(x=>x.trim()).filter(Boolean);
       else if(key==="duration"||key==="length")seconds=duration(v);
@@ -85,6 +86,7 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     if(/^\[(visual|b-roll|footage|camera|on.screen)/i.test(line)){current.visuals.push(line.replace(/^\[|\]$/g,""));continue;}
     if(mode==="speech"){current.lines.push(clean.replace(/^[-*]\s+/,""));started=true;}
     else if(mode==="visual")current.visuals.push(clean.replace(/^[-*]\s+/,""));
+    else if(mode==="description")description+=(description?"\n":"")+clean;
   }
   flush();
   const scenes:Scene[]=[];
@@ -108,7 +110,7 @@ function singleDraft(draft: Draft, requestedSeconds: number): Draft {
     throw Error("This script contains " + draft.scenes.length + " scenes. The limit is " + MAX_VIDEO_SCENES + " scenes in a single video. Shorten or combine scene headings; nothing has been removed.");
   if (requestedSeconds > MAX_VIDEO_SECONDS)
     throw Error("This script requests " + Math.ceil(requestedSeconds / 60) + " minutes. Studio's current single-video maximum is " + MAX_VIDEO_MINUTES + " minutes. No part of your script was queued or discarded.");
-  const minimumSpeechSeconds = Math.ceil(spokenWords * 60 / 225);
+  const minimumSpeechSeconds = Math.ceil(spokenWords * 60 / 185);
   if (minimumSpeechSeconds > MAX_VIDEO_SECONDS)
     throw Error("This script has " + spokenWords + " words, too many to narrate naturally within " + MAX_VIDEO_MINUTES + " minutes. Please shorten it; the importer will not cut or split your content.");
   const seconds = Math.max(MIN_VIDEO_SECONDS, requestedSeconds, minimumSpeechSeconds);
@@ -146,8 +148,8 @@ export function parseFullScript(input:string,options:ImportOptions={}):ParsedImp
   if(options.format&&(!found||options.formatChosen))draft.format=options.format;
   const wordCount=draft.scenes.reduce((n,s)=>n+count(s.narration),0);
   const selected=options.durationSeconds||seconds||Math.ceil(wordCount*60/145);
-  if(options.durationSeconds&&selected<Math.ceil(wordCount*60/225))
-    notes.push("Duration extended to preserve every spoken word.");
+  if(selected<Math.ceil(wordCount*60/185))
+    notes.push("The requested duration is too short for comfortable delivery. Studio extended it to preserve every spoken word.");
   const single = singleDraft(draft, selected);
   const estimatedSeconds = Math.ceil(wordCount * 60 / 145);
   if (estimatedSeconds > single.duration_seconds * 1.2)
