@@ -24,7 +24,11 @@ FILES = {
     "voices-v1.0.bin": ("bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d", 20_000_000),
 }
 DEFAULT_VOICE = "am_michael"
-DEFAULT_SPEED = 1.0
+DEFAULT_SPEED = 1.06
+SENTENCE_PAUSE = 0.17
+CLAUSE_PAUSE = 0.055
+FRAGMENT_PAUSE = 0.07
+VOICE_PROFILE = "studio-natural-v2"
 VOICE_ALLOWLIST = {
     "af_heart", "af_bella", "af_sarah", "af_nicole", "af_aoede", "af_kore",
     "am_michael", "am_fenrir", "am_puck", "bf_emma", "bf_isabella", "bm_george",
@@ -159,6 +163,21 @@ def _boundaries(words: list[str], seconds: float, timings=None) -> list[tuple[fl
     return approximate_boundaries(" ".join(words), seconds)
 
 
+def speech_speed() -> float:
+    """Validated pace shared by synthesis and cache fingerprints."""
+    try:
+        speed = float(os.getenv("STUDIO_KOKORO_SPEED", str(DEFAULT_SPEED)))
+    except ValueError as error:
+        raise ValueError("STUDIO_KOKORO_SPEED must be a decimal number") from error
+    if not math.isfinite(speed) or not .85 <= speed <= 1.15:
+        raise ValueError("Kokoro narration speed must remain between 0.85 and 1.15")
+    return speed
+
+
+def voice_profile() -> str:
+    return f"{VOICE_PROFILE}:speed={speech_speed():.3f}:pause={SENTENCE_PAUSE:.3f}/{CLAUSE_PAUSE:.3f}/{FRAGMENT_PAUSE:.3f}"
+
+
 def generate(text: str, wav: Path, voice: str = DEFAULT_VOICE,
              *, directory: Path = ROOT) -> tuple[list[tuple[float, float, str]], float]:
     if voice not in VOICE_ALLOWLIST:
@@ -167,12 +186,7 @@ def generate(text: str, wav: Path, voice: str = DEFAULT_VOICE,
         raise ValueError("Empty narration")
     import numpy as np
 
-    try:
-        speed = float(os.getenv("STUDIO_KOKORO_SPEED", str(DEFAULT_SPEED)))
-    except ValueError:
-        speed = DEFAULT_SPEED
-    if not .85 <= speed <= 1.15:
-        raise ValueError("Kokoro narration speed must remain between 0.85 and 1.15")
+    speed = speech_speed()
     model = _model(str(directory))
     spoken = []
     all_timings = []
@@ -182,7 +196,7 @@ def generate(text: str, wav: Path, voice: str = DEFAULT_VOICE,
         try:
             audio, rate, timings = model.create_timed(
                 fragment, voice=voice, speed=speed, lang="en-us",
-                sentence_pause=.22, clause_pause=.08, continuous=True,
+                sentence_pause=SENTENCE_PAUSE, clause_pause=CLAUSE_PAUSE, continuous=True,
             )
         except Exception as error:
             raise RuntimeError(f"Offline Kokoro failed synthesizing narration fragment {index + 1}") from error
@@ -194,7 +208,7 @@ def generate(text: str, wav: Path, voice: str = DEFAULT_VOICE,
         sample_rate = int(rate)
         if index:
             # One subtle between-fragment pause. No voice switching.
-            silence = np.zeros(int(sample_rate * .1), dtype=np.float32)
+            silence = np.zeros(int(sample_rate * FRAGMENT_PAUSE), dtype=np.float32)
             spoken.append(silence)
             elapsed += len(silence) / sample_rate
         fragment_seconds = len(audio) / sample_rate

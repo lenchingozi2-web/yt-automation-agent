@@ -754,3 +754,12 @@ class PipelineRegression(unittest.TestCase):
         self.assertTrue(publication_due(row, "credential", now))
 
 if __name__=='__main__': unittest.main()
+
+class MasterCompressionQualityRegression(unittest.TestCase):
+    def test_master_uses_medium_encoding_without_changing_timestamps(self):
+        from worker import video_encoder
+        args = video_encoder()
+        self.assertEqual(args[args.index("-preset") + 1], "medium")
+        self.assertEqual(args[args.index("-crf") + 1], "18")
+        self.assertEqual(args[args.index("-bf") + 1], "0")
+        self.assertEqual(args[args.index("-pix_fmt") + 1], "yuv420p")

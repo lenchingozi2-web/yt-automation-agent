@@ -162,6 +162,12 @@ function Preview({ video, close, approve, revise, retryThumbnail, promote, busy,
         setFailed(false);
         setPlayerVersion((version) => version + 1);
       }}>Retry playback</button> or use Download MP4.</div>}
+      {video.video_url && video.preview_resolution && video.preview_resolution < 1080 && <p className="review-note" role="status">
+        <strong>Review copy: {video.preview_resolution}p.</strong> The browser preview is storage-compressed.
+        {video.has_full_quality_master
+          ? " The original-resolution master is stored separately for your approved YouTube upload. Downloading this review copy does not download the full-quality master."
+          : " Review its resolution before approving any upload."}
+      </p>}
       {!!video.scene_times?.length && video.video_url && <label className="preview-scenes">Jump to scene
         <select value="" onChange={(event) => { if (player.current && event.target.value) player.current.currentTime = Number(event.target.value); }}>
           <option value="">Choose a scene</option>
@@ -228,7 +234,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, promote, busy,
         {video.youtube_url && <button type="button" className="button button-secondary" onClick={promote}>
           <Megaphone size={16} /> Promote this video
         </button>}
-        {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download MP4</a>}
+        {video.video_url && <a className="button button-secondary" href={downloadUrl(video)} download><Download size={17} /> Download review MP4</a>}
         {youtubeEdit && <a className="button button-secondary" href={youtubeEdit} target="_blank" rel="noreferrer">YouTube Studio <ArrowUpRight size={17} /></a>}
         {editable && !!video.scenes.length && video.video_url && <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
           setEditing(!editing); setAttempted(false); setConfirming(false); if (!editing) player.current?.pause();

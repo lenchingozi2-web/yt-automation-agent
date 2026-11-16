@@ -14,13 +14,13 @@ import wave
 
 from studio_retry import TemporaryRenderError
 from studio_speech_backup import SpeechProviderError, generate as generate_gemini_speech
-from studio_kokoro import generate as generate_kokoro_speech
+from studio_kokoro import generate as generate_kokoro_speech, voice_profile as kokoro_voice_profile
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
 RATE = os.getenv("EDGE_TTS_RATE", "+3%")
 PITCH = os.getenv("EDGE_TTS_PITCH", "-3Hz")
-AUDIO_VERSION = "natural-phrases-v5"
+AUDIO_VERSION = "natural-phrases-v6"
 MIN_NARRATION_WPM = 140
 
 
@@ -257,7 +257,8 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
         raise ValueError(f"Scene {number} has no narration")
     if engine not in {"kokoro", "edge", "gemini"}:
         raise ValueError("Unknown narration engine")
-    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, engine, voice, rate, pitch, scene.get("format"), text]).encode()).hexdigest()
+    profile = kokoro_voice_profile() if engine == "kokoro" else ""
+    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, engine, voice, rate, pitch, scene.get("format"), profile, text]).encode()).hexdigest()
     audio = directory / f"scene_{number:02d}_{fingerprint[:16]}.wav"
     srt = audio.with_suffix(".srt")
     manifest = audio.with_suffix(".audio.json")

@@ -343,7 +343,9 @@ def verify_render_geometry(path: Path, size: tuple[int, int] | None = None, seco
 
 
 def video_encoder():
-    return ["-c:v", "libx264", "-threads", "2", "-preset", "fast", "-crf", "18",
+    # Better quality per bit without increasing the long-form size limit.
+    # Preserve B-frame and timestamp behavior for frame-accurate stitching.
+    return ["-c:v", "libx264", "-threads", "2", "-preset", "medium", "-crf", "18",
             "-bf", "0", "-pix_fmt", "yuv420p", "-video_track_timescale", "90000"]
 
 

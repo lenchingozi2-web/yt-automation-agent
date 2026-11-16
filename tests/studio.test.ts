@@ -231,9 +231,9 @@ test("a long draft gets one spoken CTA at a chapter transition without changing 
   })) });
   const result = addViewerPrompt(draft, "If this study breakdown helped, like the video and subscribe for more.");
   assert.equal(result.scenes.length, 13);
-  assert.match(result.scenes[4].narration, /like the video and subscribe/);
-  assert.deepEqual(result.scenes[4].source_ids, []);
-  assert.equal(result.scenes[5].chapter_title, "A study chapter");
+  assert.match(result.scenes[10].narration, /like the video and subscribe/);
+  assert.deepEqual(result.scenes[10].source_ids, []);
+  assert.equal(result.scenes[11].chapter_title, undefined);
   assert.equal(addViewerPrompt(result).scenes.length, 13);
   assert.equal(addViewerPrompt({ ...draft, duration_seconds: 90 }).scenes.length, 12);
 });
@@ -431,4 +431,30 @@ test("topic scout rejects unsupported sensational pitches and near-duplicate pas
     { option: strong, sources: primary },
   ], []);
   assert.deepEqual(ranked.map(x => x.option.angle), [strong.angle]);
+});
+
+test("automatic CTA arrives after the content, stays topic-aware and never duplicates", async () => {
+  const { addViewerPrompt } = await import("../src/lib/studio-growth.ts");
+  const draft = normalizeDraft({ duration_seconds: 1200, title: "How science works", tags: ["Medical Research"],
+    scenes: Array.from({ length: 20 }, (_, index) => ({
+      narration: "This scene explains a distinct finding from a study.",
+      chapter_title: index === 0 || index === 16 ? "New chapter" : undefined,
+      source_ids: [1], search_queries: ["laboratory procedures"]
+    }))
+  });
+  const result = addViewerPrompt(draft);
+  assert.equal(result.scenes.length, 21);
+  assert.match(result.scenes[16].narration, /medical research/i);
+  assert.match(result.scenes[16].narration, /subscribe to LenxiQ/i);
+  assert.deepEqual(result.scenes[16].source_ids, []);
+  assert.equal(addViewerPrompt(result).scenes.length, 21);
+  assert.equal(result.scenes[0].narration, draft.scenes[0].narration);
+  assert.equal(result.scenes.at(-1)?.narration, draft.scenes.at(-1)?.narration);
+});
+test("video metadata distinguishes original master from compressed browser preview", () => {
+  const video = normalizeVideo({ title: "Test", status: "completed",
+    scenes: [{ narration: "Hello", _studio: { preview_resolution: 480,
+      upload_master: { parts: 12, sha256: "example" } } }] });
+  assert.equal(video.preview_resolution, 480);
+  assert.equal(video.has_full_quality_master, true);
 });

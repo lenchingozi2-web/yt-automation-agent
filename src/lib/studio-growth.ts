@@ -1,7 +1,12 @@
 import type { Draft, StudioVideo } from "./studio.ts";
 
 const existingPrompt = /\b(?:like (?:this|the) video|hit (?:the )?like|(?:like and |and )subscribe|subscribe (?:to (?:this|the|our|my) channel|to LenxiQ|for more)|give (?:this|it) a like)\b/i;
-const CTA_FALLBACK = "If this breakdown helped, give the video a like and subscribe to LenxiQ for more stories like this.";
+function fallbackPrompt(draft: Draft) {
+  const niche = (draft.tags || []).find((tag) => /^[a-z0-9][a-z0-9 -]{3,30}$/i.test(tag.trim()))?.trim().toLowerCase();
+  return niche
+    ? `If you'd enjoy more useful ${niche} breakdowns, give this video a like and subscribe to LenxiQ.`
+    : "If this gave you something useful to try, like this video and subscribe to LenxiQ for the next walkthrough.";
+}
 
 export function withoutViewerPrompt(narration: string) {
   if (!existingPrompt.test(narration)) return narration;
@@ -12,9 +17,11 @@ export function addViewerPrompt(draft: Draft, suggestion?: unknown): Draft {
   if (draft.duration_seconds < 300 || draft.scenes.length < 6 || draft.scenes.some(({ narration }) => existingPrompt.test(narration))) return draft;
   const proposed = typeof suggestion === "string" ? suggestion.replace(/\s+/g, " ").trim() : "";
   const narration = proposed && proposed.split(" ").length <= 25 && /\b(?:hit|give|leave|tap|drop|video a)\b[^.!?]*\blike\b|\blike (?:this|the) video\b/i.test(proposed)
-    && /\bsubscribe\b/i.test(proposed) && !/[<>]|https?:|\d/.test(proposed) ? proposed : CTA_FALLBACK;
-  const boundary = draft.scenes.findIndex((scene, index) => index >= draft.scenes.length * .25 && index <= draft.scenes.length * .60 && scene.chapter_title);
-  const at = boundary > 0 ? boundary : Math.round(draft.scenes.length * .42);
+    && /\bsubscribe\b/i.test(proposed) && !/[<>]|https?:|\d/.test(proposed) ? proposed : fallbackPrompt(draft);
+  // Deliver the promised content first, then ask once without interrupting the hook or final takeaway.
+  const boundary = draft.scenes.findIndex((scene, index) => index >= draft.scenes.length * .72 &&
+    index < draft.scenes.length - 1 && scene.chapter_title);
+  const at = boundary > 0 ? boundary : Math.max(1, draft.scenes.length - 2);
   if (draft.scenes.length >= 60) {
     return { ...draft, scenes: draft.scenes.map((scene, index) => index === at - 1
       ? { ...scene, narration: scene.narration + " " + narration } : scene) };

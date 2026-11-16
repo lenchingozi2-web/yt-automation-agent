@@ -31,7 +31,10 @@ const providerCooldown = new Map<string, number>();
 const EDITORIAL = [
   "Write for a real person watching YouTube. Open with a specific problem, observation, or question the video can actually answer.",
   "Speak plainly with contractions and natural cadence. Use short clauses that also read well as captions. Each scene must advance the story.",
-  "Choose examples and a structure particular to this topic. Avoid stock hooks, invented anecdotes presented as real, repeated lines, empty hype and any like or subscribe requests in scene narration. Studio handles viewer prompts separately.",
+  "Choose examples and a structure particular to this topic. Avoid stock hooks, invented anecdotes presented as real, repeated lines, empty hype and any like or subscribe requests in scene narration. Studio handles one viewer prompt separately.",
+  "OPENING: Start with an accurate, surprising, answerable question or evidence-grounded observation. Name the benefit for this particular viewer in the first 20 seconds, with no generic greeting, drawn-out branding, fake surprise or unverified promise.",
+  "MIDDLE: Deliver the promised answer through an evolving, coherent story. Every chapter must add a new concrete, source-grounded insight and link logically to the last, never a second introduction.",
+  "OUTRO: Resolve the opening question and deliver one memorable practical takeaway. End once, with a topic-specific viewer question when useful. No repeated goodbyes or generic motivational filler.",
   "Keep a distinction between observed evidence, hypotheses, and clearly labelled hypothetical examples. Preserve the original population, dates, quantities and limitations of any findings.",
   "Do not infer efficacy, diagnosis, safety, or causation from a technical capability, an association, or an early study. Never invent a citation.",
   "For experiments on animals or cells, identify the study population in the opening, and keep every experimental result scoped to that population. Develop practical scientific interpretation and clearly hypothetical illustrations. Avoid giving medical advice.",
@@ -400,9 +403,9 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const chapterIndex: number = chapters.length;
       const last = offset + chapterSize >= count;
       const purpose: string = chapterIndex === 0
-        ? "Introduce the original question, provide the key context and methods, and identify the evidence. Include the whole-video title, description, tags and thumbnail headline."
+        ? "Open immediately with an evidence-grounded, intriguing question or observation and make the viewer payoff clear. Supply the context, methods and verified evidence. Include the full-video title, description, tags and thumbnail headline. No opening like/subscribe request."
         : last
-          ? "Complete the practical applications, limitations and final takeaway. Conclude the whole video once. Avoid a second introduction."
+          ? "Finish the evidence-based answer promised in the opening, explain practical applications and limitations, and end with one memorable takeaway and a natural topic-specific viewer question. Conclude only once without a new introduction."
           : "Continue the explanation with new verified evidence, limitations, practical reasoning and distinct examples. Build directly on what has already been explained; do not restart the video.";
       chapters.push({ count: Math.min(chapterSize, count - offset), purpose });
     }
@@ -415,7 +418,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
         `Write only chapter ${index + 1} of one video. Plan around ${chapter.count} scenes and ${chapter.count * perScene} total spoken words in this chapter. Individual scenes can vary between ${lower} and ${upper} words, with flexibility for complete sentences. ${chapter.purpose}`,
         "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
         "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
-        ...(index === 0 ? ["Also return viewer_prompt as one optional sentence under 25 words inviting viewers to like and subscribe, tied to this video's subject or payoff. Use a casual tone and make no factual claims. Keep it out of the scenes."] : []),
+        ...(index === chapters.length - 1 ? ["Also return viewer_prompt as ONE optional spoken sentence under 25 words, inviting viewers to like and subscribe AFTER the main payoff. It must relate to this particular video's specific benefit or next lesson, not a generic channel pitch. Keep this sentence OUT of scenes. Make no factual claims."] : []),
         ...(priorContext ? ["Continuity from the previous chapter (do not repeat these lines; continue naturally): " + priorContext] : []),
         correction,
       ].join("\n");
@@ -429,7 +432,9 @@ export async function researchedDraft(brief: string, duration: number, format: D
       priorContext = list(completed.scenes).slice(-2)
         .map((entry) => usableNarration(object(entry))).filter(Boolean).join(" ").slice(-800);
     }
-    return { ...segments[0], scenes: segments.flatMap((segment, chapter) => list(segment.scenes).map((scene, index) => ({
+    return { ...segments[0],
+      viewer_prompt: segments[segments.length - 1]?.viewer_prompt || segments[0]?.viewer_prompt,
+      scenes: segments.flatMap((segment, chapter) => list(segment.scenes).map((scene, index) => ({
       ...object(scene), chapter_title: index === 0 ? text(segment.chapter_title) || (chapter === 0 ? "The question" : chapter === segments.length - 1 ? "Putting it into practice" : "Continuing the explanation") : undefined,
     }))).map((scene, i) => ({
       ...scene, scene_number: i + 1,

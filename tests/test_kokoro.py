@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from studio_kokoro import _boundaries, _fragments, assets_valid
+from studio_kokoro import _boundaries, _fragments, assets_valid, voice_profile, speech_speed
 from studio_audio import make_audio, validate_audio
 
 
@@ -73,6 +73,19 @@ class LocalKokoroTests(unittest.TestCase):
             self.assertEqual(len(model.calls), 1)
             self.assertEqual(model.calls[0][1], "am_michael")
             self.assertEqual(model.calls[0][2], "en-us")
+
+    def test_faster_voice_settings_invalidate_previous_audio_cache(self):
+        self.assertAlmostEqual(speech_speed(), 1.06, places=2)
+        self.assertIn("speed=1.060", voice_profile())
+        model = FakeKokoro()
+        scene = {"scene_number": 18, "narration": "A slightly faster but consistent narrator.", "format": "16:9"}
+        with tempfile.TemporaryDirectory() as tmp, patch("studio_kokoro._model", return_value=model):
+            first, _ = make_audio(scene, Path(tmp), "am_michael", engine="kokoro")
+            with patch.dict("os.environ", {"STUDIO_KOKORO_SPEED": "1.12"}):
+                second, _ = make_audio(scene, Path(tmp), "am_michael", engine="kokoro")
+                self.assertIn("speed=1.120", voice_profile())
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(model.calls), 2)
 
     def test_same_voice_is_reused_across_long_scene_fragments(self):
         model = FakeKokoro()
