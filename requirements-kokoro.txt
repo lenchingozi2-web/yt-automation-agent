@@ -1,0 +1,3 @@
+# Installed only on the CPU rendering worker and Kokoro smoke jobs.
+# Keep model downloads out of Git and Supabase storage.
+kokoro-onnx==0.6.1
