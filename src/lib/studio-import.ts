@@ -70,7 +70,8 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     const marker=/^(?:#{1,5}\s+)(.+)$/.exec(line);
     const numbered=/^(?:(?:scene|segment|chapter|part)\s+\d+\s*(?:[:.\-–—]\s*|\s+)|\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d\s*[-–—:]?\s*)(.+)$/i.exec(clean);
     if(marker||numbered){
-      const label=(marker?.[1]||numbered?.[1]||"").trim();
+      const rawLabel=(marker?.[1]||numbered?.[1]||"").trim();
+      const label=rawLabel.replace(/^(?:scene|segment|chapter|part)\s+\d+\s*(?:[:.\-–—]\s*|\s+)/i,"").trim() || rawLabel;
       if(!started&&!title&&marker&&!/^(opening|hook|intro|scene|narration|part|chapter|segment|script)/i.test(label))title=label;
       else if(/^(narration|voiceover|script)$/i.test(label))mode="speech";
       else if(/^(visuals?|footage|b-roll)$/i.test(label))mode="visual";
