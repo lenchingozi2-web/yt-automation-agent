@@ -41,7 +41,7 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
         ]}}]}
         response = Mock(status_code=200)
         response.json.return_value = result
-        with tempfile.TemporaryDirectory() as tmp, (
+        with (tempfile.TemporaryDirectory() as tmp,
             patch.dict(os.environ, {"GEMINI_API_KEY": "private-fixture", "STUDIO_GEMINI_TTS_MODEL": "gemini-2.5-flash-preview-tts"}),
             patch("studio_speech_backup.requests.post", return_value=response) as call,
         ):
@@ -54,7 +54,7 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
 
     def test_unavailable_backup_fails_without_silent_or_partial_audio(self):
         response = Mock(status_code=429)
-        with tempfile.TemporaryDirectory() as tmp, (
+        with (tempfile.TemporaryDirectory() as tmp,
             patch.dict(os.environ, {"GEMINI_API_KEY": "private-fixture"}),
             patch("studio_speech_backup.requests.post", return_value=response),
         ):
