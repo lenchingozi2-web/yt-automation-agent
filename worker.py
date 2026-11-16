@@ -953,16 +953,23 @@ def process(video: dict[str, Any], supabase) -> None:
                      if (narration_rate, narration_pitch) != (RATE, PITCH) else {})
 
     if not parent or mode == "rewrite":
+        from studio_kokoro import DEFAULT_VOICE as KOKORO_VOICE, available as kokoro_available, VOICE_ALLOWLIST
         from studio_speech_backup import VOICE as GEMINI_VOICE, available as gemini_available
-        # Switching providers restarts the ENTIRE narration, preventing audible
-        # mid-video changes in speaker, pitch or accent.
+        # The whole video uses ONE provider and ONE voice. Kokoro's downloaded
+        # on-device model is primary; no speech API quota is consumed when it works.
         if parent:
             voices_to_try = [(narration_engine, narration_voice)]
         else:
-            voices_to_try = [("edge", VOICE)]
+            voices_to_try = []
+            if kokoro_available():
+                chosen = os.getenv("STUDIO_KOKORO_VOICE", KOKORO_VOICE)
+                if chosen not in VOICE_ALLOWLIST:
+                    raise ValueError("The selected offline narration voice is not supported")
+                voices_to_try.append(("kokoro", chosen))
+            else:
+                print("[narration] Offline Kokoro assets unavailable; trying online neural voices.", flush=True)
+            voices_to_try.append(("edge", VOICE))
             if gemini_available():
-                # Do not return to the already-unavailable Edge service after
-                # the independent Gemini fallback has also failed.
                 voices_to_try.append(("gemini", GEMINI_VOICE))
             elif BACKUP_VOICE and BACKUP_VOICE != VOICE:
                 voices_to_try.append(("edge", BACKUP_VOICE))
