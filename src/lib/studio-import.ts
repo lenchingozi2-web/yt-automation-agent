@@ -1,4 +1,5 @@
 import { normalizeDraft, type Draft, type Scene } from "./studio.ts";
+import { MAX_VIDEO_SCENES, MAX_VIDEO_SECONDS, MAX_VIDEO_MINUTES, MIN_VIDEO_SECONDS } from "./studio-limits.ts";
 
 export type ParsedImport = { drafts: Draft[]; notes: string[] };
 export type ImportOptions = { format?: Draft["format"]; formatChosen?: boolean; durationSeconds?: number };
@@ -99,32 +100,20 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
   return {draft:{title,description,thumbnail_title:thumbnail||title,tags,format,duration_seconds:180,scenes},
     seconds:seconds||timeline,notes,formatFound};
 }
-function splitDraft(draft:Draft,requested:number):Draft[] {
-  const weights=draft.scenes.map(s=>Math.max(1,count(s.narration))),wordCount=weights.reduce((a,b)=>a+b,0);
-  const seconds=Math.max(60,requested,Math.ceil(wordCount*60/225));
-  const parts=Math.max(Math.ceil(seconds/720),Math.ceil(draft.scenes.length/60));
-  if(parts>24)throw Error("Too many scenes for a single import. Divide this script into smaller blocks.");
-  const groups:Scene[][]=Array.from({length:parts},()=>[]);
-  let cursor=0,remaining=wordCount;
-  for(let part=0;part<parts;part++){
-    let weight=0;
-    const target=remaining/(parts-part);
-    while(cursor<draft.scenes.length-(parts-part-1)&&groups[part].length<60){
-      if(groups[part].length&&weight>=target)break;
-      if(groups[part].length&&weight+weights[cursor]>target*1.1)break;
-      groups[part].push(draft.scenes[cursor]);weight+=weights[cursor];cursor++;
-    }
-    if(!groups[part].length){groups[part].push(draft.scenes[cursor]);weight+=weights[cursor++];}
-    remaining-=weight;
-  }
-  if(cursor!==draft.scenes.length)throw Error("Script exceeds Studio scene limits. Try smaller content blocks.");
-  return groups.map((scenes,i)=>{
-    const n=scenes.reduce((sum,s)=>sum+count(s.narration),0);
-    const suffix=parts>1?" (Part "+(i+1)+" of "+parts+")":"";
-    return {...draft,title:draft.title.slice(0,100-suffix.length)+suffix,
-      duration_seconds:Math.min(720,Math.max(60,Math.round(seconds*n/wordCount))),
-      scenes:scenes.map((s,j)=>({...s,scene_number:j+1}))};
-  });
+/** An import is always ONE video job. Internal scene boundaries are never separate uploads. */
+function singleDraft(draft: Draft, requestedSeconds: number): Draft {
+  const spokenWords = draft.scenes.reduce((sum, scene) => sum + count(scene.narration), 0);
+  if (!spokenWords) throw Error("No spoken narration was found.");
+  if (draft.scenes.length > MAX_VIDEO_SCENES)
+    throw Error("This script contains " + draft.scenes.length + " scenes. The limit is " + MAX_VIDEO_SCENES + " scenes in a single video. Shorten or combine scene headings; nothing has been removed.");
+  if (requestedSeconds > MAX_VIDEO_SECONDS)
+    throw Error("This script requests " + Math.ceil(requestedSeconds / 60) + " minutes. Studio's current single-video maximum is " + MAX_VIDEO_MINUTES + " minutes. No part of your script was queued or discarded.");
+  const minimumSpeechSeconds = Math.ceil(spokenWords * 60 / 225);
+  if (minimumSpeechSeconds > MAX_VIDEO_SECONDS)
+    throw Error("This script has " + spokenWords + " words, too many to narrate naturally within " + MAX_VIDEO_MINUTES + " minutes. Please shorten it; the importer will not cut or split your content.");
+  const seconds = Math.max(MIN_VIDEO_SECONDS, requestedSeconds, minimumSpeechSeconds);
+  return { ...draft, duration_seconds: seconds,
+    scenes: draft.scenes.map((scene, index) => ({ ...scene, scene_number: index + 1 })) };
 }
 export function parseFullScript(input:string,options:ImportOptions={}):ParsedImport {
   const raw=input.replace(/^\uFEFF/,"").trim();
@@ -159,7 +148,12 @@ export function parseFullScript(input:string,options:ImportOptions={}):ParsedImp
   const selected=options.durationSeconds||seconds||Math.ceil(wordCount*60/145);
   if(options.durationSeconds&&selected<Math.ceil(wordCount*60/225))
     notes.push("Duration extended to preserve every spoken word.");
-  const drafts=splitDraft(draft,selected);
-  if(drafts.length>1)notes.push("Script imported as "+drafts.length+" consecutive parts (12-minute render maximum). Review each part without repasting.");
-  return {drafts,notes};
+  const single = singleDraft(draft, selected);
+  const estimatedSeconds = Math.ceil(wordCount * 60 / 145);
+  if (estimatedSeconds > single.duration_seconds * 1.2)
+    notes.push("Your spoken text may run longer than your selected target at a comfortable narration pace. Review the word count and duration before rendering; no words were removed.");
+  if (estimatedSeconds < single.duration_seconds * .75)
+    notes.push("The narration may finish sooner than the target duration. Studio follows the actual spoken audio rather than padding it with silence.");
+  notes.push("All "+single.scenes.length+" scenes will render as ONE continuous MP4 and ONE upload approval.");
+  return {drafts:[single],notes};
 }
