@@ -325,6 +325,29 @@ class MediaRegression(unittest.TestCase):
                 self.assertEqual(verify_render_geometry(final, size, 2), (ratio, 2.0))
                 self.assertGreater(energy(final, 440, start=1.45), energy(final, 880, start=1.45) * 10)
 
+    def test_long_form_is_one_continuous_render_with_every_logical_scene(self):
+        long_scenes = [
+            {"narration": f"Chapter {number} explains the next step with uninterrupted narration.",
+             "search_queries": ["educational technology"],
+             **({"_studio": {"duration_seconds": 1200, "format": "16:9"}} if number == 1 else {})}
+            for number in range(1, 101)
+        ]
+        parsed, ratio, meta = video_details({"title": "One complete masterclass", "scenes": long_scenes})
+        self.assertEqual(ratio, "16:9")
+        self.assertEqual(meta["duration_seconds"], 1200)
+        self.assertEqual({scene["logical_scene"] for scene in parsed}, set(range(1, 101)))
+        self.assertEqual(" ".join(scene["narration"] for scene in parsed),
+                         " ".join(scene["narration"] for scene in long_scenes))
+        self.assertEqual(sum(round(s * 30) for s in scene_durations([300, 300, 300, 300], 1200)), 36000)
+        long_scenes[0]["_studio"]["duration_seconds"] = 1800
+        self.assertEqual(video_details({"scenes": long_scenes})[2]["duration_seconds"], 1800)
+        long_scenes[0]["_studio"]["duration_seconds"] = 1801
+        with self.assertRaisesRegex(ValueError, "duration is invalid"):
+            video_details({"scenes": long_scenes})
+        long_scenes[0]["_studio"]["duration_seconds"] = 1200
+        with self.assertRaisesRegex(ValueError, "160 logical scenes"):
+            video_details({"scenes": long_scenes + [dict(long_scenes[1])] * 61)
+
     def test_approximate_runtime_respects_narration_and_short_cap(self):
         self.assertAlmostEqual(sum(scene_durations([260, 265, 245], 720, approximate=True)), 770)
         self.assertAlmostEqual(sum(scene_durations([140, 150], 720, approximate=True)), 290)
