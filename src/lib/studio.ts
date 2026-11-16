@@ -1,3 +1,5 @@
+import { MAX_VIDEO_SECONDS } from "./studio-limits.ts";
+
 export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string; visual_notes?: string; footage_override?: boolean };
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[]; community_post?: string };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
@@ -211,5 +213,5 @@ export function durationFromBrief(brief: string): number | undefined {
   const match = /\b(?:video|script)\s+(?:of|lasting|for)\s+(?:about\s+)?(\d+(?:\.\d+)?)\s*[- ]?\s*(minutes?|mins?|seconds?|secs?)\b|\b(\d+(?:\.\d+)?)\s*[- ]?\s*(minutes?|mins?|seconds?|secs?)\s+(?:long\s+)?(?:video|script)\b/i.exec(brief);
   if (!match) return undefined;
   const seconds = Math.round(Number(match[1] ?? match[3]) * (/^m/i.test(match[2] ?? match[4]) ? 60 : 1));
-  return seconds >= 60 && seconds <= 720 ? seconds : undefined;
+  return seconds >= 60 && seconds <= MAX_VIDEO_SECONDS ? seconds : undefined;
 }
