@@ -331,3 +331,32 @@ test("plain paragraphs are accepted without inventing extra spoken visual instru
   assert.match(drafts[0].scenes[0].narration, /Next we connect/);
   assert.ok(drafts[0].scenes[0].search_queries.length);
 });
+
+
+test("complete paste preserves short inline scene narration and excludes explicit direction cues", async () => {
+  const { parseFullScript } = await import("../src/lib/studio-import.ts");
+  const raw = [
+    "Video title: One-paste tutorial",
+    "Duration: 2 minutes",
+    "Scene 1: Hello, welcome back!",
+    "Visual directions: Show a mobile phone",
+    "Scene 2: Today we build the engine step by step.",
+    "On-screen visuals: Show the dashboard",
+    "Scene 3",
+    "Narration",
+    "We keep narration separate from the footage instructions.",
+    "Visuals",
+    "A glowing progress bar",
+  ].join("\n");
+  const { drafts } = parseFullScript(raw);
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].title, "One-paste tutorial");
+  assert.equal(drafts[0].scenes.length, 3);
+  const allSpoken = drafts[0].scenes.map(x => x.narration).join(" ");
+  assert.match(allSpoken, /Hello, welcome back!/);
+  assert.match(allSpoken, /Today we build the engine/);
+  assert.match(allSpoken, /We keep narration separate/);
+  assert.ok(!allSpoken.includes("glowing progress"));
+  assert.ok(!allSpoken.includes("Show a mobile phone"));
+  assert.match(drafts[0].scenes[1].visual_notes || "", /dashboard/);
+});
