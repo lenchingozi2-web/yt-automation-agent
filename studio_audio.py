@@ -13,6 +13,7 @@ from pathlib import Path
 import wave
 
 from studio_retry import TemporaryRenderError
+from studio_speech_backup import generate as generate_gemini_speech
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
@@ -247,12 +248,15 @@ class NarrationUnavailable(TemporaryRenderError):
     """The selected neural voice failed to deliver validated audio."""
 
 
-def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = RATE, pitch: str = PITCH) -> tuple[Path, Path]:
+def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = RATE, pitch: str = PITCH,
+               engine: str = "edge") -> tuple[Path, Path]:
     number = int(scene["scene_number"])
     text = re.sub(r"\s+", " ", str(scene["narration"])).strip()
     if not text:
         raise ValueError(f"Scene {number} has no narration")
-    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, voice, rate, pitch, scene.get("format"), text]).encode()).hexdigest()
+    if engine not in {"edge", "gemini"}:
+        raise ValueError("Unknown narration engine")
+    fingerprint = hashlib.sha256(json.dumps([AUDIO_VERSION, engine, voice, rate, pitch, scene.get("format"), text]).encode()).hexdigest()
     audio = directory / f"scene_{number:02d}_{fingerprint[:16]}.wav"
     srt = audio.with_suffix(".srt")
     manifest = audio.with_suffix(".audio.json")
@@ -267,7 +271,11 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
     decoded = audio.with_suffix(".part.wav")
     for attempt in range(3):
         try:
-            if attempt < 2:
+            if engine == "gemini":
+                boundaries, seconds = generate_gemini_speech(text, decoded, voice)
+                validate_audio(decoded, words=len(text.split()))
+                complete_boundaries(boundaries, text, seconds)
+            elif attempt < 2:
                 boundaries, seconds = synthesize_part(text, temporary, decoded, voice, rate=rate, pitch=pitch)
             else:
                 boundaries = recover_in_phrases(text, temporary, decoded, voice, rate=rate, pitch=pitch)
@@ -278,7 +286,7 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
             write_srt(phrase_cues(boundaries, seconds, scene.get("format") == "9:16"), srt)
             decoded.replace(audio)
             temporary.unlink(missing_ok=True)
-            manifest.write_text(json.dumps({"fingerprint": fingerprint, "voice": voice,
+            manifest.write_text(json.dumps({"fingerprint": fingerprint, "engine": engine, "voice": voice,
                                              "rate": rate, "pitch": pitch, "seconds": seconds}))
             return audio, srt
         except Exception as error:
@@ -287,6 +295,6 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
             reason = str(error) if isinstance(error, ValueError) else type(error).__name__
             print(f"[narration] scene {number}, attempt {attempt + 1}: {reason}", flush=True)
             if attempt == 2:
-                raise NarrationUnavailable(f"Neural narration unavailable for scene {number} after automatic retries.") from error
+                raise NarrationUnavailable(f"{engine.capitalize()} neural narration was unavailable for scene {number} after automatic retries.") from error
             time.sleep(2 ** attempt)
     raise RuntimeError("Narration was not generated")
