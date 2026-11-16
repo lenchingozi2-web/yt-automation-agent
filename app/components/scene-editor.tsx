@@ -1,10 +1,11 @@
 import { ArrowDown, ArrowUp, Clapperboard, LoaderCircle, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import type { Draft, Scene } from "@/src/lib/studio";
+import { MAX_VIDEO_SECONDS, MAX_VIDEO_SCENES } from "@/src/lib/studio-limits";
 import { Modal, Notice, type Feedback } from "./studio-shell";
 
-export function SceneEditor({ draft, change, busy, close, save, regenerate, feedback, importProgress }: {
+export function SceneEditor({ draft, change, busy, close, save, regenerate, feedback }: {
   draft: Draft; change: (draft: Draft) => void; busy: string | null; close: () => void; save: () => void;
-  regenerate: () => void; feedback: Feedback | null; importProgress?: { index: number; total: number };
+  regenerate: () => void; feedback: Feedback | null;
 }) {
   const working = busy === "save" || busy === "regenerate";
   function update(patch: Partial<Draft>) { change({ ...draft, ...patch }); }
@@ -24,17 +25,17 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
 
   return <Modal titleId="editor-title" close={safeClose} className="editor-dialog">
     <header className="dialog-header">
-      <div><p>{draft.scenes.length} {draft.scenes.length === 1 ? "scene" : "scenes"}{importProgress ? " · Part " + importProgress.index + " of " + importProgress.total : ""}</p><h2 id="editor-title">Scene editor</h2></div>
+      <div><p>{draft.scenes.length} {draft.scenes.length === 1 ? "scene" : "scenes"}</p><h2 id="editor-title">Scene editor</h2></div>
       <button className="icon-button" disabled={working} aria-label="Close editor" onClick={safeClose}><X size={20} /></button>
     </header>
     <form className="editor-form" onSubmit={(event) => { event.preventDefault(); save(); }}>
       <div className="editor-body">
-        {importProgress && <p className="review-note">Your complete script has been imported. This part is editable; after you queue it, the next part opens automatically. You do not have to paste again.</p>}
+        {draft.duration_seconds > 720 && <p className="review-note">Long-form production: all scenes will be joined into one continuous, full-quality MP4. A single approval is required before YouTube upload. Storage space and rendering time increase with length.</p>}
         <fieldset disabled={working} className="editor-details">
           <label className="editor-wide">Title<input required maxLength={100} value={draft.title} onChange={(event) => update({ title: event.target.value })} /></label>
           <label>Format<select value={draft.format} onChange={(event) => update({ format: event.target.value as Draft["format"] })}>
             <option value="16:9">Landscape (16:9)</option><option value="9:16">Portrait (9:16)</option></select></label>
-          <label>Target duration (seconds)<input type="number" min={60} max={720} required value={draft.duration_seconds || ""} onChange={(event) => update({ duration_seconds: Number(event.target.value) })} /></label>
+          <label>Target duration (seconds)<input type="number" min={60} max={MAX_VIDEO_SECONDS} required value={draft.duration_seconds || ""} onChange={(event) => update({ duration_seconds: Number(event.target.value) })} /></label>
           <label className="editor-wide">Description<textarea rows={3} maxLength={5000} value={draft.description} onChange={(event) => update({ description: event.target.value })} /></label>
           <label className="editor-wide">Thumbnail headline<input maxLength={90} value={draft.thumbnail_title ?? ""} placeholder={draft.title}
             onChange={(event) => update({ thumbnail_title: event.target.value })} /></label>
@@ -63,7 +64,7 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
             <label>Footage search terms <small>Separated by commas</small><input value={scene.search_queries.join(",")}
               onChange={(event) => updateScene(index, { search_queries: event.target.value.split(",") })} /></label>
           </section>)}
-          <button type="button" className="button button-secondary" disabled={draft.scenes.length >= 60} onClick={() => updateScenes([
+          <button type="button" className="button button-secondary" disabled={draft.scenes.length >= MAX_VIDEO_SCENES} onClick={() => updateScenes([
             ...draft.scenes, { scene_number: draft.scenes.length + 1, narration: "", search_queries: ["cinematic b-roll"] },
           ])}><Plus size={17} /> Add scene</button>
         </fieldset>
@@ -71,11 +72,11 @@ export function SceneEditor({ draft, change, busy, close, save, regenerate, feed
       <footer className="dialog-footer editor-footer">
         <Notice feedback={feedback} />
         <div>
-          {!importProgress && <button type="button" className="button button-secondary" disabled={working} onClick={regenerate}>
+          <button type="button" className="button button-secondary" disabled={working} onClick={regenerate}>
             {busy === "regenerate" ? <LoaderCircle className="spinner" size={17} /> : <RefreshCw size={17} />} Regenerate script
-          </button>}
+          </button>
           <button className="button button-primary" disabled={working || !draft.scenes.length}>
-            {busy === "save" ? <LoaderCircle className="spinner" size={17} /> : <Clapperboard size={17} />} {busy === "save" ? "Queuing…" : importProgress ? "Approve & render this part" : "Approve & render"}
+            {busy === "save" ? <LoaderCircle className="spinner" size={17} /> : <Clapperboard size={17} />} {busy === "save" ? "Queuing…" : "Approve & render"}
           </button>
         </div>
       </footer>
