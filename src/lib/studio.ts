@@ -1,4 +1,4 @@
-export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string; footage_override?: boolean };
+export type Scene = { scene_number: number; narration: string; search_queries: string[]; estimated_duration?: number; source_ids?: number[]; chapter_title?: string; visual_notes?: string; footage_override?: boolean };
 export type Draft = { title: string; description: string; tags: string[]; format: "16:9" | "9:16"; duration_seconds: number; scenes: Scene[]; thumbnail_title?: string; sources?: ResearchSource[]; community_post?: string };
 export type ResearchSource = { id?: number; title: string; url: string; publisher: string };
 export const PUBMED_SOURCE = /^https:\/\/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)\/$/;
@@ -112,7 +112,7 @@ export function normalizeDraft(value: unknown): Draft {
     const r = objectOf(raw);
     return { scene_number: index + 1, narration: stringOf(r.narration || r.voiceover || r.text).trim(),
       search_queries: (Array.isArray(r.search_queries) ? r.search_queries : stringOf(r.search_queries || r.keywords).split(",")).filter((q: unknown): q is string => typeof q === "string" && !!q.trim()).map(q => q.trim()).slice(0, 5),
-      estimated_duration: Number(r.estimated_duration) || 15, chapter_title: shortLine(r.chapter_title, 80),
+      estimated_duration: Number(r.estimated_duration) || 15, chapter_title: shortLine(r.chapter_title, 80), visual_notes: typeof r.visual_notes === "string" ? r.visual_notes.slice(0, 4000) : undefined,
       source_ids: Array.isArray(r.source_ids) ? [...new Set(r.source_ids.filter((id: unknown): id is number => Number.isSafeInteger(id) && Number(id) > 0))].slice(0, 12) : [],
       ...(r.footage_override === true ? { footage_override: true } : {}) };
   });
