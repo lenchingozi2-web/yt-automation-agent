@@ -620,6 +620,27 @@ class StoragePressureRecoveryRegression(unittest.TestCase):
             client.storage.from_.return_value.upload.assert_called_once()
 
 
+class LongVideoPreflightRegression(unittest.TestCase):
+    def test_obviously_full_storage_is_caught_before_generating_a_long_voice(self):
+        from studio_master import preflight_long_video_storage
+        from studio_master import STORAGE_BUDGET
+        client = Mock()
+        data = [{"name": "other-video.mp4", "metadata": {"size": STORAGE_BUDGET - 75_000_000}}]
+        with (patch("studio_master.bucket_exists", return_value=False),
+              patch("studio_master.media_objects", return_value=iter(data))):
+            with self.assertRaisesRegex(ValueError, "Not enough Studio storage"):
+                preflight_long_video_storage(client, "current-video", 1200)
+        with (patch("studio_master.bucket_exists", return_value=False),
+              patch("studio_master.media_objects", return_value=iter([]))):
+            preflight_long_video_storage(client, "current-video", 1200)
+
+    def test_short_videos_skip_approximate_long_video_preflight(self):
+        from studio_master import preflight_long_video_storage
+        with patch("studio_master.media_objects") as listing:
+            preflight_long_video_storage(Mock(), "new-video", 180)
+            listing.assert_not_called()
+
+
 class DailyStorageBudgetRegression(unittest.TestCase):
     def test_scheduled_video_defers_when_private_masters_consume_headroom(self):
         from datetime import datetime, timezone
