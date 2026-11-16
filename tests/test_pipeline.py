@@ -346,7 +346,7 @@ class MediaRegression(unittest.TestCase):
             video_details({"scenes": long_scenes})
         long_scenes[0]["_studio"]["duration_seconds"] = 1200
         with self.assertRaisesRegex(ValueError, "160 logical scenes"):
-            video_details({"scenes": long_scenes + [dict(long_scenes[1])] * 61)
+            video_details({"scenes": long_scenes + [dict(long_scenes[1])] * 61})
 
     def test_approximate_runtime_respects_narration_and_short_cap(self):
         self.assertAlmostEqual(sum(scene_durations([260, 265, 245], 720, approximate=True)), 770)
