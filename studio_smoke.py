@@ -19,11 +19,24 @@ from studio_media import verify_thumbnail
 from studio_master import MASTER_BUCKET, download_upload_master, remove_upload_master
 from studio_publish import has_approval
 from studio_retry import TemporaryRenderError
-from worker import ROOT, fetch_broll, process, render_job, verify_render_geometry
+from worker import ROOT, fetch_broll, process, render_job, verify_render_geometry, video_details
 # Verify multi-scene neural narration, montage, final audio and real storage.
 
 
 def main() -> int:
+    # Structural long-form check: inspect a 20-minute, 100-scene production without
+    # rendering an expensive long video or creating multiple queue rows.
+    long_scenes = [
+        {"scene_number": index, "narration": f"Chapter {index} continues the same video with a distinct lesson.",
+         "search_queries": ["educational video"],
+         **({"_studio": {"duration_seconds": 1200, "format": "16:9"}} if index == 1 else {})}
+        for index in range(1, 101)
+    ]
+    checked, ratio, metadata_values = video_details({"title": "One continuous masterclass", "scenes": long_scenes})
+    assert metadata_values["duration_seconds"] == 1200 and ratio == "16:9"
+    assert [scene["logical_scene"] for scene in checked] == list(range(1, 101))
+    print("PASS: 100 logical scenes remain one 20-minute production, in original order.")
+
     url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
     if not url or not key:
