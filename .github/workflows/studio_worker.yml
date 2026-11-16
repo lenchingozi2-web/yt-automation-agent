@@ -22,7 +22,7 @@ on:
     types: [render_video]
   push:
     branches: [main]
-    paths: [worker.py, studio_audio.py, studio_revision.py, studio_retry.py, studio_publish.py, studio_master.py, studio_media.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
+    paths: [worker.py, studio_audio.py, studio_kokoro.py, requirements-kokoro.txt, studio_revision.py, studio_retry.py, studio_publish.py, studio_master.py, studio_media.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
   schedule:
     - cron: '2-57/5 * * * *'
 permissions:
@@ -96,6 +96,18 @@ jobs:
       - name: Install worker dependencies
         if: steps.queue.outputs.work == 'true'
         run: pip install -r requirements.txt
+      - name: Install offline Kokoro CPU voice
+        if: steps.queue.outputs.work == 'true'
+        run: python3 -m pip install -r requirements-kokoro.txt
+      - name: Restore cached full-quality Kokoro voice model
+        if: steps.queue.outputs.work == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .kokoro-models
+          key: studio-kokoro-v1-fp16-signed-20260818
+      - name: Verify and prepare the offline Kokoro model
+        if: steps.queue.outputs.work == 'true'
+        run: python3 studio_kokoro.py --prepare
       - name: Drain queued videos and retry pending uploads
         if: steps.queue.outputs.work == 'true' && !((github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '')
         env:
