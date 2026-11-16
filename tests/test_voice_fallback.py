@@ -68,7 +68,7 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
         async def no_audio(*args, **kwargs):
             raise NoAudioReceived("The provider returned an empty stream")
 
-        with tempfile.TemporaryDirectory() as tmp, (
+        with (tempfile.TemporaryDirectory() as tmp,
             patch("studio_audio.synthesize", side_effect=no_audio) as edge,
             patch("studio_audio.time.sleep") as sleep,
         ):
