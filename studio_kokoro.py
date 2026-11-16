@@ -234,6 +234,19 @@ def smoke() -> None:
         assert " ".join(word for _, _, word in marks) == phrase
         assert seconds > 3
         print(f"[kokoro] PASS: {seconds:.1f}s of non-silent narration in {time.monotonic()-start:.1f}s", flush=True)
+        # A real multi-fragment scene, using exactly the same voice across
+        # fragments; source words must survive unchanged.
+        longer = ("We build a video studio by separating the research from the script, "
+                  "keeping narration consistent, matching each scene with meaningful images, "
+                  "and testing the final video before the creator approves publication. ")
+        complete = longer * 5
+        start = time.monotonic()
+        more_marks, more_seconds = generate(complete, Path(directory) / "long-scene.wav")
+        validate_audio(Path(directory) / "long-scene.wav", words=len(complete.split()))
+        assert " ".join(word for _, _, word in more_marks) == complete.strip()
+        assert more_seconds > 20
+        print(f"[kokoro] PASS: multi-fragment scene, {len(complete.split())} words, "
+              f"{more_seconds:.1f}s speech in {time.monotonic()-start:.1f}s", flush=True)
 
 
 if __name__ == "__main__":
