@@ -956,8 +956,10 @@ def process(video: dict[str, Any], supabase) -> None:
         else:
             voices_to_try = [("edge", VOICE)]
             if gemini_available():
+                # Do not return to the already-unavailable Edge service after
+                # the independent Gemini fallback has also failed.
                 voices_to_try.append(("gemini", GEMINI_VOICE))
-            if BACKUP_VOICE and BACKUP_VOICE != VOICE:
+            elif BACKUP_VOICE and BACKUP_VOICE != VOICE:
                 voices_to_try.append(("edge", BACKUP_VOICE))
         for index, (engine, voice) in enumerate(voices_to_try):
             audio_plan = []
