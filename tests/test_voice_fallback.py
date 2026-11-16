@@ -61,6 +61,23 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "429"):
                 generate("Test the voice", Path(tmp) / "voice.wav")
 
+    def test_repeated_edge_no_audio_trips_fast_failover_circuit(self):
+        class NoAudioReceived(Exception):
+            pass
+
+        async def no_audio(*args, **kwargs):
+            raise NoAudioReceived("The provider returned an empty stream")
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            patch("studio_audio.synthesize", side_effect=no_audio) as edge,
+            patch("studio_audio.time.sleep") as sleep,
+        ):
+            from studio_audio import NarrationUnavailable
+            with self.assertRaisesRegex(NarrationUnavailable, "Edge neural voice stopped returning audio"):
+                make_audio({"scene_number": 7, "narration": "No audio is available."}, Path(tmp))
+            self.assertEqual(edge.call_count, 2, "Do not waste the phrase-recovery retries on a dead provider")
+            self.assertEqual(sleep.call_count, 1)
+
     def test_fingerprints_distinguish_providers_and_cache_only_validated_audio(self):
         call_counter = {"count": 0}
         def fake_gemini(text, target, voice):
