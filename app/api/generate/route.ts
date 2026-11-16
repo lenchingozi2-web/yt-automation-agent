@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { normalizeDraft, normalizeVideo, toSafeMessage } from "@/src/lib/studio";
 import { researchedDraft } from "@/src/lib/studio-research";
+import { MAX_VIDEO_SECONDS } from "@/src/lib/studio-limits";
 import { getResearchIdea, markBriefingQueued } from "@/src/lib/studio-briefing";
 import { dispatchStudioWorker, errorResponse, findVideo, jobIdOf, quotaOf, recentTitles, requestObject, safeInsertVideo, statusFor, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 
@@ -23,7 +24,7 @@ export async function POST(request: Request) {
       const quota = await quotaOf(client);
       if (quota.used >= quota.limit) return NextResponse.json({ ok: false, error: "Daily production allowance reached. You can retry existing failed videos." }, { status: 429 });
     }
-    const seconds = Math.round(Math.max(60, Math.min(720, Number(body.duration) || 180)));
+    const seconds = Math.round(Math.max(60, Math.min(MAX_VIDEO_SECONDS, Number(body.duration) || 180)));
     const format = body.format === "9:16" ? "9:16" : "16:9";
     const story = storyId ? await getResearchIdea(client, storyId) : undefined;
     const brief = story ? "Create a video script from this story. Naturally cite its references in the voiceover and append the exact URLs to the YouTube description." : prompt;
