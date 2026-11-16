@@ -33,7 +33,7 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - name: Check queue before installing rendering dependencies
@@ -117,7 +117,7 @@ jobs:
           elif [ -n "$THUMBNAIL_VIDEO_ID" ]; then
             python worker.py --thumbnail-only "$THUMBNAIL_VIDEO_ID"
           else
-            python worker.py --drain --max-jobs 3
+            python worker.py --drain --max-jobs 1
           fi
       - name: Replace original Prader-Willi custom thumbnail without reuploading the video
         if: steps.queue.outputs.work == 'true' && ((github.event_name == 'push' && contains(github.event.head_commit.message, '[refresh-pws-thumbnail]')) || inputs.redesign_pws_video_id != '')
