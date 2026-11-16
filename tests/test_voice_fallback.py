@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from studio_audio import make_audio, validate_audio
-from studio_speech_backup import approximate_boundaries, generate
+from studio_speech_backup import SpeechProviderError, _rate_limit_error, approximate_boundaries, generate
 
 
 def tone_wav(seconds=2.0, rate=24000):
@@ -93,6 +93,51 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
             self.assertEqual(process.call_count, 1)
             sleep.assert_not_called()
             self.assertTrue(any(call.kwargs.get("status") == "failed" for call in save.call_args_list))
+
+    def test_quota_classifier_distinguishes_daily_from_temporary_rate_limit(self):
+        response = Mock(status_code=429, headers={"Retry-After": "25"})
+        response.json.return_value = {"error": {"message": "Quota exceeded for RequestsPerMinute",
+            "details": [{"retryDelay": "32s"}]}}
+        temporary = _rate_limit_error(response)
+        self.assertEqual(temporary.category, "rate limit")
+        self.assertTrue(temporary.retryable)
+        self.assertEqual(temporary.retry_after, 32)
+        response.json.return_value = {"error": {"message": "Quota exceeded for RequestsPerDay"}}
+        exhausted = _rate_limit_error(response)
+        self.assertEqual(exhausted.category, "daily quota exhausted")
+        self.assertFalse(exhausted.retryable)
+
+    def test_gemini_retries_temporary_429_then_keeps_same_voice(self):
+        from studio_audio import NarrationUnavailable
+        calls = []
+        line = "One uninterrupted narration from the original presenter."
+        def sometimes_limited(text, path, voice):
+            calls.append(voice)
+            if len(calls) < 3:
+                raise SpeechProviderError(429, category="rate limit", retry_after=18)
+            path.write_bytes(tone_wav(2.0))
+            return approximate_boundaries(text, 2.0), 2.0
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch("studio_audio.generate_gemini_speech", side_effect=sometimes_limited),
+              patch("studio_audio.time.sleep") as nap):
+            audio, captions = make_audio({"scene_number": 7, "narration": line}, Path(tmp), "Charon", engine="gemini")
+            self.assertTrue(audio.exists())
+            self.assertTrue(captions.exists())
+            self.assertEqual(calls, ["Charon", "Charon", "Charon"])
+            self.assertEqual(nap.call_count, 2)
+            self.assertGreaterEqual(nap.call_args_list[0].args[0], 18)
+
+    def test_daily_quota_does_not_spin_or_generate_silent_fallback(self):
+        from studio_audio import NarrationUnavailable
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch("studio_audio.generate_gemini_speech",
+                    side_effect=SpeechProviderError(429, category="daily quota exhausted")) as generate_call,
+              patch("studio_audio.time.sleep") as nap):
+            with self.assertRaisesRegex(NarrationUnavailable, "daily quota exhausted"):
+                make_audio({"scene_number": 9, "narration": "Quota must be respected."},
+                           Path(tmp), "Charon", engine="gemini")
+            generate_call.assert_called_once()
+            nap.assert_not_called()
 
     def test_fingerprints_distinguish_providers_and_cache_only_validated_audio(self):
         call_counter = {"count": 0}
