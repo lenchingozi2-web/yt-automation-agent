@@ -107,10 +107,14 @@ def _model(directory: str):
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
         options.inter_op_num_threads = 1
-        return Kokoro(str(root / "kokoro-v1.0.fp16.onnx"), str(root / "voices-v1.0.bin"),
-                      sess_options=options)
-    except TypeError:
-        # Older wheel versions do not expose SessionOptions.
+        session = ort.InferenceSession(
+            str(root / "kokoro-v1.0.fp16.onnx"),
+            sess_options=options,
+            providers=["CPUExecutionProvider"],
+        )
+        return Kokoro.from_session(session, str(root / "voices-v1.0.bin"))
+    except (AttributeError, TypeError):
+        # Preserve compatibility if an older implementation lacks from_session.
         return Kokoro(str(root / "kokoro-v1.0.fp16.onnx"), str(root / "voices-v1.0.bin"))
 
 
