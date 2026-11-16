@@ -2,15 +2,16 @@ import { type FormEvent, useRef, useState } from "react";
 import { ArrowRight, Clapperboard, FileText, LoaderCircle, Monitor, Smartphone, Sparkles } from "lucide-react";
 import { durationFromBrief, type Draft } from "@/src/lib/studio";
 import { parseFullScript } from "@/src/lib/studio-import";
+import { MAX_VIDEO_MINUTES } from "@/src/lib/studio-limits";
 
-const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [600, "10 minutes"], [720, "12 minutes"], [0, "Custom"]] as const;
+const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [600, "10 minutes"], [720, "12 minutes"], [900, "15 minutes"], [1200, "20 minutes"], [1500, "25 minutes"], [1800, "30 minutes"], [0, "Custom"]] as const;
 
 export function Composer({ id, busy, disabled, generate, edit }: {
   id: string;
   busy: boolean;
   disabled: boolean;
   generate: (prompt: string, seconds: number, format: Draft["format"], review: boolean, requestId: string) => Promise<boolean>;
-  edit: (draft: Draft, remaining?: Draft[], notes?: string[]) => void;
+  edit: (draft: Draft, notes?: string[]) => void;
 }) {
   const [mode, setMode] = useState<"generate" | "paste">("generate");
   const [format, setFormat] = useState<Draft["format"]>("16:9");
@@ -33,7 +34,7 @@ export function Composer({ id, busy, disabled, generate, edit }: {
           format, formatChosen, durationSeconds: durationChosen ? seconds : undefined,
         });
         setPasteError("");
-        edit(imported.drafts[0], imported.drafts.slice(1), imported.notes);
+        edit(imported.drafts[0], imported.notes);
       } catch (error) {
         setPasteError(error instanceof Error ? error.message : "Studio could not parse the pasted content.");
       }
@@ -64,7 +65,7 @@ export function Composer({ id, busy, disabled, generate, edit }: {
           : <textarea value={script} onChange={(event) => setScript(event.target.value)} required
               placeholder={"Title: My YouTube tutorial\nDuration: 20 minutes\nFormat: 16:9\nThumbnail: Build Your AI Engine\n\n## Scene 1 — Opening\nNarration:\nImagine making videos automatically...\nVisuals:\nA phone displaying a production dashboard\n\n## Scene 2 — How it works\nNarration:\nFirst, create a GitHub repository..."} rows={12} />}
       </label>
-      {mode === "paste" && <p className="text-sm text-[var(--muted)]">One paste imports the title, narration, scenes, visual cues, description, tags, thumbnail text and duration. Long scripts are divided into reviewable parts without losing narration. Your work is never published automatically.</p>}
+      {mode === "paste" && <p className="text-sm text-[var(--muted)]">One paste imports the title, narration, scenes, visual cues, description, tags, thumbnail text and duration. Up to 30 minutes of narration stays in ONE video with all scenes preserved. Your work is never published automatically.</p>}
       {mode === "paste" && pasteError && <p className="queue-warning" role="alert">{pasteError}</p>}
       <div className="composer-settings">
         <fieldset>
@@ -74,10 +75,10 @@ export function Composer({ id, busy, disabled, generate, edit }: {
             <button type="button" aria-pressed={format === "9:16"} onClick={() => { setFormat("9:16"); setFormatChosen(true); }}><Smartphone size={17} /> Portrait <small>9:16</small></button>
           </div>
         </fieldset>
-        <label>Approximate duration<select value={duration} onChange={(event) => { setDurationChosen(true); setDuration(Number(event.target.value)); }}>
+        <label>Approximate duration (up to 30 min)<select value={duration} onChange={(event) => { setDurationChosen(true); setDuration(Number(event.target.value)); }}>
           {DURATIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
-        {duration === 0 && <label>Minutes<input type="number" min="1" max="12" step="any" value={custom} onChange={(event) => setCustom(event.target.value)} required /></label>}
+        {duration === 0 && <label>Minutes<input type="number" min="1" max={MAX_VIDEO_MINUTES} step="any" value={custom} onChange={(event) => setCustom(event.target.value)} required /></label>}
       </div>
       {mode === "generate" && !durationChosen && durationFromBrief(prompt) && durationFromBrief(prompt) !== duration &&
         <p className="text-sm text-[var(--muted)]">Using the duration in your brief. You can override it above.</p>}
