@@ -124,8 +124,8 @@ class NeuralVoiceFallbackTests(unittest.TestCase):
             self.assertTrue(audio.exists())
             self.assertTrue(captions.exists())
             self.assertEqual(calls, ["Charon", "Charon", "Charon"])
-            self.assertEqual(nap.call_count, 2)
-            self.assertGreaterEqual(nap.call_args_list[0].args[0], 18)
+            cooldowns = [call.args[0] for call in nap.call_args_list if call.args and call.args[0] >= 18]
+            self.assertEqual(cooldowns, [18, 30])
 
     def test_daily_quota_does_not_spin_or_generate_silent_fallback(self):
         from studio_audio import NarrationUnavailable
