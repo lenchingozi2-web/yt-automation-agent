@@ -1310,7 +1310,10 @@ def render_job(video, client) -> bool:
         except Exception as error:
             if video.get("status") == "completed":
                 return True
-            if attempts < 3 and transient(error):
+            if attempts < 3 and transient(error) and not isinstance(error, NarrationUnavailable):
+                # Every configured neural provider has already been attempted by
+                # process(). Do not regenerate the entire voice track three times
+                # during a provider-wide outage. Keep the saved job retryable.
                 print(f"[retry] {video['id']}: {type(error).__name__}; retrying in this run", flush=True)
                 save_fields(client, video, progress_note="Retrying a temporary render error")
                 time.sleep(2 ** attempts)
