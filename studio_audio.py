@@ -294,6 +294,14 @@ def make_audio(scene: dict, directory: Path, voice: str = VOICE, *, rate: str = 
             decoded.unlink(missing_ok=True)
             reason = str(error) if isinstance(error, ValueError) else type(error).__name__
             print(f"[narration] scene {number}, attempt {attempt + 1}: {reason}", flush=True)
+            # A missing audio payload across two requests means the Edge
+            # WebSocket service is failing, not that the narration is too long.
+            # Stop subdividing it into ever smaller requests and switch the
+            # entire video to the independent neural provider instead.
+            if engine == "edge" and type(error).__name__ == "NoAudioReceived" and attempt >= 1:
+                raise NarrationUnavailable(
+                    "Edge neural voice stopped returning audio on repeated requests; switching the whole video to backup speech."
+                ) from error
             if attempt == 2:
                 raise NarrationUnavailable(f"{engine.capitalize()} neural narration was unavailable for scene {number} after automatic retries.") from error
             time.sleep(2 ** attempt)
