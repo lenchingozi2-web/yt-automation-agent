@@ -716,7 +716,7 @@ def video_details(row: dict[str, Any]) -> tuple[list[dict[str, Any]], str, dict[
     target = first_metadata.get("duration_seconds") or first_metadata.get("duration") or merged.get("duration_seconds") or merged.get("duration")
     if target is not None:
         seconds = float(target)
-        if not math.isfinite(seconds) or seconds < 60 or seconds > 1800:
+        if not math.isfinite(seconds) or seconds <= 0 or seconds > 1800:
             raise ValueError("The saved video duration is invalid.")
         merged["duration_seconds"] = seconds
     result = []
