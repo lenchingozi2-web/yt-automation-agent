@@ -1,0 +1,26 @@
+{
+  "video_id": "EXAMPLE-ONLY",
+  "original_title": "Autonomous Surgical Systems and AI Integration: Where Are We Now?",
+  "source_confidence": "metadata_only_provisional",
+  "mode": "title_only",
+  "variants": [
+    {
+      "id": "A",
+      "hypothesis": "Clear/searchable",
+      "title": "Autonomous Surgery Explained: What AI Can Actually Do Today"
+    },
+    {
+      "id": "B",
+      "hypothesis": "Curiosity",
+      "title": "Can a Robot Really Operate Without a Surgeon?"
+    },
+    {
+      "id": "C",
+      "hypothesis": "Stakes/value",
+      "title": "AI in the Operating Room: Progress, Risks and the Human Role"
+    }
+  ],
+  "status": "draft",
+  "native_winner": null,
+  "watch_time_share": null
+}
