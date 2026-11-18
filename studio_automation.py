@@ -16,6 +16,10 @@ BRAND = ("LenxiQ: practical AI in medicine and healthcare; learning and educatio
          "building AI products and agents; human intelligence and common sense.")
 
 
+class ResearchDeferred(RuntimeError):
+    """Editorial or upstream failure, not a queue/storage failure."""
+
+
 def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list[str]) -> dict:
     command = Path(__file__).resolve().parent / "src/lib/studio-daily.ts"
     result = subprocess.run(
@@ -24,7 +28,16 @@ def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list
         capture_output=True, text=True, timeout=320,
     )
     if result.returncode:
-        raise RuntimeError(result.stderr.strip()[-1400:] or "Studio’s researched script failed.")
+        detail = result.stderr.strip()
+        final = detail.splitlines()[-1] if detail else ""
+        retryable = (
+            "No video was queued.", "No new topic passed the source-quality check",
+            "Studio found too little source material", "Studio’s writing model is unavailable",
+            "The research plan was incomplete",
+        )
+        if any(marker in final for marker in retryable):
+            raise ResearchDeferred(final)
+        raise RuntimeError(detail[-1400:] or "Studio’s researched script failed.")
     if result.stderr.strip():
         print(result.stderr.strip(), flush=True)
     return json.loads(result.stdout)
@@ -70,7 +83,20 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     topic = os.getenv("VIDEO_TOPIC", "AUTO").strip()
     brief = "Choose a fresh topic under " + os.getenv("CHANNEL_NICHE", BRAND) if topic.upper() == "AUTO" or not topic else topic
     history = list(dict.fromkeys(str(row.get("title") or "")[:150] for row in recent[:40]))
-    draft = generate_researched_draft(brief, seconds, ratio, history)
+    try:
+        draft = generate_researched_draft(brief, seconds, ratio, history)
+    except (ResearchDeferred, subprocess.TimeoutExpired) as error:
+        # A scheduled run can safely defer; manual requests must report failure.
+        # No queue entry exists yet, so the next scheduled attempt is idempotent.
+        if os.getenv("GITHUB_EVENT_NAME") != "schedule":
+            raise
+        message = ("Automatic video deferred: research timed out." if isinstance(error, subprocess.TimeoutExpired)
+                   else "Automatic video deferred: " + str(error))
+        print("::warning::" + message, flush=True)
+        if os.getenv("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write("### Automatic video deferred\n" + message + "\n")
+        return None
     scenes = draft["scenes"]
     scenes[0]["_studio"] = {k: v for k, v in draft.items() if k != "scenes"}
     scenes[0]["_studio"].update({"aspect_ratio": ratio, "automation": "daily", "automation_date": now.date().isoformat()})

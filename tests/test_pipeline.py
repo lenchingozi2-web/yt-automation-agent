@@ -763,3 +763,23 @@ class MasterCompressionQualityRegression(unittest.TestCase):
         self.assertEqual(args[args.index("-crf") + 1], "18")
         self.assertEqual(args[args.index("-bf") + 1], "0")
         self.assertEqual(args[args.index("-pix_fmt") + 1], "yuv420p")
+
+
+class ScheduledResearchFailureRegression(unittest.TestCase):
+    def test_verified_script_failure_is_classified_without_queuing(self):
+        from studio_automation import generate_researched_draft, ResearchDeferred
+        from subprocess import CompletedProcess
+        from unittest.mock import patch
+        with patch("studio_automation.subprocess.run", return_value=CompletedProcess([], 1, "",
+                "trace\\nThe draft still made claims its sources did not support. No video was queued. Try a shorter length or another story.")):
+            with self.assertRaises(ResearchDeferred):
+                generate_researched_draft("AUTO", 60, "9:16", [])
+
+    def test_unexpected_process_failure_remains_hard_error(self):
+        from studio_automation import generate_researched_draft, ResearchDeferred
+        from subprocess import CompletedProcess
+        from unittest.mock import patch
+        with patch("studio_automation.subprocess.run", return_value=CompletedProcess([], 1, "", "Unexpected crash")):
+            with self.assertRaises(RuntimeError) as error:
+                generate_researched_draft("AUTO", 60, "9:16", [])
+            self.assertNotIsInstance(error.exception, ResearchDeferred)

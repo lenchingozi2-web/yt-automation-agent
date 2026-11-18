@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import httpx
 from google.genai.errors import ClientError
 
-from research_fetcher import BEATS, Source, ask, eric_search, related_search, resolve_story_sources, search, validate_batch, write_briefing
+from research_fetcher import BEATS, Source, ask, may_keep_previous, eric_search, related_search, resolve_story_sources, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -110,3 +110,26 @@ class ResearchBriefingTest(unittest.TestCase):
     def test_successful_source_audit_returns_complete_batch(self, ask):
         ask.side_effect = [self.numbered, [{"passed": True}] * 3]
         self.assertEqual(write_briefing(None, self.groups, []), self.stories)
+
+    @patch("research_fetcher.ask")
+    def test_only_rejected_topic_is_regenerated(self, ask):
+        ask.side_effect = [
+            self.numbered,
+            [{"passed": True}, {"passed": False, "reason": "unsupported comparison"}, {"passed": True}],
+            [self.numbered[1]],
+            [{"passed": True}],
+        ]
+        self.assertEqual(write_briefing(None, self.groups, []), self.stories)
+        self.assertEqual(ask.call_args_list[2].args[2]["requested_topics"], ["education"])
+        self.assertTrue(ask.call_args_list[2].kwargs["prefer_groq"])
+        self.assertEqual(len(ask.call_args_list[3].args[2]), 1)
+
+    def test_only_a_recent_complete_briefing_can_defer_scheduled_refresh(self):
+        today = date(2026, 11, 18)
+        rows = [{"topic_area": beat, "briefing_date": "2026-11-17"} for beat in BEATS]
+        self.assertTrue(may_keep_previous(rows, today, False, "schedule"))
+        self.assertFalse(may_keep_previous(rows[:2], today, False, "schedule"))
+        self.assertFalse(may_keep_previous(rows, today, True, "schedule"))
+        self.assertFalse(may_keep_previous(rows, today, False, "workflow_dispatch"))
+        self.assertFalse(may_keep_previous(rows, date(2026, 11, 19), False, "schedule"))
+        self.assertFalse(may_keep_previous([rows[0]] * 3, today, False, "schedule"))

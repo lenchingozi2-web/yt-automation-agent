@@ -452,7 +452,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     const correction = problem ? "\nCorrect every issue from the previous draft while retaining enough distinct, grounded narration for the selected duration. " +
       JSON.stringify(duration >= 300 ? { issues: problem } : { issues: problem, previous: prior }) : "";
     let raw: Json;
-    if (auditedDraft && problem && duration >= 300) {
+    if (auditedDraft && problem) {
       const numbers = [...new Set([...problem.matchAll(/\bscene\s+#?(\d{1,3})\b/gi)].map((match) => Number(match[1])))];
       const repair = await modelJson([
         EDITORIAL,
