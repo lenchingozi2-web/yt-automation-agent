@@ -33,7 +33,7 @@ from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, PITCH, RATE, VOICE, NarrationUnavailable,
                           make_audio, narration_gain, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
 from studio_maintenance import metadata as stored_metadata, preview_filename
-from studio_master import OBJECT_LIMIT, check_media_budget, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
+from studio_master import OBJECT_LIMIT, bucket_exists, check_media_budget, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
@@ -952,7 +952,10 @@ def finish_checkpoint(client, video, final, checkpoint, thumbnail_path):
     seconds = checkpoint["seconds"]
     ratio = checkpoint["ratio"]
     if not thumbnail_path.is_file():
-        create_thumbnail([final], checkpoint["headline"], thumbnail_path, ratio=ratio, timestamps=(0,))
+        if "prader" in checkpoint["headline"].lower() and "willi" in checkpoint["headline"].lower():
+            make_prader_willi_thumbnail(thumbnail_path, ratio=ratio)
+        else:
+            create_thumbnail([final], checkpoint["headline"], thumbnail_path, ratio=ratio, timestamps=(0,))
     verify_thumbnail(thumbnail_path, ratio)
     thumbnail_url = upload_thumbnail(client, thumbnail_path, video_id)
     save_fields(client, video, progress_note="Saving MP4 preview from completed render")
@@ -974,12 +977,12 @@ def resume_checkpoint(client, video, directory, fingerprint, checkpoint):
     if not isinstance(checkpoint, dict) or checkpoint.get("version") != 1 or checkpoint.get("fingerprint") != fingerprint:
         raise ValueError("Saved render checkpoint does not match this production. No new render was started.")
     timeline = checkpoint["timeline"]
-    if not timeline or round(sum(float(item["duration"]) for item in timeline) * 30) != round(float(checkpoint["seconds"]) * 30):
+    if not timeline or round(sum(float(item["duration"]) for item in timeline) * 30) != round(float(checkpoint["expected_seconds"]) * 30):
         raise ValueError("Saved render checkpoint timeline is invalid. No new render was started.")
     save_fields(client, video, progress_note="Restoring completed render — skipping narration and scenes")
     final = directory / "checkpoint_master.mp4"
     download_upload_master(client, str(video["id"]), checkpoint["master"], final)
-    actual_ratio, _ = verify_render_geometry(final, tuple(checkpoint["size"]), checkpoint["seconds"])
+    actual_ratio, _ = verify_render_geometry(final, tuple(checkpoint["size"]), checkpoint["expected_seconds"])
     if actual_ratio != checkpoint["ratio"]:
         raise ValueError("Saved render checkpoint aspect ratio does not match.")
     validate_audio(final, expected=checkpoint["seconds"])
@@ -1189,10 +1192,12 @@ def process(video: dict[str, Any], supabase) -> None:
     chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
     save_fields(supabase, video, progress_note="Checkpointing completed full-quality render")
     preview_bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
+    if not bucket_exists(supabase, preview_bucket):
+        supabase.storage.create_bucket(preview_bucket, options={"public": True})
     master = save_upload_master(supabase, video_id, final, final, preview_bucket, video_id + ".mp4",
                                 force_master=True, preview_reserve=min(OBJECT_LIMIT, final.stat().st_size))
     checkpoint = {"version": 1, "fingerprint": fingerprint, "master": master,
-                  "timeline": timeline, "seconds": actual_seconds, "ratio": actual_ratio,
+                  "timeline": timeline, "seconds": actual_seconds, "expected_seconds": expected_seconds, "ratio": actual_ratio,
                   "size": list(expected_size), "headline": headline, "chapters": chapters,
                   "voice": narration_voice, "engine": narration_engine, "rate": narration_rate, "pitch": narration_pitch}
     save_fields(supabase, video, render_checkpoint=checkpoint, progress_note="Full-quality render checkpoint saved")
@@ -1426,7 +1431,7 @@ def render_job(video, client) -> bool:
                 continue
             print(f"[failed] {video['id']}: {type(error).__name__}: {str(error)[:300]}", flush=True)
             save_fields(client, video, status="failed", error_message=str(error)[:700],
-                        progress_note="Rendering failed; open the video to retry")
+                        progress_note=("Completed render saved; retry resumes saving" if stored_metadata(video).get("render_checkpoint") else "Rendering failed; open the video to retry"))
             return False
     save_fields(client, video, status="failed", error_message="The render exhausted its automatic retry attempts.",
                 progress_note="Rendering failed; open the video to retry")
