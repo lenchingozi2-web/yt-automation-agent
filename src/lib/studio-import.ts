@@ -61,7 +61,7 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
   const next = inputLines.slice(first+1).find(raw => raw.trim())?.trim() || "";
   // Clipboard copies often strip Markdown heading syntax.
   if (first >= 0 && /^\s*(?:#{1,6}\s*)?(?:chapter|scene|part|segment)\s+\d+\b/i.test(next)
-      && !/^(?:title|description|narration|script)\s*:/i.test(inputLines[first].trim())
+      && !/^(?:title|description|narration|script)\s*:|^(?:#{1,6}\s*)?(?:chapter|scene|part|segment)\s+\d+\b/i.test(inputLines[first].trim())
       && count(inputLines[first]) <= 18) {
     title = inputLines[first].trim().replace(/^#{1,6}\s*|\*\*/g,"");
     inputLines[first] = "";
@@ -133,7 +133,7 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
   const full = scenes.map(s=>s.narration).join(" ");
   const themes = topicTerms(full, 5);
   if(!title){title = themes.length ? themes.slice(0,4).map(w=>w[0].toUpperCase()+w.slice(1)).join(" ") : "An In-Depth Exploration";notes.push("Title inferred from narration.");}
-  if(!description){description = "Explore " + title + ". " + full.match(/^.{1,320}?(?:[.!?](?=\s|$)|$)/)?.[0]; notes.push("Description inferred from narration.");}
+  if(!description){description = "Explore " + title + ". " + (full.match(/^.{1,320}?(?:[.!?](?=\s|$)|$)/)?.[0] || full.slice(0,320).trim()); notes.push("Description inferred from narration.");}
   if(!thumbnail){thumbnail=title.split(/\s+/).slice(0,5).join(" ").toUpperCase();notes.push("Thumbnail headline inferred from narration.");}
   if(!tags.length){tags=themes;notes.push("Tags inferred from narration.");}
   return {draft:{title,description,thumbnail_title:thumbnail||title,tags,format,duration_seconds:180,scenes},
