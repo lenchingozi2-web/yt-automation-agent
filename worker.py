@@ -833,8 +833,22 @@ def save_fields(client, row: dict[str, Any], *, guard_preview: bool = False,
     row.update(payload)
 
 
+def preview_bitrates(seconds: float, fraction: float = 1.0) -> tuple[int, int]:
+    """Budget picture, AAC narration and MP4 overhead separately, in kb/s."""
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Invalid review duration")
+    # Leave 4 MB below our conservative 48 MB ceiling; reserve additional
+    # container/packet overhead instead of assuming the source audio is free.
+    total = min(6500, int(min(44_000_000, OBJECT_LIMIT * .91) * 8 / seconds / 1000 * fraction))
+    audio = 96 if total >= 450 else 64 if total >= 180 else 48
+    video = min(6000, total - audio - max(12, int(total * .035)))
+    if video < 24:
+        raise ValueError("The requested duration cannot fit a playable review copy within the object limit.")
+    return video, audio
+
+
 def storage_preview(path: Path, timeline=()) -> Path:
-    """Encode a browser-compatible MP4 within Supabase's single-file allowance."""
+    """Encode only a browser review copy; the original master is never altered."""
     if path.stat().st_size < OBJECT_LIMIT:
         return path
     seconds = ffprobe_duration(path)
@@ -842,26 +856,34 @@ def storage_preview(path: Path, timeline=()) -> Path:
     width, height = int(track["width"]), int(track["height"])
     short_side = min(width, height)
     preview = path.with_name("stream_preview.mp4")
-    nominal_kbps = min(6000, int(46_000_000 * 8 / seconds / 1000 - 176))
-    for fraction in (1, .85, .70):
-        bitrate = max(120, int(nominal_kbps * fraction))
-        # Scale to the detail the file budget can reasonably preserve.
-        target_short_side = 1080 if bitrate >= 3500 else 720 if bitrate >= 1150 else 540 if bitrate >= 570 else 480
+    if preview == path:
+        preview = path.with_name("stream_review_copy.mp4")
+    duration = sum(float(item["duration"]) for item in timeline) or None
+    for fraction in (1.0, .82, .65):
+        bitrate, audio = preview_bitrates(seconds, fraction)
+        target_short_side = (1080 if bitrate >= 3500 else 720 if bitrate >= 1150 else
+                             540 if bitrate >= 570 else 480 if bitrate >= 320 else
+                             360 if bitrate >= 175 else 270 if bitrate >= 105 else 180)
         scale = min(1, target_short_side / short_side)
         target_width, target_height = (max(2, round(side * scale / 2) * 2) for side in (width, height))
+        # Do not reuse video_encoder(): its CRF mode overrides average bitrate.
+        # AAC mono is sufficient for narration review; original stereo remains in the master.
         run(["ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", str(path),
-             "-map", "0:v:0", "-map", "0:a:0",
+             "-map", "0:v:0", "-map", "0:a:0", "-map_metadata", "-1",
              "-vf", f"scale={target_width}:{target_height}:flags=lanczos,setsar=1",
-             *video_encoder(), "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k",
-             "-bufsize", f"{bitrate * 2}k",
+             "-c:v", "libx264", "-threads", "2", "-preset", "fast", "-pix_fmt", "yuv420p",
+             "-bf", "0", "-g", "120", "-video_track_timescale", "90000",
+             "-b:v", f"{bitrate}k", "-maxrate", f"{bitrate}k", "-bufsize", f"{bitrate * 2}k",
              *keyframe_options([entry["duration"] for entry in timeline]),
-             "-c:a", "copy", "-movflags", "+faststart", str(preview)], timeout=max(1200, int(seconds * 3)))
-        if preview.stat().st_size < OBJECT_LIMIT:
-            verify_render_geometry(preview, (target_width, target_height),
-                                   sum(item["duration"] for item in timeline) or None)
-            print(f"[storage] review copy {target_width}x{target_height}, {preview.stat().st_size:,} bytes for {seconds:.1f}s", flush=True)
+             "-c:a", "aac", "-b:a", f"{audio}k", "-ac", "1", "-ar", "24000",
+             *(["-t", f"{duration:.6f}"] if duration else []),
+             "-movflags", "+faststart", str(preview)], timeout=max(1200, int(seconds * 3)))
+        size = preview.stat().st_size
+        print(f"[storage] review attempt: {target_width}x{target_height}, {bitrate}k video + {audio}k audio, {size:,} bytes / {OBJECT_LIMIT:,}", flush=True)
+        if size < OBJECT_LIMIT:
+            verify_render_geometry(preview, (target_width, target_height), duration)
             return preview
-    raise RuntimeError("Could not save an MP4 review copy within the 50 MB storage limit.")
+    raise RuntimeError("Could not save an MP4 review copy within the 50 MB storage limit after adaptive audio and picture compression." )
 
 
 def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=False):
