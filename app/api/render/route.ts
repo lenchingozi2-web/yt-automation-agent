@@ -85,7 +85,7 @@ export async function POST(request: Request) {
         if (!["failed", "pending"].includes(original.status)) {
           throw new StudioRequestError("Only queued or failed renders can be retried.", 409);
         }
-        first._studio = { ...meta, render_attempts: 0, progress_note: "Queued for rendering" };
+        first._studio = { ...meta, render_attempts: 0, progress_note: meta.render_checkpoint ? "Queued to resume completed render" : "Queued for rendering" };
         const { data, error } = await client.from("videos").update({ status: "pending", error_message: null, scenes: packedScenes() })
           .eq("id", id).eq("status", original.status).is("scenes->0->_studio->>discard_requested_at", null).select("*").maybeSingle();
         if (error) throw error;
