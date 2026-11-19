@@ -14,7 +14,7 @@ import { SceneEditor } from "./components/scene-editor";
 
 type Quota = { used: number; limit: number };
 type StorageInfo = {
-  buckets: { bytes: number; available: boolean; partial: boolean }[];
+  buckets: { name: string; bytes: number; count: number; available: boolean; partial: boolean; error?: string }[];
   retention: { published_preview_hours: number; published_thumbnail_days: number };
   immediate_dispatch_available: boolean;
 };
@@ -124,7 +124,8 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
   const { data, storage, error, refreshing, storageLoading, refresh, refreshStorage, updateVideo } = useWorkspace(user, request);
   const availableBuckets = storage?.buckets.filter((bucket) => bucket.available) ?? [];
   const bytes = availableBuckets.reduce((total, bucket) => total + bucket.bytes, 0);
-  const storageLabel = storageLoading && !storage ? "Checking…" : availableBuckets.length ? (bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " MB" : "Unavailable";
+  const storageIncomplete = storage?.buckets.some(bucket => !bucket.available || bucket.partial || bucket.error) ?? false;
+  const storageLabel = storageLoading && !storage ? "Checking…" : availableBuckets.length ? (storageIncomplete ? "≥ " : "") + (bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " MiB" : "Unavailable";
 
   function edit(next: Draft) {
     draftId.current = crypto.randomUUID();
@@ -276,6 +277,8 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
           <article className="metric">
             <div className="metric-label"><HardDrive size={17} /> Media storage</div>
             <strong>{storageLabel}</strong>
+            {storageIncomplete && <p role="status">Partial inventory; some stored media could not be measured.</p>}
+            {storage && <details><summary>Storage breakdown</summary>{storage.buckets.map(bucket => <p key={bucket.name}>{bucket.name}: {bucket.available ? `${(bucket.bytes / 1048576).toFixed(1)} MiB · ${bucket.count} files${bucket.partial ? " (partial)" : ""}` : "Unavailable"}</p>)}</details>
             {storage && <p>Midnight WAT cleanup removes stored copies of videos uploaded to YouTube at least {storage.retention.published_preview_hours} hours earlier.</p>}
             <button className="text-button" disabled={storageLoading} onClick={() => void refreshStorage()}>
               {storageLoading ? "Checking storage…" : "Refresh usage"}
