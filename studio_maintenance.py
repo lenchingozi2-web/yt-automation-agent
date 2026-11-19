@@ -75,7 +75,8 @@ def expiration_flags(row: dict[str, Any], now: datetime) -> tuple[bool, bool]:
     video_url = "" if data.get("preview_expired_at") else str(data.get("video_url") or data.get("storage_url") or "")
     thumb_url = "" if data.get("thumbnail_expired_at") else str(data.get("thumbnail_url") or "")
     archive_video = (uploaded is not None and now - uploaded >= timedelta(hours=PREVIEW_HOURS)
-                     and ("/" + render_bucket + "/") in video_url)
+                     and not data.get("preview_expired_at")
+                     and (("/" + render_bucket + "/") in video_url or (not video_url and bool(data.get("upload_master")))))
     thumbnail_since = uploaded or timestamp(data.get("completed_at")) or timestamp(row.get("created_at"))
     if thumbnail_since and data.get("publish_at"):
         release = timestamp(data["publish_at"])
@@ -97,26 +98,34 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
     if dry_run or not (archive_video or archive_thumbnail or needs_observation):
         return outcome
     from worker import save_fields
+    from studio_master import media_objects, MASTER_BUCKET
+    from studio_retry import retry_io
     if needs_observation:
         save_fields(client, row, guard_snapshot=True, upload_confirmed_observed_at=now.isoformat())
     if archive_video:
         bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
         filename = preview_filename(row)
-        if not urlsplit(str(data.get("video_url") or data.get("storage_url"))).path.endswith(f"/{bucket}/{filename}"):
+        if (data.get("video_url") or data.get("storage_url")) and not urlsplit(str(data.get("video_url") or data.get("storage_url"))).path.endswith(f"/{bucket}/{filename}"):
             raise ValueError("Preview does not belong to this production.")
-        client.storage.from_(bucket).remove(
-            [filename] if filename == f"{video_id}.mp4" else [filename, f"{video_id}.mp4"])
+        paths = [f"{video_id}.mp4", f"{video_id}-pace-v1.mp4"]
+        retry_io(lambda: client.storage.from_(bucket).remove(paths), "remove expired preview")
+        if any(item["name"] in paths for item in media_objects(client, bucket, search=video_id)):
+            raise RuntimeError("Expired preview still exists in storage")
         if data.get("upload_master") or has_master_bucket:
             from studio_master import remove_upload_master
 
             remove_upload_master(client, video_id, has_bucket=has_master_bucket)
+            if any(item["name"].startswith(video_id + "-") for item in media_objects(client, MASTER_BUCKET, search=video_id + "-")):
+                raise RuntimeError("Expired master still exists in storage")
         save_fields(client, row, guard_snapshot=True, video_url=None, storage_url=None, upload_master=None,
                     preview_expired_at=now.isoformat())
     if archive_thumbnail:
         bucket = os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")
         if not urlsplit(str(data.get("thumbnail_url"))).path.endswith(f"/{bucket}/{video_id}.jpg"):
             raise ValueError("Thumbnail does not belong to this production.")
-        client.storage.from_(bucket).remove([video_id + ".jpg"])
+        retry_io(lambda: client.storage.from_(bucket).remove([video_id + ".jpg"]), "remove expired thumbnail")
+        if any(item["name"] == video_id + ".jpg" for item in media_objects(client, bucket, search=video_id)):
+            raise RuntimeError("Expired thumbnail still exists in storage")
         save_fields(client, row, guard_snapshot=True, thumbnail_url=None,
                     thumbnail_expired_at=now.isoformat())
     return outcome
@@ -308,9 +317,9 @@ def main() -> None:
         delete_one_failed_video(client, args.delete_video_id, args.expected_title or "")
         return
     now = datetime.now(timezone.utc)
-    pinned = {revision["parent_id"] for row in video_rows(client, ["pending", "rendering"])
+    pinned = {str(revision[key]) for row in video_rows(client, ["pending", "rendering"])
               if isinstance(revision := metadata(row).get("revision"), dict)
-              and revision.get("original_media") and revision.get("parent_id")}
+              and revision.get("original_media") for key in ("parent_id", "root_id") if revision.get(key)}
     has_master_bucket = bucket_exists(client, MASTER_BUCKET)
     rows = list(video_rows(client, ["completed", "failed"]))
     if args.clear_attention or any(metadata(row).get("discard_requested_at") for row in rows):
