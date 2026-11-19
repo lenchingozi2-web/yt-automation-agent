@@ -286,7 +286,7 @@ function Workspace({ user, install, signOut }: { user: User; install: (() => voi
             })}>{busy === "cleanup" ? "Starting cleanup…" : "Clean expired media"}</button>}
           </article>
         </section>
-        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(next, notes) => { setTopic(""); importFull(next, notes); }} />
+        <Composer id="compose" busy={busy === "generate"} disabled={busy !== null} generate={generate} edit={(next, notes) => { setTopic(""); importFull(next, notes); }} enrich={async (draft, notes) => post<{draft: Draft; notes: string[]}>("/api/import", {draft, notes})} />
         <Notice feedback={feedback} dismiss={() => setFeedback(null)} />
         <ProductionQueue
           videos={data?.videos ?? []} loading={!data && !error}
