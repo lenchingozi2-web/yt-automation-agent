@@ -6,17 +6,19 @@ import { MAX_VIDEO_MINUTES } from "@/src/lib/studio-limits";
 
 const DURATIONS = [[60, "1 minute"], [90, "90 seconds"], [180, "3 minutes"], [300, "5 minutes"], [480, "8 minutes"], [600, "10 minutes"], [720, "12 minutes"], [900, "15 minutes"], [1200, "20 minutes"], [1500, "25 minutes"], [1800, "30 minutes"], [0, "Custom"]] as const;
 
-export function Composer({ id, busy, disabled, generate, edit }: {
+export function Composer({ id, busy, disabled, generate, edit, enrich }: {
   id: string;
   busy: boolean;
   disabled: boolean;
   generate: (prompt: string, seconds: number, format: Draft["format"], review: boolean, requestId: string) => Promise<boolean>;
   edit: (draft: Draft, notes?: string[]) => void;
+  enrich: (draft: Draft, notes: string[]) => Promise<{draft: Draft; notes: string[]}>;
 }) {
   const [mode, setMode] = useState<"generate" | "paste">("generate");
   const [format, setFormat] = useState<Draft["format"]>("16:9");
   const [formatChosen, setFormatChosen] = useState(false);
   const [pasteError, setPasteError] = useState("");
+  const [importing, setImporting] = useState(false);
   const [duration, setDuration] = useState(180);
   const [durationChosen, setDurationChosen] = useState(false);
   const [custom, setCustom] = useState("3");
@@ -25,19 +27,30 @@ export function Composer({ id, busy, disabled, generate, edit }: {
   const [review, setReview] = useState(false);
   const request = useRef<{ signature: string; id: string } | null>(null);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const seconds = mode === "generate" && !durationChosen ? durationFromBrief(prompt) ?? duration : duration || Math.round(Number(custom) * 60);
     if (mode === "paste") {
+      if (importing) return;
+      setImporting(true);
       try {
         const imported = parseFullScript(script, {
           format, formatChosen, durationSeconds: durationChosen ? seconds : undefined,
         });
         setPasteError("");
-        edit(imported.drafts[0], imported.notes);
+        // Explicit JSON drafts already contain creator-selected visual searches.
+        if (script.trim().startsWith("{") || script.trim().startsWith("[")) edit(imported.drafts[0], imported.notes);
+        else {
+          try {
+            const prepared = await enrich(imported.drafts[0], imported.notes);
+            edit(prepared.draft, prepared.notes);
+          } catch {
+            edit(imported.drafts[0], [...imported.notes, "AI visual planning unavailable; review the contextual fallback searches."]);
+          }
+        }
       } catch (error) {
         setPasteError(error instanceof Error ? error.message : "Studio could not parse the pasted content.");
-      }
+      } finally { setImporting(false); }
       return;
     }
     const signature = JSON.stringify([prompt.trim(), seconds, format, review]);
@@ -90,9 +103,9 @@ export function Composer({ id, busy, disabled, generate, edit }: {
               duration_seconds: duration || Math.round(Number(custom) * 60) || 180,
               scenes: [{ scene_number: 1, narration: "", search_queries: ["cinematic b-roll"] }],
             })}>Start with a blank scene</button>}
-        <button className="button button-primary" disabled={disabled || (mode === "generate" ? prompt.trim().length < 3 : !script.trim())}>
-          {busy ? "Generating script…" : mode === "paste" ? "Parse & review all scenes" : review ? "Generate script" : "Generate video"}
-          {busy ? <LoaderCircle className="spinner" size={17} /> : <ArrowRight size={17} />}
+        <button className="button button-primary" disabled={disabled || importing || (mode === "generate" ? prompt.trim().length < 3 : !script.trim())}>
+          {importing ? "Preparing metadata and footage…" : busy ? "Generating script…" : mode === "paste" ? "Parse & review all scenes" : review ? "Generate script" : "Generate video"}
+          {busy || importing ? <LoaderCircle className="spinner" size={17} /> : <ArrowRight size={17} />}
         </button>
       </div>
     </form>

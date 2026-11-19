@@ -78,3 +78,6 @@ assert sorted(deleted_files) == sorted([
 ])
 assert len(objects["renders"]) == 3
 print("Orphaned Studio media cleanup tests passed")
+
+assert expiration_flags({**published, "video_url": "", "upload_master": {"parts": ["example"]}}, now) == (True, True)
+assert expiration_flags({**published, "video_url": "", "upload_master": {"parts": ["example"]}, "preview_expired_at": now.isoformat()}, now) == (False, True)

@@ -458,3 +458,22 @@ test("video metadata distinguishes original master from compressed browser previ
   assert.equal(video.preview_resolution, 480);
   assert.equal(video.has_full_quality_master, true);
 });
+
+
+test("clipboard-stripped headings and missing metadata produce a contextual single-document import", async () => {
+  const {parseFullScript}=await import("../src/lib/studio-import.ts");
+  const opening="Imagine waking up and discovering that a machine can design a drug.";
+  const next="Pulmonary fibrosis makes lung tissue stiff and damages alveoli.";
+  const result=parseFullScript(["AI Just Designed a REAL Drug — Medicine Will Never Be the Same","",
+    "CHAPTER 1 — The molecule that never existed",opening,"",
+    "CHAPTER 2 — When breathing becomes a luxury",next].join("\n"));
+  const d=result.drafts[0];
+  assert.equal(d.title,"AI Just Designed a REAL Drug — Medicine Will Never Be the Same");
+  assert.equal(d.scenes.map(s=>s.narration).join(" "),opening+" "+next);
+  assert.equal(d.scenes[1].chapter_title,"When breathing becomes a luxury");
+  assert.ok(d.description && d.thumbnail_title && d.tags.length);
+  assert.match(d.scenes[1].search_queries.join(" "),/pulmonary fibrosis lung/);
+  const plain=parseFullScript(next).drafts[0];
+  assert.notEqual(plain.title,"Manual production");
+  assert.ok(plain.description && plain.tags.length);
+});
