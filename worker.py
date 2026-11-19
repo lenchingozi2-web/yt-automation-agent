@@ -33,7 +33,7 @@ from studio_thumbnail_art import make_prader_willi_thumbnail
 from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, PITCH, RATE, VOICE, NarrationUnavailable,
                           make_audio, narration_gain, probe, retime_srt, scale_captions, spoken_shots, validate_audio)
 from studio_maintenance import metadata as stored_metadata, preview_filename
-from studio_master import OBJECT_LIMIT, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
+from studio_master import OBJECT_LIMIT, check_media_budget, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
@@ -886,7 +886,7 @@ def storage_preview(path: Path, timeline=()) -> Path:
     raise RuntimeError("Could not save an MP4 review copy within the 50 MB storage limit after adaptive audio and picture compression." )
 
 
-def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=False):
+def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=False, checkpoint_master=None):
     bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     try:
         client.storage.get_bucket(bucket)
@@ -900,12 +900,17 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=F
     preview = storage_preview(path, timeline)
     validate_audio(preview, expected=ffprobe_duration(path))
     data = preview.read_bytes()
-    manifest = save_upload_master(client, video_id, path, preview, bucket, filename)
+    if checkpoint_master:
+        check_media_budget(client, video_id, required=path.stat().st_size + len(data), preview_bucket=bucket,
+                           preview_name=filename, master_digest=checkpoint_master['sha256'], has_master_bucket=True)
+        manifest = checkpoint_master
+    else:
+        manifest = save_upload_master(client, video_id, path, preview, bucket, filename)
     try:
         retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
             file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
     except Exception:
-        if manifest and not pace_version:
+        if manifest and not pace_version and not checkpoint_master:
             try:
                 remove_upload_master(client, video_id)
             except Exception:
@@ -933,11 +938,75 @@ def upload_thumbnail(client, path: Path, video_id: str) -> str:
     return url + ("&" if "?" in url else "?") + "v=" + hashlib.sha256(data).hexdigest()[:12]
 
 
+def checkpoint_fingerprint(scenes, ratio, details):
+    """Only immutable production inputs count; operational retry flags do not."""
+    inputs = {"scenes": scenes, "ratio": ratio, "duration": details.get("duration_seconds"),
+              "revision": details.get("revision"), "headline": details.get("thumbnail_title") or details.get("title")}
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def finish_checkpoint(client, video, final, checkpoint, thumbnail_path):
+    """Resume just the saving stage; publish approval is always/reset to manual."""
+    video_id = str(video["id"])
+    timeline = checkpoint["timeline"]
+    seconds = checkpoint["seconds"]
+    ratio = checkpoint["ratio"]
+    if not thumbnail_path.is_file():
+        create_thumbnail([final], checkpoint["headline"], thumbnail_path, ratio=ratio, timestamps=(0,))
+    verify_thumbnail(thumbnail_path, ratio)
+    thumbnail_url = upload_thumbnail(client, thumbnail_path, video_id)
+    save_fields(client, video, progress_note="Saving MP4 preview from completed render")
+    storage_url, upload_master, preview_resolution = upload_mp4(
+        client, final, video_id, timeline, checkpoint_master=checkpoint["master"])
+    save_fields(client, video, status="completed", video_url=storage_url, storage_url=storage_url,
+                thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
+                actual_duration_seconds=seconds, actual_format=ratio,
+                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v9", scene_timeline=timeline,
+                youtube_chapters=checkpoint["chapters"], narration_voice=checkpoint["voice"],
+                narration_engine=checkpoint["engine"], narration_rate=checkpoint["rate"], narration_pitch=checkpoint["pitch"],
+                render_checkpoint=None, publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
+                publish_requested=False, publish_approved_at=None, publish_approved_by=None,
+                progress_note="MP4 and thumbnail ready for review.", error_message=None)
+    print(f"[completed] {video_id}", flush=True)
+
+
+def resume_checkpoint(client, video, directory, fingerprint, checkpoint):
+    if not isinstance(checkpoint, dict) or checkpoint.get("version") != 1 or checkpoint.get("fingerprint") != fingerprint:
+        raise ValueError("Saved render checkpoint does not match this production. No new render was started.")
+    timeline = checkpoint["timeline"]
+    if not timeline or round(sum(float(item["duration"]) for item in timeline) * 30) != round(float(checkpoint["seconds"]) * 30):
+        raise ValueError("Saved render checkpoint timeline is invalid. No new render was started.")
+    save_fields(client, video, progress_note="Restoring completed render — skipping narration and scenes")
+    final = directory / "checkpoint_master.mp4"
+    download_upload_master(client, str(video["id"]), checkpoint["master"], final)
+    actual_ratio, _ = verify_render_geometry(final, tuple(checkpoint["size"]), checkpoint["seconds"])
+    if actual_ratio != checkpoint["ratio"]:
+        raise ValueError("Saved render checkpoint aspect ratio does not match.")
+    validate_audio(final, expected=checkpoint["seconds"])
+    thumbnail_path = directory / "thumbnail.jpg"
+    # Preserve the existing uploaded thumbnail if the earlier saving attempt reached it.
+    if not thumbnail_path.is_file():
+        try:
+            thumbnail_path.write_bytes(client.storage.from_(
+                os.getenv("SUPABASE_THUMBNAIL_BUCKET", "thumbnails")).download(str(video["id"]) + ".jpg"))
+            verify_thumbnail(thumbnail_path, actual_ratio)
+        except Exception as error:
+            thumbnail_path.unlink(missing_ok=True)
+            if transient(error):
+                raise
+    finish_checkpoint(client, video, final, checkpoint, thumbnail_path)
+
+
 def process(video: dict[str, Any], supabase) -> None:
     video_id = str(video["id"])
     directory = ROOT / video_id
     directory.mkdir(parents=True, exist_ok=True)
     scenes, ratio, details = video_details(video)
+    fingerprint = checkpoint_fingerprint(scenes, ratio, details)
+    saved_checkpoint = stored_metadata(video).get("render_checkpoint")
+    if saved_checkpoint is not None:
+        resume_checkpoint(supabase, video, directory, fingerprint, saved_checkpoint)
+        return
     revision = details.get("revision") or {}
     target_scene = revision.get("scene_number")
     mode = revision.get("mode")
@@ -1108,6 +1177,25 @@ def process(video: dict[str, Any], supabase) -> None:
     if cursor != round(expected_seconds * 30):
         raise ValueError("The saved scene timeline does not match the video duration.")
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
+    # Save the original before thumbnail creation or preview compression can fail.
+    # Existing private master parts become the final upload master: no duplicate HD copy.
+    raw_scenes = video.get("scenes")
+    if isinstance(raw_scenes, str):
+        raw_scenes = json.loads(raw_scenes)
+    if isinstance(raw_scenes, dict):
+        raw_scenes = raw_scenes.get("scenes")
+    if not isinstance(raw_scenes, list):
+        raw_scenes = decode(video.get("script")).get("scenes")
+    chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
+    save_fields(supabase, video, progress_note="Checkpointing completed full-quality render")
+    preview_bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
+    master = save_upload_master(supabase, video_id, final, final, preview_bucket, video_id + ".mp4",
+                                force_master=True, preview_reserve=min(OBJECT_LIMIT, final.stat().st_size))
+    checkpoint = {"version": 1, "fingerprint": fingerprint, "master": master,
+                  "timeline": timeline, "seconds": actual_seconds, "ratio": actual_ratio,
+                  "size": list(expected_size), "headline": headline, "chapters": chapters,
+                  "voice": narration_voice, "engine": narration_engine, "rate": narration_rate, "pitch": narration_pitch}
+    save_fields(supabase, video, render_checkpoint=checkpoint, progress_note="Full-quality render checkpoint saved")
     thumbnail_path = directory / "thumbnail.jpg"
     if parent and (target_scene != 1 or mode == "audio"):
         try:
@@ -1128,28 +1216,8 @@ def process(video: dict[str, Any], supabase) -> None:
         else:
             create_thumbnail(thumbnail_candidates or [final], headline, thumbnail_path, ratio=actual_ratio,
                              timestamps=(.2, 1.4) if thumbnail_candidates else (0,))
-    thumbnail_url = upload_thumbnail(supabase, thumbnail_path, video_id)
+    finish_checkpoint(supabase, video, final, checkpoint, thumbnail_path)
 
-    save_fields(supabase, video, progress_note="Saving MP4 preview")
-    storage_url, upload_master, preview_resolution = upload_mp4(supabase, final, video_id, timeline)
-    raw_scenes = video.get("scenes")
-    if isinstance(raw_scenes, str):
-        raw_scenes = json.loads(raw_scenes)
-    if isinstance(raw_scenes, dict):
-        raw_scenes = raw_scenes.get("scenes")
-    if not isinstance(raw_scenes, list):
-        raw_scenes = decode(video.get("script")).get("scenes")
-    chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
-    save_fields(supabase, video, status="completed", video_url=storage_url, storage_url=storage_url,
-                thumbnail_url=thumbnail_url, upload_master=upload_master, preview_resolution=preview_resolution,
-                actual_duration_seconds=actual_seconds, actual_format=actual_ratio,
-                completed_at=datetime.now(timezone.utc).isoformat(), render_version="studio-v9", scene_timeline=timeline,
-                youtube_chapters=chapters, narration_voice=narration_voice, narration_engine=narration_engine,
-                narration_rate=narration_rate, narration_pitch=narration_pitch,
-                publish_status="awaiting_review", publish_attempts=0, render_attempts=0,
-                publish_requested=False, publish_approved_at=None, publish_approved_by=None,
-                progress_note="MP4 and thumbnail ready for review.", error_message=None)
-    print(f"[completed] {video_id}", flush=True)
 
 
 def speed_up_preview(source: Path, target: Path, timeline: list[dict], speed: float) -> tuple[list[dict], float]:
