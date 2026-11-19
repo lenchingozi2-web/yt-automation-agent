@@ -98,7 +98,7 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
     if dry_run or not (archive_video or archive_thumbnail or needs_observation):
         return outcome
     from worker import save_fields
-    from studio_master import media_objects, MASTER_BUCKET
+    from studio_master import media_objects, MASTER_BUCKET, bucket_exists
     from studio_retry import retry_io
     if needs_observation:
         save_fields(client, row, guard_snapshot=True, upload_confirmed_observed_at=now.isoformat())
@@ -111,10 +111,11 @@ def clean_row(client: Any, row: dict[str, Any], now: datetime, dry_run: bool = F
         retry_io(lambda: client.storage.from_(bucket).remove(paths), "remove expired preview")
         if any(item["name"] in paths for item in media_objects(client, bucket, search=video_id)):
             raise RuntimeError("Expired preview still exists in storage")
-        if data.get("upload_master") or has_master_bucket:
+        master_available = has_master_bucket if has_master_bucket is not None else bucket_exists(client, MASTER_BUCKET)
+        if master_available:
             from studio_master import remove_upload_master
 
-            remove_upload_master(client, video_id, has_bucket=has_master_bucket)
+            remove_upload_master(client, video_id, has_bucket=master_available)
             if any(item["name"].startswith(video_id + "-") for item in media_objects(client, MASTER_BUCKET, search=video_id + "-")):
                 raise RuntimeError("Expired master still exists in storage")
         save_fields(client, row, guard_snapshot=True, video_url=None, storage_url=None, upload_master=None,
