@@ -128,13 +128,13 @@ def reclaim_expired_uploaded_media(client, video_id: str) -> int:
         return 0
 
 
-def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str):
+def save_upload_master(client, video_id: str, master: Path, preview: Path, preview_bucket: str, preview_name: str, *, force_master=False, preview_reserve=None):
     digest = ""
-    if preview != master:
+    if force_master or preview != master:
         with master.open("rb") as source:
             digest = hashlib.file_digest(source, "sha256").hexdigest()
     has_bucket = bucket_exists(client, MASTER_BUCKET)
-    preview_bytes = preview.stat().st_size
+    preview_bytes = preview.stat().st_size if preview_reserve is None else preview_reserve
     master_bytes = master.stat().st_size if digest else 0
     try:
         check_media_budget(client, video_id, required=preview_bytes + master_bytes, preview_bucket=preview_bucket,
