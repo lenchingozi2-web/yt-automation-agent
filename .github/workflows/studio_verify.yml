@@ -8,6 +8,7 @@ on:
       - 'studio_maintenance.py'
       - 'worker.py'
       - 'studio_master.py'
+      - 'studio_pipeline.py'
       - 'tests/**'
       - '.github/workflows/studio_verify.yml'
   workflow_dispatch:
@@ -35,5 +36,6 @@ jobs:
       - run: python -m py_compile studio_maintenance.py research_fetcher.py worker.py
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
       - run: ffmpeg -version
+      - run: PYTHONPATH=. python -m unittest discover -s tests -p test_studio_pipeline.py
       - run: PYTHONPATH=. python -m unittest discover -s tests -p test_render_checkpoint.py
       - run: PYTHONPATH=. python -m unittest discover -s tests -p test_long_preview.py
