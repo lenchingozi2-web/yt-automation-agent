@@ -12,6 +12,7 @@ import json
 import math
 import re
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager, contextmanager
 import os
 import subprocess
 import unicodedata
@@ -124,7 +125,41 @@ def prioritize_footage(candidates, tried, limit: int):
     return (first + alternate)[:limit]
 
 
-async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict) -> str | None:
+@asynccontextmanager
+async def stock_http_client(shared=None):
+    if shared is not None:
+        yield shared
+    else:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True) as client:
+            yield client
+
+
+@contextmanager
+def stock_session():
+    # One event loop and connection pool per video. No shared mutable state
+    # across videos; selection stays serialized to preserve deduplication.
+    with asyncio.Runner() as runner:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True)
+        try:
+            yield runner, client
+        finally:
+            runner.run(client.aclose())
+
+
+def narration_duration(path: Path) -> float:
+    # make_audio already validates the PCM and captions. Its WAV header gives
+    # the exact sample duration without spawning another ffprobe per scene.
+    try:
+        with wave.open(str(path), "rb") as stream:
+            seconds = stream.getnframes() / stream.getframerate()
+        if math.isfinite(seconds) and seconds > 0:
+            return max(.5, seconds)
+    except (OSError, EOFError, wave.Error, ZeroDivisionError):
+        pass
+    return ffprobe_duration(path)
+
+
+async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict, *, shared_client=None) -> str | None:
     """Choose stock media by relevance and usable detail after cropping."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
     if not key or catalog.get("pixabay_unavailable"):
@@ -137,7 +172,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     contextual = [] if override else contextual_searches(scene.get("spoken", narration), narration, scene.get("video_title", ""))
     interrupted = False
     tried = set()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), follow_redirects=True) as client:
+    async with stock_http_client(shared_client) as client:
         async def search(kind: str, query: str) -> list:
             nonlocal interrupted
             cache_key = (kind, query)
@@ -269,7 +304,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     return None
 
 
-def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: set[str], catalog: dict, shot: int):
+def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: set[str], catalog: dict, shot: int, *, session=None):
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
     fingerprint = hashlib.sha256(json.dumps([
@@ -285,7 +320,11 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     receipt.unlink(missing_ok=True)
     target.unlink(missing_ok=True)
     target.with_suffix(".png").unlink(missing_ok=True)
-    clip_id = asyncio.run(fetch_pixabay(scene, target, used, recent, catalog))
+    if session is None:
+        clip_id = asyncio.run(fetch_pixabay(scene, target, used, recent, catalog))
+    else:
+        runner, client = session
+        clip_id = runner.run(fetch_pixabay(scene, target, used, recent, catalog, shared_client=client))
     if clip_id:
         receipt.write_text(f"{clip_id}:{fingerprint}")
         used.add(clip_id)
@@ -1080,7 +1119,7 @@ def process(video: dict[str, Any], supabase) -> None:
                     args = (voice,) if voice != VOICE else ()
                     provider_options = {"engine": engine} if engine != "edge" else voice_options
                     audio, srt = make_audio(scene, directory, *args, **provider_options)
-                    audio_plan.append((audio, srt, ffprobe_duration(audio)))
+                    audio_plan.append((audio, srt, narration_duration(audio)))
                 narration_engine, narration_voice = engine, voice
                 break
             except NarrationUnavailable:
@@ -1121,7 +1160,7 @@ def process(video: dict[str, Any], supabase) -> None:
 
     workers = 1 if parent else render_parallelism()
     print(f"[pipeline] {workers} encoder(s); sequential stock selection, ordered output", flush=True)
-    with scene_pipeline(workers) as pipeline:
+    with scene_pipeline(workers) as pipeline, stock_session() as stock:
         for index, scene in enumerate(selected):
             if pipeline.full():
                 collect_scene(*pipeline.pop())
@@ -1155,7 +1194,7 @@ def process(video: dict[str, Any], supabase) -> None:
             raw, clip_ids, lengths = [], [], []
             for shot, (frames, spoken) in enumerate(windows):
                 try:
-                    match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
+                    match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot, session=stock)
                 except TemporaryRenderError:
                     if keep_audio and scene.get("footage_override") and not raw:
                         raise
