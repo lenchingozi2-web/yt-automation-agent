@@ -23,11 +23,32 @@ function chunk(text: string): string[] {
   }
   return out;
 }
-function keywords(narration: string, visuals:string[]): string[] {
+function topicTerms(text: string, limit = 5): string[] {
+  const filler = /^(imagine|something|simply|actually|particularly|interesting|important|first|next|real|just|designed|medicine|scientists|researchers|people|human|different|rather|every|ordinary|extraordinary|because|requires|question|become|began|eventually|today|inside|around|potential|process|happens|might|help|system|things|story|problem|example|consider|understand)$/i;
+  const frequency = new Map<string, number>();
+  for (const w of text.match(/[\p{L}][\p{L}\p{N}-]{2,}/gu) || []) {
+    const key = w.toLowerCase();
+    if (!ignore.has(key) && !filler.test(key)) frequency.set(key, (frequency.get(key) || 0) + 1);
+  }
+  return [...frequency].sort((a,b) => b[1]-a[1]).slice(0,limit).map(([w])=>w);
+}
+function keywords(narration: string, visuals:string[], context = ""): string[] {
   const visual=visuals.join("; ").split(/[;,]/).map(x=>x.replace(/^(show|display|cut to|use|image of|b-roll|on screen)\s+/i,"").trim()).filter(Boolean);
   if(visual.length)return [...new Set(visual.map(v=>v.split(/\s+/).slice(0,7).join(" ")))].slice(0,5);
-  const terms=(narration.match(/[\p{L}][\p{L}\p{N}-]{3,}/gu)||[]).filter(w=>!ignore.has(w.toLowerCase()));
-  return [terms.slice(0,4).join(" ")||"educational technology"];
+  const combined = narration + " " + context;
+  const concepts: [RegExp,string][] = [
+    [/pulmonary fibrosis|scar(?:red|ring)? lung|lung tissue|alveoli|spirometry|forced vital capacity/i,"pulmonary fibrosis lung medical illustration"],
+    [/spirometry|forced vital capacity|exhale/i,"patient spirometry lung function test"],
+    [/kinase|TNIK|protein binding|molecular target/i,"protein molecule binding 3d animation"],
+    [/chemical compound|molecule|drug discovery|molecular structure/i,"pharmaceutical molecular research laboratory"],
+    [/clinical trial|placebo|patients|dosage/i,"doctor clinical research patient examination"],
+    [/biological age|aging clock|collagen|cellular/i,"cell biology medical animation"],
+    [/artificial intelligence|\bAI\b/i,"artificial intelligence computer research"],
+  ];
+  const direct = concepts.filter(([pattern]) => pattern.test(narration)).map(([,query])=>query);
+  const nearby = concepts.filter(([pattern]) => pattern.test(combined)).map(([,query])=>query);
+  const local = topicTerms(narration, 3).join(" ");
+  return [...new Set([...direct, ...nearby, local].filter(Boolean))].slice(0,3).concat(!direct.length && !nearby.length && !local ? ["documentary contextual illustration"] : []);
 }
 function readContent(content:string): {draft:Draft; seconds:number; notes:string[]; formatFound:boolean} {
   let title="",description="",thumbnail="",format:Draft["format"]="16:9",formatFound=false,seconds=0,timeline=0;
@@ -35,7 +56,17 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
   let current:Block={lines:[],visuals:[]};
   const blocks:Block[]=[];
   const flush=()=>{if(current.lines.some(Boolean))blocks.push(current);current={lines:[],visuals:[]};};
-  for(const raw of content.replace(/\r\n?/g,"\n").split("\n")){
+  const inputLines = content.replace(/\r\n?/g,"\n").split("\n");
+  const first = inputLines.findIndex(raw => raw.trim());
+  const next = inputLines.slice(first+1).find(raw => raw.trim())?.trim() || "";
+  // Clipboard copies often strip Markdown heading syntax.
+  if (first >= 0 && /^\s*(?:#{1,6}\s*)?(?:chapter|scene|part|segment)\s+\d+\b/i.test(next)
+      && !/^(?:title|description|narration|script)\s*:/i.test(inputLines[first].trim())
+      && count(inputLines[first]) <= 18) {
+    title = inputLines[first].trim().replace(/^#{1,6}\s*|\*\*/g,"");
+    inputLines[first] = "";
+  }
+  for(const raw of inputLines){
     const line=raw.trim().replace(/^>\s?/,"");
     if(line.startsWith(String.fromCharCode(96,96,96))||line.startsWith("~~~")){inFence=!inFence;foundCode=true;continue;}
     if(inFence)continue;
@@ -72,11 +103,11 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
     if(marker||numbered){
       const rawLabel=(marker?.[1]||numbered?.[1]||"").trim();
       const label=rawLabel.replace(/^(?:scene|segment|chapter|part)\s+\d+\s*(?:[:.\-–—]\s*|\s+)/i,"").trim() || rawLabel;
-      if(!started&&!title&&marker&&!/^(opening|hook|intro|scene|narration|part|chapter|segment|script)/i.test(label))title=label;
+      if(!started&&!title&&marker&&!/^(opening|hook|intro|scene|narration|part|chapter|segment|script)/i.test(rawLabel))title=label;
       else if(/^(narration|voiceover|script)$/i.test(label))mode="speech";
       else if(/^(visuals?|footage|b-roll)$/i.test(label))mode="visual";
       else {
-        const isInlineSpeech = Boolean(numbered && !marker && (label.split(/\s+/).length >= 5 || /[.!?]["”]*$/.test(label)));
+        const isInlineSpeech = Boolean(numbered && !marker && (/^scene\s+\d+\s*:/i.test(clean) || /^\d{1,2}:\d\d/.test(clean)) && (label.split(/\s+/).length >= 5 || /[.!?]["”]*$/.test(label)));
         flush();
         current.heading = isInlineSpeech ? "Scene" : label.replace(/\d{1,2}:\d\d\s*[-–—]\s*\d{1,2}:\d\d/g, "").trim().slice(0, 80);
         mode="speech";started=true;
@@ -92,14 +123,19 @@ function readContent(content:string): {draft:Draft; seconds:number; notes:string
   flush();
   const scenes:Scene[]=[];
   for(const b of blocks)for(const [i,part] of chunk(b.lines.join(" ")).entries())scenes.push({
-    scene_number:scenes.length+1,narration:part,search_queries:keywords(part,b.visuals),
+    scene_number:scenes.length+1,narration:part,search_queries:keywords(part,b.visuals,[b.heading,title].filter(Boolean).join(" ")),
     ...(i===0&&b.heading?{chapter_title:b.heading}:{}),
     ...(b.visuals.length?{visual_notes:b.visuals.join("\n")}:{})
   });
   if(!scenes.length)throw Error("No narration detected. Paste your full script, optionally using Narration: and Visuals: labels.");
   const notes:string[]=[];
   if(foundCode)notes.push("Code blocks were excluded from spoken narration; check the scene directions.");
-  if(!title){title="Manual production";notes.push("No title detected. Add one in the editor.");}
+  const full = scenes.map(s=>s.narration).join(" ");
+  const themes = topicTerms(full, 5);
+  if(!title){title = themes.length ? themes.slice(0,4).map(w=>w[0].toUpperCase()+w.slice(1)).join(" ") : "An In-Depth Exploration";notes.push("Title inferred from narration.");}
+  if(!description){description = "Explore " + title + ". " + full.match(/^.{1,320}?(?:[.!?](?=\s|$)|$)/)?.[0]; notes.push("Description inferred from narration.");}
+  if(!thumbnail){thumbnail=title.split(/\s+/).slice(0,5).join(" ").toUpperCase();notes.push("Thumbnail headline inferred from narration.");}
+  if(!tags.length){tags=themes;notes.push("Tags inferred from narration.");}
   return {draft:{title,description,thumbnail_title:thumbnail||title,tags,format,duration_seconds:180,scenes},
     seconds:seconds||timeline,notes,formatFound};
 }
