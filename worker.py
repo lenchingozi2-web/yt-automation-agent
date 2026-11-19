@@ -36,6 +36,7 @@ from studio_maintenance import metadata as stored_metadata, preview_filename
 from studio_master import OBJECT_LIMIT, bucket_exists, check_media_budget, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
 from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
+from studio_pipeline import scene_pipeline, render_parallelism
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
 
 load_dotenv()
@@ -1025,6 +1026,7 @@ def process(video: dict[str, Any], supabase) -> None:
             supabase, video_id, float(target),
             os.getenv("SUPABASE_VIDEO_BUCKET", "renders"),
         )
+    phase_started = time.monotonic()
     audio_plan = []
     thumbnail_candidates = []
     if parent:
@@ -1089,6 +1091,8 @@ def process(video: dict[str, Any], supabase) -> None:
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
                                     ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else (1800 if not parent else None),
                                     words=sum(len(scene["narration"].split()) for scene in selected))
+    print(f"[timing] narration/preparation: {time.monotonic()-phase_started:.1f}s", flush=True)
+    phase_started = time.monotonic()
     if mode != "audio":
         runtime = sum(float(item["duration"]) for item in original_timeline) if parent else sum(durations)
         # Keep long masters practical on a shared free storage budget.
@@ -1098,66 +1102,82 @@ def process(video: dict[str, Any], supabase) -> None:
     rendered = []
     voices = []
     replacement_timeline = []
-    for index, scene in enumerate(selected):
-        number = scene["scene_number"]
-        logical = scene["logical_scene"]
-        entry = originals[index] if index < len(originals) else None
-        save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
-        if parent and mode == "audio":
-            args = (narration_voice,) if narration_voice != VOICE else ()
-            audio, _ = make_audio(scene, directory, *args,
-                                  **({"engine": narration_engine} if narration_engine != "edge" else voice_options))
-            duration = float(entry["duration"])
-            voice = directory / f"revised_audio_{number:02d}.wav"
-            prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
-            voices.append(voice)
-            replacement_timeline.append(entry)
-            continue
-        keep_audio = bool(parent and mode == "visual")
-        if keep_audio:
-            audio = directory / f"source_audio_{number:02d}.wav"
-            srt = audio.with_suffix(".srt")
-            extract_audio(parent, entry, audio)
-            srt.write_text(entry["captions"], encoding="utf-8")
-        else:
-            audio, srt, natural = audio_plan[index]
-        seconds = float(entry["duration"]) if keep_audio else durations[index]
-        tempo = natural / seconds if not keep_audio else 1
-        if not keep_audio and abs(natural - seconds) > 1 / 30:
-            srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
-        windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
-        raw, clip_ids, lengths = [], [], []
-        for shot, (frames, spoken) in enumerate(windows):
-            try:
-                match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
-            except TemporaryRenderError:
-                if keep_audio and scene.get("footage_override") and not raw:
-                    raise
-                match = None
-            if match:
-                source, clip_id = match
-                clip_ids.append(clip_id)
-            else:
-                source = narration_motion(spoken, directory / f"spoken_{number:02d}_{shot:02d}.mp4",
-                                          size or video_size(scene), frames)
-            raw.append(source)
-            lengths.append(frames)
-        if keep_audio and scene.get("footage_override") and not clip_ids:
-            raise ValueError(f"No stock media matched your requested footage for scene {logical}. Try a different search term.")
-        clip = render_scene(scene, raw, audio, srt, directory, duration=seconds,
-                            normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo, shot_frames=lengths)
-        for footage in raw:
+    def collect_scene(clip, metadata):
+        # Only the coordinator updates the ordered timeline and removes input files.
+        for footage in metadata["raw"]:
             if footage.name.startswith("raw_") and len(thumbnail_candidates) < 3:
                 thumbnail_candidates.append(footage)
             elif not parent:
                 footage.unlink(missing_ok=True)
                 footage.with_suffix(".pixabay").unlink(missing_ok=True)
         rendered.append(clip)
-        voice = clip.with_suffix(".wav")
-        voices.append(voice)
-        replacement_timeline.append({"scene_number": logical, "duration": round(round(seconds * 30) / 30, 6),
-                                     "captions": srt.read_text(encoding="utf-8"), "footage": clip_ids,
-                                     "narration_cards": len(windows) - len(clip_ids)})
+        voices.append(clip.with_suffix(".wav"))
+        replacement_timeline.append({
+            "scene_number": metadata["logical"],
+            "duration": round(round(metadata["seconds"] * 30) / 30, 6),
+            "captions": metadata["srt"].read_text(encoding="utf-8"),
+            "footage": metadata["clip_ids"], "narration_cards": metadata["cards"],
+        })
+
+    workers = 1 if parent else render_parallelism()
+    print(f"[pipeline] {workers} encoder(s); sequential stock selection, ordered output", flush=True)
+    with scene_pipeline(workers) as pipeline:
+        for index, scene in enumerate(selected):
+            if pipeline.full():
+                collect_scene(*pipeline.pop())
+            number = scene["scene_number"]
+            logical = scene["logical_scene"]
+            entry = originals[index] if index < len(originals) else None
+            save_fields(supabase, video, progress_note=(f"Editing scene {logical}" if parent else f"Preparing scene {number} of {len(scenes)}"))
+            if parent and mode == "audio":
+                args = (narration_voice,) if narration_voice != VOICE else ()
+                audio, _ = make_audio(scene, directory, *args,
+                                      **({"engine": narration_engine} if narration_engine != "edge" else voice_options))
+                duration = float(entry["duration"])
+                voice = directory / f"revised_audio_{number:02d}.wav"
+                prepare_scene_audio(audio, voice, duration, tempo=ffprobe_duration(audio) / duration)
+                voices.append(voice)
+                replacement_timeline.append(entry)
+                continue
+            keep_audio = bool(parent and mode == "visual")
+            if keep_audio:
+                audio = directory / f"source_audio_{number:02d}.wav"
+                srt = audio.with_suffix(".srt")
+                extract_audio(parent, entry, audio)
+                srt.write_text(entry["captions"], encoding="utf-8")
+            else:
+                audio, srt, natural = audio_plan[index]
+            seconds = float(entry["duration"]) if keep_audio else durations[index]
+            tempo = natural / seconds if not keep_audio else 1
+            if not keep_audio and abs(natural - seconds) > 1 / 30:
+                srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
+            windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
+            raw, clip_ids, lengths = [], [], []
+            for shot, (frames, spoken) in enumerate(windows):
+                try:
+                    match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot)
+                except TemporaryRenderError:
+                    if keep_audio and scene.get("footage_override") and not raw:
+                        raise
+                    match = None
+                if match:
+                    source, clip_id = match
+                    clip_ids.append(clip_id)
+                else:
+                    source = narration_motion(spoken, directory / f"spoken_{number:02d}_{shot:02d}.mp4",
+                                              size or video_size(scene), frames)
+                raw.append(source)
+                lengths.append(frames)
+            if keep_audio and scene.get("footage_override") and not clip_ids:
+                raise ValueError(f"No stock media matched your requested footage for scene {logical}. Try a different search term.")
+            metadata = {"raw": raw, "logical": logical, "seconds": seconds, "srt": srt,
+                        "clip_ids": clip_ids, "cards": len(windows) - len(clip_ids)}
+            pipeline.submit(render_scene, metadata, scene, raw, audio, srt, directory, duration=seconds,
+                            normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo, shot_frames=lengths)
+        for result, metadata in pipeline.drain():
+            collect_scene(result, metadata)
+    print(f"[timing] footage and scene encoding: {time.monotonic()-phase_started:.1f}s", flush=True)
+    phase_started = time.monotonic()
     save_fields(supabase, video, progress_note="Joining scenes")
     if parent:
         start = round(float(originals[0]["start"]) * 30)
@@ -1179,6 +1199,7 @@ def process(video: dict[str, Any], supabase) -> None:
     actual_ratio, actual_seconds = verify_render_geometry(final, expected_size, expected_seconds)
     if cursor != round(expected_seconds * 30):
         raise ValueError("The saved scene timeline does not match the video duration.")
+    print(f"[timing] joining and validation: {time.monotonic()-phase_started:.1f}s", flush=True)
     headline = str(details.get("thumbnail_title") or details.get("title") or "New story")
     # Save the original before thumbnail creation or preview compression can fail.
     # Existing private master parts become the final upload master: no duplicate HD copy.
@@ -1190,6 +1211,7 @@ def process(video: dict[str, Any], supabase) -> None:
     if not isinstance(raw_scenes, list):
         raw_scenes = decode(video.get("script")).get("scenes")
     chapters = youtube_chapters(raw_scenes, timeline, actual_seconds)
+    phase_started = time.monotonic()
     save_fields(supabase, video, progress_note="Checkpointing completed full-quality render")
     preview_bucket = os.getenv("SUPABASE_VIDEO_BUCKET", "renders")
     if not bucket_exists(supabase, preview_bucket):
@@ -1222,6 +1244,7 @@ def process(video: dict[str, Any], supabase) -> None:
             create_thumbnail(thumbnail_candidates or [final], headline, thumbnail_path, ratio=actual_ratio,
                              timestamps=(.2, 1.4) if thumbnail_candidates else (0,))
     finish_checkpoint(supabase, video, final, checkpoint, thumbnail_path)
+    print(f"[timing] checkpoint and saving: {time.monotonic()-phase_started:.1f}s", flush=True)
 
 
 
