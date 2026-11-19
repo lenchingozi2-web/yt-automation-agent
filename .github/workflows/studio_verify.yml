@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   regression:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,12 @@ jobs:
       - run: python -m unittest discover -s tests -p test_research_fetcher.py
       - run: PYTHONPATH=. python tests/test_retention.py
       - run: python -m py_compile studio_maintenance.py research_fetcher.py worker.py
-      - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - name: Ensure FFmpeg, FFprobe and subtitle support
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null || ! ffmpeg -hide_banner -filters | grep -q ' subtitles '; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update -qq
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends ffmpeg fonts-dejavu-core
+          fi
       - run: ffmpeg -version
       - run: PYTHONPATH=. python -m unittest discover -s tests -p test_studio_pipeline.py
       - run: PYTHONPATH=. python -m unittest discover -s tests -p test_render_checkpoint.py
