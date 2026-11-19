@@ -619,7 +619,9 @@ export async function enrichImportedDraft(draft: Draft, notes: string[]): Promis
   if(missing.description && clean(meta.description,1800))result.description=clean(meta.description,1800);
   if(missing.thumbnail && clean(meta.thumbnail,65))result.thumbnail_title=clean(meta.thumbnail,65);
   if(missing.tags && list(meta.tags).length)result.tags=list(meta.tags).map(v=>clean(v,45)).filter(Boolean).slice(0,12);
-  return {draft:result,notes:[...notes.filter(n=>!n.includes("inferred from narration")), failed ?
+  const metadataMissing = (missing.title && !clean(meta.title,95)) || (missing.description && !clean(meta.description,1800)) ||
+    (missing.thumbnail && !clean(meta.thumbnail,65)) || (missing.tags && !list(meta.tags).length);
+  return {draft:result,notes:[...notes.filter(n=>metadataMissing || !n.includes("inferred from narration")), failed || metadataMissing ?
     "Some AI visual suggestions were unavailable; those scenes use contextual fallback searches. Review them before rendering." :
     "Metadata and scene searches prepared; original narration preserved."]};
 }
