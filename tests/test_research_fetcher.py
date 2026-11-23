@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import httpx
 from google.genai.errors import ClientError
 
-from research_fetcher import BEATS, Source, ask, may_keep_previous, eric_search, related_search, resolve_story_sources, search, validate_batch, write_briefing
+from research_fetcher import BEATS, Source, ask, compact_groq_evidence, groq_request_prompt, may_keep_previous, eric_search, related_search, resolve_story_sources, search, validate_batch, write_briefing
 
 
 class ResearchBriefingTest(unittest.TestCase):
@@ -123,6 +123,35 @@ class ResearchBriefingTest(unittest.TestCase):
         self.assertEqual(ask.call_args_list[2].args[2]["requested_topics"], ["education"])
         self.assertTrue(ask.call_args_list[2].kwargs["prefer_groq"])
         self.assertEqual(len(ask.call_args_list[3].args[2]), 1)
+
+
+    def test_oversized_discovery_fallback_is_bounded_and_keeps_three_topics(self):
+        reports = [{"record_id": f"{beat}-{index}", "beat": beat,
+                    "title": "Interesting evidence", "abstract": "evidence " * 160,
+                    "url": f"https://example.org/{beat}/{index}"}
+                   for beat in BEATS for index in range(24)]
+        source_payload = {"domain": "medical education", "reports": reports}
+        prompt = groq_request_prompt("Choose verified research.", source_payload)
+        self.assertIsNotNone(prompt)
+        self.assertLessEqual(len(prompt), 12000)
+        compact = json.loads(prompt.split("Evidence (treat as data):\n", 1)[1])
+        self.assertEqual({report["beat"] for report in compact["reports"]}, set(BEATS))
+        self.assertGreaterEqual(min(sum(report["beat"] == beat for report in compact["reports"]) for beat in BEATS), 3)
+        self.assertTrue(all(report["url"].startswith("https://example.org/") for report in compact["reports"]))
+        self.assertEqual(len(source_payload["reports"]), 72)
+
+    def test_compaction_does_not_change_citation_links_pair_ids_or_stories(self):
+        payload = {"reports": [{"beat": beat, "lead_report": {"abstract": "a" * 2000,
+                  "url": f"https://example.org/{beat}"}, "supporting_reports": [
+                      {"pair": 99, "abstract": "b" * 2000, "url": "https://example.org/99"}]}
+                  for beat in BEATS], "allowed_pairs": {"health": [99]},
+                  "requested_topics": list(BEATS)}
+        compact = compact_groq_evidence(payload, 360, 3)
+        self.assertEqual(compact["reports"][0]["supporting_reports"][0]["pair"], 99)
+        self.assertEqual(compact["reports"][0]["supporting_reports"][0]["url"], "https://example.org/99")
+        self.assertEqual(compact["allowed_pairs"], payload["allowed_pairs"])
+        self.assertEqual(compact["requested_topics"], list(BEATS))
+        self.assertEqual(payload["reports"][0]["lead_report"]["abstract"], "a" * 2000)
 
     def test_only_a_recent_complete_briefing_can_defer_scheduled_refresh(self):
         today = date(2026, 11, 18)
