@@ -127,7 +127,10 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
 def main() -> None:
     url = os.getenv("SUPABASE_URL") or os.environ["NEXT_PUBLIC_SUPABASE_URL"]
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_KEY"]
-    queue_daily(create_client(url, key))
+    queued = queue_daily(create_client(url, key))
+    if queued and os.getenv("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("queued=true\n")
 
 
 if __name__ == "__main__":
