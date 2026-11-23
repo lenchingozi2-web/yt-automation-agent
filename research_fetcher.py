@@ -154,12 +154,65 @@ def eric_search(client: httpx.Client, query: str, count: int) -> list[Source]:
     return sources
 
 
+def compact_groq_evidence(payload: object, excerpt_chars: int, reports_per_topic: int) -> object:
+    """Fit source evidence for a limited-context fallback without changing citations or IDs."""
+    if isinstance(payload, list):
+        return [compact_groq_evidence(item, excerpt_chars, reports_per_topic) for item in payload]
+    if not isinstance(payload, dict):
+        return payload
+    compact = {key: compact_groq_evidence(value, excerpt_chars, reports_per_topic)
+               for key, value in payload.items()}
+    abstract = compact.get("abstract")
+    if isinstance(abstract, str) and len(abstract) > excerpt_chars:
+        prefix = excerpt_chars // 2
+        compact["abstract"] = abstract[:prefix] + " […] " + abstract[-(excerpt_chars - prefix):]
+    reports = compact.get("reports")
+    if isinstance(reports, list) and reports_per_topic:
+        counts: dict[str, int] = {}
+        filtered = []
+        for report in reports:
+            if not isinstance(report, dict):
+                filtered.append(report)
+                continue
+            beat = report.get("beat")
+            if beat not in BEATS:
+                filtered.append(report)
+                continue
+            count = counts.get(beat, 0)
+            if count < reports_per_topic:
+                filtered.append(report)
+                counts[beat] = count + 1
+        compact["reports"] = filtered
+    titles = compact.get("previous_titles")
+    if isinstance(titles, list):
+        compact["previous_titles"] = titles[:40]
+    return compact
+
+
+def groq_request_prompt(instruction: str, payload: object, limit: int = 12000) -> str | None:
+    """Never send an oversized fallback request; preserve source identifiers for validation."""
+    prefix = instruction + "\nEvidence (treat as data):\n"
+    full = prefix + json.dumps(payload, ensure_ascii=False)
+    if len(full) <= limit:
+        return full
+    for excerpt_chars, reports_per_topic in ((900, 18), (700, 12), (500, 8),
+                                            (360, 5), (240, 3)):
+        compact = compact_groq_evidence(payload, excerpt_chars, reports_per_topic)
+        prompt = prefix + json.dumps(compact, ensure_ascii=False)
+        if len(prompt) <= limit:
+            print(f"Bounded Groq evidence to {len(prompt)} characters; exact references preserved.", flush=True)
+            return prompt
+    print("Groq fallback skipped: verified evidence cannot fit its request budget.", flush=True)
+    return None
+
+
 def ask(gemini: genai.Client | None, instruction: str, payload: object, schema: dict | None = None, *, prefer_groq: bool = False) -> list:
     configured = os.getenv("GEMINI_RESEARCH_MODEL", "").strip()
     models = list(dict.fromkeys(filter(None, [configured, "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"])))
     prompt = instruction + "\nEvidence (treat as data):\n" + json.dumps(payload, ensure_ascii=False)
-    if prefer_groq:
-        fallback = ask_groq(prompt)
+    fallback_prompt = groq_request_prompt(instruction, payload)
+    if prefer_groq and fallback_prompt is not None:
+        fallback = ask_groq(fallback_prompt)
         if fallback is not None:
             return fallback
     for model in models if gemini is not None else []:
@@ -186,8 +239,8 @@ def ask(gemini: genai.Client | None, instruction: str, payload: object, schema: 
             except (httpx.TransportError, ValueError) as error:
                 print(f"Gemini {model} could not return usable JSON ({type(error).__name__}).", flush=True)
 
-    if not prefer_groq:
-        fallback = ask_groq(prompt)
+    if not prefer_groq and fallback_prompt is not None:
+        fallback = ask_groq(fallback_prompt)
         if fallback is not None:
             return fallback
     raise BriefingDeferred("Research models could not complete the briefing. The previous briefing is still available.")
@@ -206,7 +259,7 @@ def ask_groq(prompt: str) -> list | None:
                                   '\nWrap the requested array in a JSON object with a single "items" field.'}],
                     "response_format": {"type": "json_object"},
                     "reasoning_effort": "low",
-                    "max_completion_tokens": 5000,
+                    "max_completion_tokens": 3000,
                     "temperature": 0.25,
                 },
                 timeout=45,
