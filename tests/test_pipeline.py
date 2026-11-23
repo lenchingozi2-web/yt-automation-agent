@@ -22,6 +22,35 @@ from studio_revision import stitch_revision
 from studio_retry import retry_io
 
 
+
+class DailyAutomationSlotRegression(unittest.TestCase):
+    def test_six_distinct_local_windows_and_stable_retries(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from studio_automation import daily_automation_key
+        zone = ZoneInfo("Africa/Lagos")
+        slots = [daily_automation_key(datetime(2026, 11, 23, hour, 17, tzinfo=zone), "schedule")
+                 for hour in (0, 4, 8, 12, 16, 20)]
+        self.assertEqual(len(set(slots)), 6)
+        self.assertEqual(daily_automation_key(datetime(2026, 11, 23, 4, 17, tzinfo=zone), "schedule"),
+                         daily_automation_key(datetime(2026, 11, 23, 7, 59, tzinfo=zone), "schedule"))
+        self.assertNotEqual(slots[0], daily_automation_key(
+            datetime(2026, 11, 24, 0, 17, tzinfo=zone), "schedule"))
+
+    def test_manual_dispatched_runs_do_not_reuse_scheduled_slot(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from studio_automation import daily_automation_key
+        now = datetime(2026, 11, 23, 12, 17, tzinfo=ZoneInfo("Africa/Lagos"))
+        self.assertEqual(daily_automation_key(now, "workflow_dispatch", "1001"), "manual:1001")
+        self.assertEqual(daily_automation_key(now, "workflow_dispatch", "1001"),
+                         daily_automation_key(now, "workflow_dispatch", "1001"))
+        self.assertNotEqual(daily_automation_key(now, "workflow_dispatch", "1001"),
+                            daily_automation_key(now, "workflow_dispatch", "1002"))
+        self.assertNotEqual(daily_automation_key(now, "schedule"),
+                            daily_automation_key(now, "workflow_dispatch", "1001"))
+
+
 class UploadRegression(unittest.TestCase):
     def test_youtube_metadata_preserves_source_urls_within_byte_limit(self):
         from worker import youtube_snippet
