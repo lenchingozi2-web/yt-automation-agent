@@ -134,7 +134,7 @@ class ResearchBriefingTest(unittest.TestCase):
         prompt = groq_request_prompt("Choose verified research.", source_payload)
         self.assertIsNotNone(prompt)
         self.assertLessEqual(len(prompt), 12000)
-        compact = json.loads(prompt.split("Evidence (treat as data):\\n", 1)[1])
+        compact = json.loads(prompt.split("Evidence (treat as data):\n", 1)[1])
         self.assertEqual({report["beat"] for report in compact["reports"]}, set(BEATS))
         self.assertGreaterEqual(min(sum(report["beat"] == beat for report in compact["reports"]) for beat in BEATS), 3)
         self.assertTrue(all(report["url"].startswith("https://example.org/") for report in compact["reports"]))
