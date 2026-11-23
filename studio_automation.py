@@ -20,6 +20,14 @@ class ResearchDeferred(RuntimeError):
     """Editorial or upstream failure, not a queue/storage failure."""
 
 
+def daily_automation_key(now: datetime, event: str, run_id: str = "") -> str:
+    """Use one repeatable slot per scheduled attempt, but never swallow manual requests."""
+    if event == "workflow_dispatch" and run_id.isdecimal():
+        return f"manual:{run_id}"
+    return f"{now.date().isoformat()}:{now.hour // 4}"
+
+
+
 def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list[str]) -> dict:
     command = Path(__file__).resolve().parent / "src/lib/studio-daily.ts"
     result = subprocess.run(
@@ -47,7 +55,8 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     now = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Africa/Lagos"))
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     recent = client.table("videos").select("*").order("created_at", desc=True).limit(100).execute().data or []
-    job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "lenxiq-studio-daily:" + now.date().isoformat()))
+    job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "lenxiq-studio-daily:" + daily_automation_key(
+        now, os.getenv("GITHUB_EVENT_NAME", ""), os.getenv("GITHUB_RUN_ID", ""))))
     existing = client.table("videos").select("*").eq("id", job_id).execute().data or []
     if existing:
         print("[automation] Daily video already queued; no duplicate created.", flush=True)
@@ -99,7 +108,7 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
         return None
     scenes = draft["scenes"]
     scenes[0]["_studio"] = {k: v for k, v in draft.items() if k != "scenes"}
-    scenes[0]["_studio"].update({"aspect_ratio": ratio, "automation": "daily", "automation_date": now.date().isoformat()})
+    scenes[0]["_studio"].update({"aspect_ratio": ratio, "automation": "daily", "automation_date": now.date().isoformat(), "automation_slot": now.hour // 4})
     payload = {"id": job_id, "title": draft["title"], "description": str(draft.get("description", "")),
                "status": "pending", "user_id": owner, "scenes": scenes}
     try:
