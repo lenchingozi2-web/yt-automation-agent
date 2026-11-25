@@ -36,7 +36,7 @@ from studio_audio import (BACKUP_VOICE, MIN_NARRATION_WPM, PITCH, RATE, VOICE, N
 from studio_maintenance import metadata as stored_metadata, preview_filename
 from studio_master import OBJECT_LIMIT, bucket_exists, check_media_budget, download_upload_master, preflight_long_video_storage, remove_upload_master, save_upload_master
 from studio_publish import credential_version, has_approval, parse_timestamp, publication_due, thumbnail_due
-from studio_revision import prepare_revision, extract_audio, footage_history, picture_track, stitch_revision
+from studio_revision import prepare_revision, extract_audio, footage_history, read_footage_ledger, save_footage_ledger, picture_track, stitch_revision
 from studio_pipeline import scene_pipeline, render_parallelism
 from studio_retry import RENDER_STALE_SECONDS, REVISION_STALE_SECONDS, TemporaryRenderError, retry_io, transient
 
@@ -206,7 +206,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 interrupted = True
             return catalog.get(cache_key, [])
 
-        async def video(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
+        async def video(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
             nonlocal interrupted
             for query in terms:
                 hits = await search("video", query)
@@ -217,7 +217,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     tags = str(hit.get("tags", ""))
                     score = footage_relevance(tags, groups, words, query, override or contextual_match)
                     clip_id = str(hit.get("id") or "")
-                    if not score or not clip_id or clip_id in used or (clip_id in recent) != reuse:
+                    if not score or not clip_id or clip_id in used or clip_id in recent:
                         continue
                     duration = float(hit.get("duration") or 0)
                     if 0 < duration < 2.5:
@@ -256,7 +256,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                             target.unlink(missing_ok=True)
             return None
 
-        async def photo(terms: list[str], groups: list, words: set, contextual_match: bool, *, reuse=False) -> str | None:
+        async def photo(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
             nonlocal interrupted
             for query in terms[:3]:
                 candidates = []
@@ -268,7 +268,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     clip_id = f"photo-{hit.get('id', '')}"
                     width, height = hit.get("imageWidth"), hit.get("imageHeight")
                     if (score and url and re.fullmatch(r"photo-\d+", clip_id) and clip_id not in used
-                            and (clip_id in recent) == reuse and width and height):
+                            and clip_id not in recent and width and height):
                         candidates.append((-score, portrait != (height > width), clip_id, url))
                 for *_, clip_id, url in prioritize_footage(candidates, tried, 3):
                     tried.add(url)
@@ -287,18 +287,19 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                         print(f"[b-roll] skipping unusable photo ({type(error).__name__})", flush=True)
             return None
 
-        for reuse in (False, True):
-            result = (await video(queries, subjects, local, False, reuse=reuse)
-                      or await photo(queries, subjects, local, False, reuse=reuse))
+        # Never silently reuse stock from a recent production. A timed local
+        # narration graphic is preferable to recycled or irrelevant footage.
+        result = (await video(queries, subjects, local, False)
+                  or await photo(queries, subjects, local, False))
+        if result:
+            return result
+        for query in contextual:
+            words = set(visual_words(query))
+            result = (await video([query], [], words, True)
+                      or await photo([query], [], words, True))
             if result:
+                print("[b-roll] selected contextual stock media", flush=True)
                 return result
-            for query in contextual:
-                words = set(visual_words(query))
-                result = (await video([query], [], words, True, reuse=reuse)
-                          or await photo([query], [], words, True, reuse=reuse))
-                if result:
-                    print("[b-roll] selected contextual stock media", flush=True)
-                    return result
     if interrupted:
         raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
@@ -314,7 +315,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     if receipt.is_file():
         cached, _, saved = receipt.read_text().strip().partition(":")
         source = target.with_suffix(".png") if cached.startswith("photo-") else target
-        if saved == fingerprint and re.fullmatch(r"(?:photo-)?\d+", cached) and cached not in used and source.is_file():
+        if saved == fingerprint and re.fullmatch(r"(?:photo-)?\d+", cached) and cached not in used and cached not in recent and source.is_file():
             used.add(cached)
             return source, cached
     receipt.unlink(missing_ok=True)
@@ -1136,7 +1137,9 @@ def process(video: dict[str, Any], supabase) -> None:
         runtime = sum(float(item["duration"]) for item in original_timeline) if parent else sum(durations)
         # Keep long masters practical on a shared free storage budget.
         bitrate = min(8000, max(2700, int(260_000_000 * 8 / max(runtime, 1) / 1000 - 160)))
+    ledger = None if mode == "audio" else read_footage_ledger(supabase)
     recent_footage = set() if mode == "audio" else footage_history(supabase, video_id)
+    recent_footage.update(ledger or {})
     catalog = {}
     rendered = []
     voices = []
@@ -1262,6 +1265,9 @@ def process(video: dict[str, Any], supabase) -> None:
                   "size": list(expected_size), "headline": headline, "chapters": chapters,
                   "voice": narration_voice, "engine": narration_engine, "rate": narration_rate, "pitch": narration_pitch}
     save_fields(supabase, video, render_checkpoint=checkpoint, progress_note="Full-quality render checkpoint saved")
+    if mode != "audio" and ledger is not None:
+        save_footage_ledger(supabase, ledger, recent_footage,
+                            {str(clip) for entry in timeline for clip in entry.get("footage", [])})
     thumbnail_path = directory / "thumbnail.jpg"
     if parent and (target_scene != 1 or mode == "audio"):
         try:

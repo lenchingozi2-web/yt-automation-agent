@@ -7,30 +7,84 @@ import os
 import re
 import subprocess
 import wave
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from studio_audio import validate_audio
 from studio_maintenance import metadata, preview_filename
-from studio_master import download_upload_master
+from studio_master import MASTER_BUCKET, bucket_exists, download_upload_master
 from studio_retry import retry_io
 
 
+FOOTAGE_LEDGER = "studio-stock-history-v1.json"
+FOOTAGE_HISTORY_DAYS = 90
+STOCK_ID = re.compile(r"(?:photo-)?\d+")
+
+
 def footage_history(client, video_id):
-    rows = (client.table("videos").select("*").eq("status", "completed")
-            .order("created_at", desc=True).limit(24).execute().data or [])
-    seen = set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=FOOTAGE_HISTORY_DAYS)).isoformat()
     footage = set()
-    for row in rows:
-        if row.get("id") == video_id:
-            continue
-        data = metadata(row)
-        revision = data.get("revision")
-        root = (revision.get("root_id") or revision.get("parent_id")) if isinstance(revision, dict) else None
-        seen.add(root or row["id"])
-        footage.update(str(clip) for item in (data.get("scene_timeline") or []) for clip in item.get("footage", []))
-        if len(seen) >= 15:
-            break
-    return footage
+    offset = 0
+    while True:
+        rows = (client.table("videos").select("*").eq("status", "completed")
+                .gte("created_at", cutoff).order("created_at", desc=True).order("id")
+                .range(offset, offset + 99).execute().data or [])
+        for row in rows:
+            if str(row.get("id")) == str(video_id):
+                continue
+            data = metadata(row)
+            for item in data.get("scene_timeline") or []:
+                footage.update(str(clip) for clip in item.get("footage", [])
+                               if STOCK_ID.fullmatch(str(clip)))
+        if len(rows) < 100:
+            return footage
+        offset += len(rows)
+
+
+def prune_footage_ledger(history, now):
+    cutoff = now - FOOTAGE_HISTORY_DAYS * 86400
+    return {key: stamp for key, stamp in history.items()
+            if STOCK_ID.fullmatch(key) and type(stamp) is int and cutoff <= stamp <= now}
+
+
+def read_footage_ledger(client):
+    """Small private metadata object, independent of deletable production rows."""
+    try:
+        if not bucket_exists(client, MASTER_BUCKET):
+            return {}
+        bucket = client.storage.from_(MASTER_BUCKET)
+        matches = retry_io(lambda: bucket.list("", {"search": FOOTAGE_LEDGER, "limit": 10}),
+                           "locate stock history")
+        if not any(item.get("name") == FOOTAGE_LEDGER for item in matches):
+            return {}
+        payload = json.loads(retry_io(lambda: bucket.download(FOOTAGE_LEDGER), "read stock history"))
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid stock history")
+        return prune_footage_ledger(payload, int(datetime.now(timezone.utc).timestamp()))
+    except Exception as error:
+        # Do not overwrite a history we failed to read. Existing rows still
+        # provide deduplication without blocking a render on metadata storage.
+        print(f"[b-roll] persistent history unavailable ({type(error).__name__}); using production history", flush=True)
+        return None
+
+
+def save_footage_ledger(client, ledger, known, selected):
+    now = int(datetime.now(timezone.utc).timestamp())
+    updated = prune_footage_ledger(ledger, now)
+    for clip in known:
+        if STOCK_ID.fullmatch(clip):
+            updated.setdefault(clip, now)
+    for clip in selected:
+        if STOCK_ID.fullmatch(clip):
+            updated[clip] = now
+    try:
+        bucket = client.storage.from_(MASTER_BUCKET)
+        retry_io(lambda: bucket.upload(FOOTAGE_LEDGER, json.dumps(updated, separators=(",", ":")).encode(),
+                                       file_options={"content-type": "application/json", "upsert": "true"}),
+                 "save stock history")
+        print(f"[b-roll] persistent history: {len(updated)} stock IDs", flush=True)
+    except Exception as error:
+        print(f"[b-roll] could not save persistent history ({type(error).__name__})", flush=True)
 
 
 def prepare_revision(client, video, details, directory: Path):

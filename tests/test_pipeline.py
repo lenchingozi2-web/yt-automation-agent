@@ -334,6 +334,47 @@ class MediaRegression(unittest.TestCase):
         self.assertEqual(selected, "2")
         self.assertEqual(requests, ["/fresh"])
 
+    def test_recent_stock_is_never_recycled_even_when_no_fresh_match(self):
+        import httpx
+        from worker import fetch_pixabay
+
+        def data(request):
+            if request.url.host != "pixabay.com":
+                self.fail("A previously used asset must not be downloaded")
+            if request.url.path.endswith("/videos/"):
+                hits = [{"id": 17, "duration": 8, "tags": "ocean wave",
+                         "videos": {"large": {"width": 1920, "height": 1080,
+                                               "size": 14000, "url": "https://stock.test/old"}}}]
+            else:
+                hits = [{"id": 18, "tags": "ocean wave", "imageWidth": 1920,
+                         "imageHeight": 1080, "largeImageURL": "https://stock.test/old.jpg"}]
+            return httpx.Response(200, json={"hits": hits})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(data))
+        with (TemporaryDirectory() as tmp,
+              patch.dict(os.environ, {"PIXABAY_API_KEY": "fixture"}),
+              patch("worker.httpx.AsyncClient", return_value=client)):
+            scene = {"narration": "Ocean waves arrive.", "search_queries": ["ocean waves"],
+                     "footage_override": True}
+            self.assertIsNone(asyncio.run(fetch_pixabay(scene, Path(tmp) / "stock.mp4",
+                                                        set(), {"17", "photo-18"}, {})))
+
+    def test_stock_history_survives_production_deletion(self):
+        from unittest.mock import Mock
+        from studio_revision import FOOTAGE_LEDGER, read_footage_ledger, save_footage_ledger
+        client = Mock()
+        bucket = client.storage.from_.return_value
+        stored = {}
+        bucket.upload.side_effect = lambda name, content, **kwargs: stored.update({name: content})
+        bucket.list.side_effect = lambda *args: [{"name": name} for name in stored]
+        bucket.download.side_effect = stored.__getitem__
+        with patch("studio_revision.bucket_exists", return_value=True):
+            self.assertEqual(read_footage_ledger(client), {})
+            save_footage_ledger(client, {}, {"9"}, {"photo-18"})
+            self.assertIn(FOOTAGE_LEDGER, stored)
+            self.assertEqual(set(read_footage_ledger(client)), {"9", "photo-18"})
+            client.table.assert_not_called()
+
     def test_requested_runtime_retimes_audio_and_captions_in_both_formats(self):
         self.assertEqual(sum(round(d * 30) for d in scene_durations([60.8, 61.9, 60.2], 180)), 5400)
         self.assertEqual(sum(round(d * 30) for d in scene_durations([234.1, 239.9, 242.7], 720)), 21600)
