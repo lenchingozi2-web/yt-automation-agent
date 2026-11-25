@@ -1,5 +1,7 @@
 name: Studio integration probe
 on:
+  schedule:
+    - cron: '47 10 * * *'
   push:
     branches: [main]
   workflow_dispatch:

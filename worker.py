@@ -289,6 +289,9 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
 
         # Never silently reuse stock from a recent production. A timed local
         # narration graphic is preferable to recycled or irrelevant footage.
+        if scene.get("thumbnail_search"):
+            # The cover is its own visual asset, not a random opening frame.
+            return await photo(queries, subjects, local, False) or await video(queries, subjects, local, False)
         result = (await video(queries, subjects, local, False)
                   or await photo(queries, subjects, local, False))
         if result:
@@ -1286,8 +1289,33 @@ def process(video: dict[str, Any], supabase) -> None:
         if "prader" in headline.lower() and "willi" in headline.lower():
             make_prader_willi_thumbnail(thumbnail_path, ratio=actual_ratio)
         else:
-            create_thumbnail(thumbnail_candidates or [final], headline, thumbnail_path, ratio=actual_ratio,
-                             timestamps=(.2, 1.4) if thumbnail_candidates else (0,))
+            # Find a dedicated subject image using the script scene most closely
+            # related to the title. No new credentials or paid generator needed.
+            title_words = set(visual_words(str(details.get("title", "")) + " " + headline))
+            cover_scene = max(scenes, key=lambda scene: len(title_words & set(visual_words(scene["narration"]))))
+            cover_queries = sorted(cover_scene["search_queries"],
+                                   key=lambda query: len(title_words & set(visual_words(query))), reverse=True)[:3]
+            cover = directory / "thumbnail_stock.mp4"
+            cover_id = None
+            if cover_queries:
+                try:
+                    cover_id = asyncio.run(fetch_pixabay({**cover_scene, "search_queries": cover_queries,
+                        "footage_override": True, "thumbnail_search": True,
+                        "picture_size": (1080, 1920) if actual_ratio == "9:16" else (1280, 720)},
+                        cover, used_footage, recent_footage, catalog))
+                except TemporaryRenderError:
+                    pass
+            cover_source = cover.with_suffix(".png") if cover_id and cover_id.startswith("photo-") else cover
+            candidates = [cover_source] if cover_id else thumbnail_candidates or [final]
+            try:
+                create_thumbnail(candidates, headline, thumbnail_path, ratio=actual_ratio,
+                                 timestamps=(.2, 1.4) if cover_id or thumbnail_candidates else (0,))
+            except (ValueError, OSError):
+                create_thumbnail(final, headline, thumbnail_path, ratio=actual_ratio, timestamps=(0,))
+            if cover_id and ledger is not None:
+                save_footage_ledger(supabase, ledger, recent_footage,
+                                    used_footage | {cover_id})
+                print("[thumbnail] dedicated stock subject selected", flush=True)
     finish_checkpoint(supabase, video, final, checkpoint, thumbnail_path)
     print(f"[timing] checkpoint and saving: {time.monotonic()-phase_started:.1f}s", flush=True)
 

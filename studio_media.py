@@ -321,8 +321,13 @@ def create_thumbnail(source_video: Path | list[Path], headline: str, output: Pat
     dark = Image.new("RGB", (width, height), "#071119")
     result = Image.composite(dark, background, gradient.resize((width, height)))
     draw = ImageDraw.Draw(result)
-    text_width = 872 if portrait else 820
-    lines, title_font = fit_headline(draw, headline, text_width, 128 if portrait else 100, 4)
+    # Mobile-first hierarchy: a compact headline with a strong contrast edge.
+    text_width = 872 if portrait else 710
+    lines, title_font = fit_headline(draw, headline, text_width, 158 if portrait else 136, 3)
+    accent_x = 104 if portrait else 64
+    accent_y = round(height * (.45 if portrait else .22))
+    draw.rounded_rectangle((accent_x, accent_y, accent_x + (100 if portrait else 92), accent_y + 9),
+                           radius=4, fill="#dff478")
     line_height = round(title_font.size * 1.12)
     top = (round(height * .67) - len(lines) * line_height // 2 if portrait
            else round(height * .53) - len(lines) * line_height // 2)
@@ -330,5 +335,5 @@ def create_thumbnail(source_video: Path | list[Path], headline: str, output: Pat
         x = round((width - draw.textlength(line, font=title_font)) / 2) if portrait else 64
         draw.text((x, top + index * line_height), line, font=title_font,
                   fill="#dff478" if index == len(lines) - 1 else "white",
-                  stroke_width=2, stroke_fill="#071119")
+                  stroke_width=4, stroke_fill="#071119")
     return save_thumbnail(result, output, ratio)

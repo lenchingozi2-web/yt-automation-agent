@@ -4,6 +4,8 @@ on:
     - cron: '8 3 * * *'
     - cron: '41 3 * * *'
     - cron: '19 5 * * *'
+    - cron: '23 8 * * *'
+    - cron: '37 13 * * *'
   push:
     branches: [main]
     paths: [research_fetcher.py, src/lib/studio-research.ts, .github/workflows/nightly_research.yml]

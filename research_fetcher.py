@@ -28,17 +28,24 @@ MEDICAL_SEARCHES = {
         '(PUB_TYPE:guideline OR PUB_TYPE:"systematic review") AND (TITLE_ABS:prevention OR TITLE_ABS:sleep OR TITLE_ABS:exercise OR TITLE_ABS:vaccination)',
         'TITLE_ABS:outbreak OR TITLE_ABS:"patient safety" OR PUB_TYPE:"case reports"',
         '(TITLE_ABS:Nigeria OR TITLE_ABS:"West Africa") AND (TITLE_ABS:prevention OR TITLE_ABS:outbreak OR TITLE_ABS:healthcare)',
+        '(TITLE_ABS:screening OR TITLE_ABS:diagnosis) AND (TITLE_ABS:wearable OR TITLE_ABS:"machine learning" OR TITLE_ABS:biomarker)',
+        '(PUB_TYPE:"systematic review" OR PUB_TYPE:guideline) AND (TITLE_ABS:nutrition OR TITLE_ABS:"mental health" OR TITLE_ABS:"physical activity")',
     ),
     "education": (
         'TITLE_ABS:"retrieval practice" OR TITLE_ABS:"spaced repetition" OR TITLE_ABS:"learning strategies" OR TITLE_ABS:"cognitive load"',
+        '(TITLE_ABS:education OR TITLE_ABS:students) AND (TITLE_ABS:"generative AI" OR TITLE_ABS:"intelligent tutoring")',
+        '(TITLE_ABS:learning OR TITLE_ABS:memory) AND (TITLE_ABS:feedback OR TITLE_ABS:interleaving OR TITLE_ABS:sleep)',
     ),
     "intelligence": (
         '(TITLE_ABS:"large language model" OR TITLE_ABS:"artificial intelligence") AND (TITLE_ABS:benchmark OR TITLE_ABS:reasoning OR TITLE_ABS:reliability OR TITLE_ABS:bias)',
         'TITLE_ABS:"human AI interaction" OR TITLE_ABS:"cognitive offloading" OR TITLE_ABS:"decision making" OR TITLE_ABS:metacognition',
+        '(TITLE_ABS:reasoning OR TITLE_ABS:attention OR TITLE_ABS:creativity) AND (TITLE_ABS:cognition OR TITLE_ABS:neuroscience)',
+        '(TITLE_ABS:"AI agents" OR TITLE_ABS:"multimodal models") AND (TITLE_ABS:evaluation OR TITLE_ABS:trust OR TITLE_ABS:reasoning)',
     ),
 }
 ERIC_SEARCHES = {
-    "education": ('subject:"Artificial Intelligence" OR subject:"Learning Strategies" OR subject:"Study Skills"',),
+    "education": ('subject:"Artificial Intelligence" OR subject:"Learning Strategies" OR subject:"Study Skills"',
+                  'subject:"Tutoring" OR subject:"Feedback (Response)" OR subject:"Educational Technology"'),
     "intelligence": ('subject:"Metacognition" OR subject:"Cognitive Processes" OR subject:"Machine Learning"',),
 }
 
@@ -336,7 +343,7 @@ def discover(client: httpx.Client, gemini: genai.Client, today: date, used: set[
 Select up to three distinct lead reports for each supplied beat: health, education and intelligence.
 Give preference to AI in health or education, strong human-intelligence research, practical learning,
 and everyday prevention tips supported by guidelines or reviews. Clinical cases are also eligible.
-Pick the lead reports with specific, interesting evidence and distinguish preliminary results.
+Pick lead reports with a surprising observation, a practical payoff, a meaningful contradiction or a concrete advance that can sustain an engaging video. Prefer specific evidence over broad review topics; distinguish preliminary results. Avoid clustering around the same disease, classroom tool or AI benchmark.
 For each give the supplied record_id and beat, plus 2 or 3 standard terms that could independently
 return related publications, such as "retrieval practice" or "distributed learning".
 Avoid names, full questions, and overly specific acronyms.
@@ -455,6 +462,7 @@ def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], rece
         titles = recent_titles + [story["title"] for story in approved.values()]
         raw = ask(gemini, """
 Create one true, distinct YouTube story pitch per requested topic, in the exact requested order.
+Lead the title with a concrete subject, tension, surprising finding or practical question; aim for 45–75 characters, no generic "Exploring", "Understanding", "The future of" or academic paper-style phrasing. Do not exaggerate or hide critical limitations. The title must make sense without its summary.
 Choose only a source pair listed for that topic. Use only the supplied records. Name the actual lead
 journal or institution in the summary alongside the finding. State the concrete observation, what was
 discovered and why it matters. Explicitly include relevant context supported by the second report.
@@ -561,6 +569,9 @@ def main() -> None:
         existing.raise_for_status()
         if not preview_only and {row["topic_area"] for row in existing.json() if row["briefing_date"] == today.isoformat()} == set(BEATS):
             print(f"Briefing for {today} is already ready.")
+            for row in existing.json():
+                if row["briefing_date"] == today.isoformat():
+                    print(f"Current verified {row['topic_area']} story: {row['title']}")
             return
         history = db.get("research_story_history", params={"select": "lead_url,title", "briefing_date": f"gte.{today - timedelta(days=90)}", "order": "briefing_date.desc"})
         history.raise_for_status()

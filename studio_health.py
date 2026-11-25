@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import os
 import sys
 import httpx
@@ -48,6 +49,21 @@ def main() -> int:
         print("BLOCKED: videos table needs a scenes or script column to hold render data.")
         return 4
     healthy = True
+    try:
+        today = datetime.now(ZoneInfo("Africa/Lagos"))
+        rows = client.table("research_ideas").select("briefing_date,topic_area,references").order("briefing_date", desc=True).limit(3).execute().data or []
+        beats = {row.get("topic_area") for row in rows
+                 if row.get("briefing_date") == today.date().isoformat() and len(set(row.get("references") or [])) >= 2}
+        if beats == {"health", "education", "intelligence"}:
+            print("OK: today's briefing has all three source-backed topics.")
+        elif today.hour >= 10:
+            print("BLOCKED: today's briefing is incomplete or stale; verified beats:", sorted(beats))
+            healthy = False
+        else:
+            print("NOTICE: today's briefing has not completed its scheduled morning refresh.")
+    except Exception as error:
+        print("BLOCKED: briefing health check failed:", type(error).__name__)
+        healthy = False
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
     if pixabay_key:
         try:
