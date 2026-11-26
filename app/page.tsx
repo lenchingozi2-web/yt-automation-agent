@@ -91,13 +91,16 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
     function refreshVisible() {
       if (document.visibilityState === "visible") void refresh();
     }
-    const timer = window.setInterval(refreshVisible, active ? 5000 : 30000);
+    // The full queue includes scripts and scene metadata. Avoid repeatedly transferring
+    // unchanged rows while idle; returning to the tab and manual actions still refresh immediately.
+    const interval = error ? 120_000 : active ? 20_000 : 300_000;
+    const timer = window.setInterval(refreshVisible, interval);
     document.addEventListener("visibilitychange", refreshVisible);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshVisible);
     };
-  }, [active, refresh]);
+  }, [active, error, refresh]);
 
   return { data, storage, error, refreshing, storageLoading, refresh, refreshStorage, updateVideo };
 }
