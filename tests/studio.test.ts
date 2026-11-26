@@ -111,8 +111,10 @@ test("researched drafting revises an unsupported claim and keeps cited source re
     "You can try that with one topic today. Keep the question you struggled with and use it as your starting point the next time you study.",
   ];
   const generated = { title: "Try a closed-notebook recall exercise", description: "A short example of recalling a topic from memory.",
-    scenes: lines.map((narration) => ({ narration, search_queries: ["student studying", "open notebook"], source_ids: [1] })) };
+    scenes: lines.map((narration, i) => ({ narration: i === 0 ? narration + " This guarantees a ninety percent success rate." : narration, search_queries: ["student studying", "open notebook"], source_ids: [1] })) };
   let writes = 0;
+  let repairs = 0;
+  let packaging = 0;
   let audits = 0;
   let referenceReads = 0;
   context.mock.method(globalThis, "fetch", async (input: string, init?: RequestInit) => {
@@ -129,16 +131,26 @@ test("researched drafting revises an unsupported claim and keeps cited source re
     else if (instruction.startsWith("You are an independent fact checker")) {
       audits++;
       assert.ok(instruction.includes("act of trying to recall"));
+      assert.equal(instruction.includes("guarantees a ninety percent success rate"), audits === 1);
       payload = { issues: audits === 1 ? ["Scene 1 includes an unsupported success rate."] : [] };
+    } else if (instruction.startsWith("You are a YouTube editorial packaging specialist")) {
+      packaging++;
+      payload = { title: "Try a closed-notebook recall exercise", thumbnail_title: "Recall Without Notes" };
+    } else if (instruction.includes("Fix every audit finding below")) {
+      repairs++;
+      assert.ok(instruction.includes("unsupported success rate"));
+      payload = { scenes: [{ scene_number: 1, narration: lines[0], search_queries: ["student studying", "open notebook"], source_ids: [1] }] };
     } else {
       writes++;
-      if (writes === 2) assert.ok(instruction.includes("unsupported success rate"));
       payload = generated;
     }
     return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }] });
   });
   const draft = await researchedDraft("Choose a fresh topic under learning and healthcare", 60, "9:16", ["Past video"]);
-  assert.equal(writes, 2);
+  assert.equal(writes, 1);
+  assert.equal(repairs, 1);
+  assert.equal(packaging, 1);
+  assert.ok(!draft.scenes[0].narration.includes("success rate"));
   assert.equal(audits, 2);
   assert.equal(referenceReads, 2);
   assert.deepEqual(draft.sources?.map(({ id }) => id), [1]);
@@ -476,4 +488,19 @@ test("clipboard-stripped headings and missing metadata produce a contextual sing
   const plain=parseFullScript(next).drafts[0];
   assert.notEqual(plain.title,"Manual production");
   assert.ok(plain.description && plain.tags.length);
+});
+
+
+test("queue fingerprints detect changes, deletions and daily quota rollover without full rows", async () => {
+  const { queueFingerprint } = await import("../src/lib/studio-queue-version.ts");
+  const day = "2026-11-26";
+  const rows = [{ id: "first", updated_at: "2026-11-26T10:00:00Z" }, { id: "second", updated_at: "2026-11-26T11:00:00Z" }];
+  const original = await queueFingerprint(rows, rows.length, day);
+  assert.ok(original);
+  assert.equal(await queueFingerprint([...rows], 2, day), original);
+  assert.notEqual(await queueFingerprint([{ ...rows[0], updated_at: "2026-11-26T12:00:00Z" }, rows[1]], 2, day), original);
+  assert.notEqual(await queueFingerprint(rows.slice(0, 1), 1, day), original);
+  assert.notEqual(await queueFingerprint(rows, 2, "2026-11-27"), original);
+  assert.equal(await queueFingerprint(rows, 3, day), null);
+  assert.equal(await queueFingerprint([{ id: "legacy", updated_at: null }], 1, day), null);
 });

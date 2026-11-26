@@ -155,7 +155,7 @@ function Preview({ video, close, approve, revise, retryThumbnail, promote, busy,
       <button className="icon-button" aria-label="Close preview" onClick={close}><X size={20} /></button>
     </header>
     <div className="preview-body">
-      {video.video_url && <video key={playerVersion} ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline autoPlay preload="metadata"
+      {video.video_url && <video key={playerVersion} ref={player} src={video.video_url} poster={video.thumbnail_url || undefined} controls playsInline preload="metadata"
         className={video.format === "9:16" ? "vertical" : ""} aria-label={video.title}
         onCanPlay={() => setFailed(false)} onError={() => setFailed(true)} />}
       {failed && <div className="media-error" role="alert">The preview could not load. <button type="button" className="text-button" onClick={() => {
