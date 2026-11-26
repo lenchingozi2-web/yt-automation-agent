@@ -12,3 +12,10 @@ node_modules/
 
 # Verified model files are cached on the CI worker, not committed.
 .kokoro-models/
+/dist/
+.vinext/
+.cloudflare/
+
+.wrangler/
+.dev.vars*
+*.tsbuildinfo

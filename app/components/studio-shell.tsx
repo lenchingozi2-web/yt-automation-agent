@@ -9,7 +9,7 @@ export type Feedback = { kind: "error" | "success"; message: string; detail?: st
 
 export function Brand() {
   return <Link href="/" className="brand" aria-label="LenxiQ Studio home">
-    <span className="brand-icon"><Image src="/lenxiq.jpg" width={40} height={40} alt="" priority /></span>
+    <span className="brand-icon"><Image src="/lenxiq.jpg" width={40} height={40} alt="" priority unoptimized /></span>
     <span>LenxiQ <small>Studio</small></span>
   </Link>;
 }

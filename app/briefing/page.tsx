@@ -18,7 +18,7 @@ async function studioRequest<T>(path: string, init: RequestInit = {}): Promise<T
     ...init, cache: "no-store",
     headers: { Authorization: `Bearer ${data.session.access_token}`, ...(init.body ? { "Content-Type": "application/json" } : {}) },
   });
-  const result = await response.json().catch(() => null);
+  const result = await response.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
   if (!response.ok || result?.ok !== true) throw new Error(toSafeMessage(result?.error, "Studio could not complete the request."));
   return result as T;
 }

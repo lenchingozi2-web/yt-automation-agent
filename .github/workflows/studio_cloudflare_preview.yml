@@ -1,0 +1,57 @@
+name: Studio Cloudflare preview checks
+on:
+  push:
+    branches: [chore/cloudflare-studio-migration]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://studio-preview.invalid
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: non-production-preview-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build:vinext
+      - run: npx tsc --noEmit
+      - name: Verify worker bundle size
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          bundle=Path('.cloudflare/output/v1/workers/default/bundle')
+          files=[p for p in bundle.rglob('*') if p.is_file() and p.suffix != '.map']
+          size=sum(p.stat().st_size for p in files)
+          assert files and size < 64 * 1024 * 1024, f'Worker bundle size {size}'
+          print(f'Worker bundle: {size} bytes excluding sourcemaps')
+          PY
+      - name: Smoke test built Worker (no production credentials)
+        run: |
+          set -eu
+          npm run start:vinext -- --host 127.0.0.1 --port 4173 > /tmp/studio-preview.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; cat /tmp/studio-preview.log' EXIT
+          for i in $(seq 1 60); do
+            curl -fsS --max-time 5 http://127.0.0.1:4173/ > /tmp/studio-home.html && break
+            sleep 1
+          done
+          grep -q 'LenxiQ' /tmp/studio-home.html
+          curl -fsS http://127.0.0.1:4173/briefing > /tmp/studio-briefing.html
+          curl -fsS http://127.0.0.1:4173/lenxiq.jpg > /tmp/studio-logo.jpg
+          test -s /tmp/studio-logo.jpg
+          curl -fsS http://127.0.0.1:4173/manifest.webmanifest | grep -q 'LenxiQ'
+          for route in briefing storage videos; do
+            test "$(curl -sS -o /tmp/studio-api.json -w '%{http_code}' http://127.0.0.1:4173/api/$route)" = 401
+          done
+          for route in generate import render revise briefing storage; do
+            test "$(curl -sS -o /tmp/studio-api.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:4173/api/$route)" = 401
+          done
+          echo 'Page, static asset, manifest, and protected API smoke checks passed.'
+      - run: rm -rf .next && npm run build
