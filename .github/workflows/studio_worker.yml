@@ -24,7 +24,8 @@ on:
     branches: [main]
     paths: [worker.py, studio_audio.py, studio_kokoro.py, requirements-kokoro.txt, studio_revision.py, studio_retry.py, studio_publish.py, studio_master.py, studio_media.py, studio_pipeline.py, studio_thumbnail_art.py, .github/workflows/studio_worker.yml]
   schedule:
-    - cron: '2-57/5 * * * *'
+    # Immediate workflow dispatch remains the fast path; scheduled runs recover missed dispatches.
+    - cron: '2-47/15 * * * *'
 permissions:
   contents: read
 concurrency:
