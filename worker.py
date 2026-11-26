@@ -952,7 +952,7 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=F
         manifest = save_upload_master(client, video_id, path, preview, bucket, filename)
     try:
         retry_io(lambda: client.storage.from_(bucket).upload(filename, data,
-            file_options={"content-type": "video/mp4", "upsert": "true"}), "save MP4 preview")
+            file_options={"content-type": "video/mp4", "cache-control": "21600", "upsert": "true"}), "save MP4 preview")
     except Exception:
         if manifest and not pace_version and not checkpoint_master:
             try:
@@ -961,7 +961,9 @@ def upload_mp4(client, path: Path, video_id: str, timeline=(), *, pace_version=F
                 print(f"[storage] could not remove upload master for {video_id}", flush=True)
         raise
     track = picture_track(preview)
-    return client.storage.from_(bucket).get_public_url(filename), manifest, min(int(track["width"]), int(track["height"]))
+    url = client.storage.from_(bucket).get_public_url(filename).rstrip("?")
+    version = hashlib.sha256(data).hexdigest()[:12]
+    return url + ("&" if "?" in url else "?") + "v=" + version, manifest, min(int(track["width"]), int(track["height"]))
 
 
 def upload_thumbnail(client, path: Path, video_id: str) -> str:
@@ -977,7 +979,7 @@ def upload_thumbnail(client, path: Path, video_id: str) -> str:
     name = f"{video_id}.jpg"
     data = path.read_bytes()
     retry_io(lambda: client.storage.from_(bucket).upload(name, data,
-        file_options={"content-type": "image/jpeg", "upsert": "true"}), "save thumbnail")
+        file_options={"content-type": "image/jpeg", "cache-control": "86400", "upsert": "true"}), "save thumbnail")
     url = client.storage.from_(bucket).get_public_url(name).rstrip("?")
     return url + ("&" if "?" in url else "?") + "v=" + hashlib.sha256(data).hexdigest()[:12]
 

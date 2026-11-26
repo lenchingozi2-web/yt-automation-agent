@@ -1,10 +1,26 @@
 import { NextResponse } from "next/server";
 import { normalizeVideo } from "@/src/lib/studio";
-import { errorResponse, findVideo, jobIdOf, quotaOf, statusFor, studioClient, studioContext, StudioRequestError } from "@/src/lib/studio-server";
+import { queueFingerprint } from "@/src/lib/studio-queue-version";
+import { errorResponse, findVideo, jobIdOf, lagosStartOfDay, quotaOf, statusFor, studioClient, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 export const dynamic = "force-dynamic";
+// A small version manifest replaces repeated downloads of full scripts when the
+// queue has not changed. The production videos.updated_at trigger covers edits.
+// If a deployment uses an older schema (or grows beyond this bounded manifest),
+// continue returning the full queue rather than risk presenting stale results.
+async function queueVersion(client: Awaited<ReturnType<typeof studioClient>>): Promise<string | null> {
+  const { data, error, count } = await client.from("videos").select("id,updated_at", { count: "exact" })
+    .order("id").limit(1000);
+  return error ? null : queueFingerprint(data, count, lagosStartOfDay());
+}
+
 export async function GET(request: Request) {
   try {
     const client = await studioClient(request);
+    const version = await queueVersion(client);
+    const headers = { "Cache-Control": "no-store, max-age=0" };
+    if (version && new URL(request.url).searchParams.get("version") === version) {
+      return NextResponse.json({ ok: true, unchanged: true, version }, { headers });
+    }
     const [jobResult, quota] = await Promise.all([
       client.from("videos").select("*").order("created_at", { ascending: false }).limit(50),
       quotaOf(client),
@@ -20,7 +36,7 @@ export async function GET(request: Request) {
       if (sources.error) throw sources.error;
       videos.push(...(sources.data || []).map(normalizeVideo));
     }
-    return NextResponse.json({ ok: true, videos, quota }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+    return NextResponse.json({ ok: true, videos, quota, version }, { headers });
   } catch (error) {
     if (statusFor(error) !== 401) console.error("Studio queue fetch failed", error);
     return NextResponse.json(errorResponse(error), { status: statusFor(error), headers: { "Cache-Control": "no-store" } });

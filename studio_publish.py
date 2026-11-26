@@ -5,7 +5,8 @@ import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlencode
 
 from studio_maintenance import metadata
 
@@ -76,3 +77,35 @@ def publication_due(row: dict[str, Any], version: str, now: datetime) -> bool:
         return False
     due = parse_timestamp(data.get("publish_retry_at"))
     return due is None or due <= now
+
+
+# The scheduled probe needs only publishing state, not entire scripts, footage
+# metadata or render manifests. The live schema stores this state in scenes[0]._studio.
+_PROBE_FIELDS = (
+    "publish_status", "publish_approved_at", "publish_approved_by", "thumbnail_url",
+    "youtube_id", "youtube_video_id", "thumbnail_publish_status", "thumbnail_retry_at",
+    "discard_requested_at", "youtube_url", "video_url", "storage_url", "publish_heartbeat_at",
+    "worker_heartbeat_at", "publish_requested", "publish_auth_version", "publish_attempts",
+    "publish_retry_at",
+)
+
+
+def completed_probe_rows(read: Callable[[str], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Fetch only publication eligibility fields; fall back for legacy row layouts."""
+    base = {"status": "eq.completed", "order": "created_at.desc", "limit": "100"}
+    select = ",".join([
+        "id", "status", "youtube_video_id", "probe_marker:scenes->0->_studio->duration_seconds",
+        *(f"meta_{field}:scenes->0->_studio->{field}" for field in _PROBE_FIELDS),
+    ])
+    try:
+        projected = read(urlencode({"select": select, **base}))
+        if all(row.get("probe_marker") is not None for row in projected):
+            return [
+                {"id": row["id"], "status": row["status"], "youtube_video_id": row.get("youtube_video_id"),
+                 "scenes": [{"_studio": {field: row.get(f"meta_{field}") for field in _PROBE_FIELDS}}]}
+                for row in projected
+            ]
+    except Exception:
+        # A missing column or a transient projection failure should not delay work.
+        pass
+    return read(urlencode({"select": "*", **base}))
