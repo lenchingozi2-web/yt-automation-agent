@@ -18,7 +18,8 @@ type StorageInfo = {
   retention: { published_preview_hours: number; published_thumbnail_days: number };
   immediate_dispatch_available: boolean;
 };
-type QueueData = { videos: StudioVideo[]; quota: Quota };
+type QueueData = { videos: StudioVideo[]; quota: Quota; version?: string | null };
+type QueueResponse = QueueData | { unchanged: true; version: string };
 type InstallEvent = Event & { prompt: () => Promise<unknown> };
 const WORKFLOW = "https://github.com/lenchingozi2-web/yt-automation-agent/actions/workflows/daily_video.yml";
 
@@ -29,9 +30,11 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
   const [refreshing, setRefreshing] = useState(false);
   const [storageLoading, setStorageLoading] = useState(false);
   const pending = useRef<AbortController | null>(null);
+  const queueVersion = useRef<string | null>(null);
   const pendingStorage = useRef<AbortController | null>(null);
   const updateVideo = useCallback((video: StudioVideo) => {
     pending.current?.abort();
+    queueVersion.current = null;
     setData((current) => current && { ...current, videos: current.videos.map((item) => item.id === video.id ? normalizeVideo(video) : item) });
   }, []);
   const active = data?.videos.some((video) => video.status === "pending" || video.status === "rendering" ||
@@ -44,9 +47,13 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
     pending.current = controller;
     if (manual) setRefreshing(true);
     try {
-      const result = await request<QueueData>("/api/videos", { signal: controller.signal });
+      const version = !manual && queueVersion.current;
+      const result = await request<QueueResponse>("/api/videos" + (version ? "?version=" + encodeURIComponent(version) : ""), { signal: controller.signal });
       if (controller.signal.aborted) return;
-      setData({ ...result, videos: result.videos.map(normalizeVideo) });
+      if (!("unchanged" in result)) {
+        queueVersion.current = result.version ?? null;
+        setData({ ...result, videos: result.videos.map(normalizeVideo) });
+      }
       setError("");
     } catch (failure) {
       if (!controller.signal.aborted) setError(toSafeMessage(failure, "The queue could not be refreshed."));
@@ -77,6 +84,7 @@ function useWorkspace(user: User, request: <T>(path: string, init?: RequestInit)
   }, [request]);
 
   useEffect(() => {
+    queueVersion.current = null;
     const initial = window.setTimeout(() => { void refresh(); void refreshStorage(); }, 0);
     return () => {
       window.clearTimeout(initial);
