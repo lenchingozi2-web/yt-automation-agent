@@ -20,6 +20,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: node --experimental-strip-types --test tests/cloudflare.test.ts
       - run: npm run build:vinext
       - run: npx tsc --noEmit
       - name: Verify worker bundle size

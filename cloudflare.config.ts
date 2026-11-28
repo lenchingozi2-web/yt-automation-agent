@@ -1,11 +1,11 @@
 import { bindings, defineConfig, defineWorker, triggers } from "cf/config";
 
-export default defineConfig({
+export default defineConfig(({ isPreview }) => ({
   worker: defineWorker({
     name: "lenxiq-studio",
     entrypoint: "./cloudflare-entry.js",
     compatibilityDate: "2026-11-26",
-    triggers: [triggers.scheduled({ schedule: "11 23 * * *" }), triggers.scheduled({ schedule: "19 1 * * *" })],
+    ...(isPreview ? {} : { triggers: [triggers.scheduled({ schedule: "11 23 * * *" }), triggers.scheduled({ schedule: "19 1 * * *" })] }),
     observability: { enabled: true, headSamplingRate: 0.1, traces: { enabled: true, headSamplingRate: 0.1 } },
     assets: {
       htmlHandling: "none",
@@ -16,4 +16,4 @@ export default defineConfig({
       ASSETS: bindings.assets(),
     },
   }),
-});
+}));
