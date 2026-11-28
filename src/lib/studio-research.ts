@@ -436,7 +436,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     }
     const chapterPrompt = prompt.replace(/^Plan around \d+ scenes.*$/m, "");
     const chapterTargets=chapterWordBudgets(chapters.map(chapter=>chapter.count),totalTarget);
-    const segments = [];
+    const segments: Json[] = [];
     let priorContext = "";
     for (const [index, chapter] of chapters.entries()) {
       const researched = researchChapters[index];
