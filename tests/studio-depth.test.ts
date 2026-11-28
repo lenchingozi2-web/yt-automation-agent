@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deepenResearch, depthExcerpt, depthProfile, validateResearchChapters, type DepthEvidence } from "../src/lib/studio-depth.ts";
+import { chapterWordBudgets, deepenResearch, depthExcerpt, depthProfile, validateResearchChapters, type DepthEvidence } from "../src/lib/studio-depth.ts";
 
 const source = (id: number): DepthEvidence => ({id, title:`Evidence ${id}`, url:`https://pubmed.ncbi.nlm.nih.gov/${id}/`,
   publisher:`Journal ${id}`, text:`The independently indexed research record ${id} reports its population, methods, findings and limitations. `.repeat(5)});
@@ -8,6 +8,14 @@ const sources = Array.from({length:12},(_,i)=>source(i+1));
 const outline = () => Array.from({length:8},(_,i)=>({title:`A distinct chapter ${i+1}`, question:`What does evidence question ${i+1} establish?`,
   key_points:Array.from({length:4},(_,n)=>({point:`Chapter ${i+1} point ${n+1} requires its own source-grounded explanation.`,source_id:n%2?(i+1)%8+1:i+1})),source_ids:[i+1,(i+1)%8+1]}));
 const proposal = {queries:["study methods", "mechanism background", "independent comparison", "practical interpretation", "evidence limitations", "related experiments"]};
+
+test("chapter word budgets keep the selected runtime while allowing a concise opening",()=>{
+  const budgets=chapterWordBudgets(Array(8).fill(15),4050);
+  assert.equal(budgets.reduce((sum,value)=>sum+value,0),4050);
+  assert.ok(budgets[0]<budgets[1]);
+  assert.ok(budgets[7]<budgets[6]);
+  assert.ok(budgets.every(value=>value>300));
+});
 
 test("long research excerpts preserve results and limitations at the end",()=>{
   const passage="STUDY METHODS " + "background ".repeat(1000) + "RESULTS AND LIMITATIONS";

@@ -14,6 +14,13 @@ export function depthProfile(seconds: number) {
     chapters: seconds >= 1800 ? 8 : seconds >= 1200 ? 6 : 4,
     targetWords: Math.round(seconds * 2.25) };
 }
+export function chapterWordBudgets(sceneCounts: number[], totalWords: number) {
+  const weights=sceneCounts.map((count,index)=>count*(index===0?.65:index===sceneCounts.length-1?.8:1));
+  const total=weights.reduce((sum,value)=>sum+value,0);
+  const budgets=weights.map(weight=>Math.round(totalWords*weight/total));
+  budgets[budgets.length-1]+=totalWords-budgets.reduce((sum,value)=>sum+value,0);
+  return budgets;
+}
 const clean = (value: unknown) => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
 const key = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 export function depthExcerpt(text: string, limit: number) {

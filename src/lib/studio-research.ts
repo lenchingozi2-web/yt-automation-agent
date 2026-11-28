@@ -2,7 +2,7 @@ import { addViewerPrompt, communityQuestion, withoutViewerPrompt } from "./studi
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 import { rankTopicOptions, type TopicOption } from "./studio-topic-scoring.ts";
 import { selectPackaging } from "./studio-packaging.ts";
-import { deepenResearch, depthExcerpt, depthProfile, type ResearchChapter } from "./studio-depth.ts";
+import { chapterWordBudgets, deepenResearch, depthExcerpt, depthProfile, type ResearchChapter } from "./studio-depth.ts";
 
 type Json = Record<string, unknown>;
 type Evidence = ResearchSource & { text: string; year?: string };
@@ -390,7 +390,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     trace("Research depth verified: " + evidence.length + " sources, " + researchChapters.length + " distinct chapters.");
   }
   const storyContext = briefing ? { references: briefing.references, leadTitle: evidence[0].title } : undefined;
-  const count = Math.max(4, Math.min(120, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
+  const count = duration >= 1800 ? 160 : Math.max(4, Math.min(120, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
   const totalTarget = Math.round(duration * 2.25);
   const perScene = Math.round(totalTarget / count);
   const lower = Math.max(14, perScene - 3);
@@ -435,10 +435,13 @@ export async function researchedDraft(brief: string, duration: number, format: D
       chapters.push({ count: Math.min(chapterSize, count - offset), purpose });
     }
     const chapterPrompt = prompt.replace(/^Plan around \d+ scenes.*$/m, "");
+    const chapterTargets=chapterWordBudgets(chapters.map(chapter=>chapter.count),totalTarget);
     const segments = [];
     let priorContext = "";
     for (const [index, chapter] of chapters.entries()) {
       const researched = researchChapters[index];
+      const plannedWords=researched?chapterTargets[index]:chapter.count*perScene;
+      const chapterPerScene=researched?Math.round(plannedWords/chapter.count):perScene;
       const selectedIds = new Set([1, ...(researched?.source_ids ?? [])]);
       const chapterEvidence = evidence.filter(source => selectedIds.has(source.id || 0));
       const instruction = [
@@ -447,7 +450,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
           chapter_plan: researched, covered_chapters: researchChapters.slice(0, index).map(c => ({title:c.title,question:c.question})),
           evidence: chapterEvidence.map(source => ({...source, text: depthExcerpt(source.text,2600)})) }),
           "Answer only this chapter's question. Develop each vetted point with its exact source_id, explaining its methods, finding and limitation. Add only explicitly hypothetical examples when useful. Do not invent additional benefits, generalize interviewee beliefs, repeat earlier chapters, or turn contextual studies into the selected study's findings."] : []),
-        `Write only chapter ${index + 1} of one video. Plan around ${chapter.count} scenes and ${chapter.count * perScene} total spoken words in this chapter. Individual scenes can vary between ${lower} and ${upper} words, with flexibility for complete sentences. ${chapter.purpose}`,
+        `Write only chapter ${index + 1} of one video. Plan around ${chapter.count} scenes and ${plannedWords} total spoken words in this chapter. Individual scenes can vary between ${Math.max(14,chapterPerScene-3)} and ${chapterPerScene+3} words, with flexibility for complete sentences. ${chapter.purpose}`,
         "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
         "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
         ...(index === chapters.length - 1 ? ["Also return viewer_prompt as ONE optional spoken sentence under 25 words, inviting viewers to like and subscribe AFTER the main payoff. It must relate to this particular video's specific benefit or next lesson, not a generic channel pitch. Keep this sentence OUT of scenes. Make no factual claims."] : []),
@@ -457,10 +460,11 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const budget = Math.max(2800, chapter.count * 210);
       const chapterWords = (value: Json) => list(value.scenes).reduce<number>((total, scene) => total + words(usableNarration(object(scene))), 0);
       const first = await modelJson(instruction, budget, 30000);
-      const enough = chapterWords(first) >= chapter.count * perScene * (researchChapters.length ? .9 : .76) && (index !== 0 || text(first.title));
+      const enough = chapterWords(first) >= plannedWords * (researchChapters.length ? .9 : .76) && (index !== 0 || text(first.title));
       const completed = enough ? first : await modelJson(instruction +
-        `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${chapter.count * perScene} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000);
-      if (researchChapters.length && chapterWords(completed) < chapter.count * perScene * .9) {
+        `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${plannedWords} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000);
+      trace(`Chapter ${index+1}: ${chapterWords(completed)} spoken words; target ${plannedWords}.`);
+      if (researchChapters.length && chapterWords(completed) < plannedWords * .9) {
         throw new Error(`Studio could not develop chapter ${index + 1} to the selected duration without padding. No video was queued.`);
       }
       segments.push(completed);

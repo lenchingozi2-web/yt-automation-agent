@@ -37,9 +37,11 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
       assert.ok(packet.evidence.length<=5,"Chapter prompts must not resend the entire packet");
       const id=packet.chapter_plan.source_ids[0];
       chapters++;
-      const narration=(n:number)=>`Journal 1 explains this illustrative learning example ${n}. The learner compares two study approaches, checks the reasoning carefully, then considers a distinct limitation before drawing a cautious conclusion from the available evidence.`;
+      const requested=/Plan around (\d+) scenes and (\d+) total spoken words/.exec(prompt)!;
+      const sceneCount=Number(requested[1]), wordsPerScene=Math.round(Number(requested[2])/sceneCount);
+      const narration=(n:number)=>`Journal 1 explains this illustrative learning example ${n}. The learner compares two study approaches, checks the reasoning carefully, then considers a distinct limitation before drawing a cautious conclusion from the available evidence.`.split(" ").slice(0,wordsPerScene).join(" ")+".";
       response={title:"How feedback changes what students learn",description:"A careful explanation of learning evidence.",tags:["learning"],thumbnail_title:"The Feedback Gap",
-        chapter_title:packet.chapter_plan.title,scenes:Array.from({length:15},(_,i)=>({narration:narration((chapters-1)*15+i+1),search_queries:["student learning"],source_ids:[1,id]}))};
+        chapter_title:packet.chapter_plan.title,scenes:Array.from({length:sceneCount},(_,i)=>({narration:narration((chapters-1)*sceneCount+i+1),search_queries:["student learning"],source_ids:[1,id]}))};
     }
     return Response.json({candidates:[{content:{parts:[{text:JSON.stringify(response)}]}}]});
   };
@@ -52,6 +54,7 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     assert.ok(audits>=8);
     assert.ok(draft.sources!.length>=8);
     assert.equal(draft.scenes.filter(s=>s.chapter_title).length,8);
+    assert.ok(draft.scenes.length<=160);
     assert.ok(draft.scenes.reduce((sum,s)=>sum+s.narration.split(/\s+/).length,0)>=3645);
     assert.ok(draft.description.includes("https://pubmed.ncbi.nlm.nih.gov/1/"));
   }finally{
