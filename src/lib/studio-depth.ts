@@ -106,6 +106,7 @@ export async function deepenResearch(brief: string, seed: DepthEvidence[], secon
   for (let attempt = 0; attempt < 2; attempt++) {
     const checked = await services.plan(assessment() + (problem ? "\nCorrect the outline using the current evidence: " + problem : ""), 3600);
     if (checked.sufficient !== true) {
+      console.warn("[studio depth]", JSON.stringify({sources:evidence.length,queries:searched,sufficient:checked.sufficient,reason:clean(checked.reason).slice(0,700),fields:Object.keys(checked)}));
       if (attempt===0 && searched<queries.length) {
         const suggested=[...new Set((Array.isArray(checked.additional_queries)?checked.additional_queries:[]).map(clean).filter(q=>q.length>=5&&q.length<=100&&q.split(" ").length>=2&&q.split(" ").length<=7&&!queries.slice(0,searched).includes(q)))];
         const remaining=queries.length-searched;
