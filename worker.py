@@ -315,7 +315,8 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 print("[b-roll] selected contextual stock media", flush=True)
                 return result
     if interrupted or catalog.get("pixabay_cooldown", 0) > time.monotonic():
-        raise TemporaryRenderError("Pixabay search or download was interrupted.")
+        raise TemporaryRenderError("Pixabay search or download was interrupted.",
+                                   retry_after=max(0, math.ceil(catalog.get("pixabay_cooldown", 0) - time.monotonic())))
     return None
 
 
@@ -1569,7 +1570,7 @@ def render_job(video, client) -> bool:
                 # during a provider-wide outage. Keep the saved job retryable.
                 print(f"[retry] {video['id']}: {type(error).__name__}; retrying in this run", flush=True)
                 save_fields(client, video, progress_note="Retrying a temporary render error")
-                time.sleep(2 ** attempts)
+                time.sleep(max(2 ** attempts, getattr(error, "retry_after", 0)))
                 continue
             print(f"[failed] {video['id']}: {type(error).__name__}: {str(error)[:300]}", flush=True)
             save_fields(client, video, status="failed", error_message=str(error)[:700],

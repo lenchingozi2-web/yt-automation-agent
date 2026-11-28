@@ -127,8 +127,6 @@ def main() -> int:
 
                 master_ids.append(render_id)
                 with (
-                    patch("worker.fetch_broll", side_effect=lambda scene, *args:
-                          None if scene["logical_scene"] == 2 else fetch_broll(scene, *args)),
                     patch("worker.storage_preview", side_effect=portrait_review_copy),
                     patch("studio_master.PART_BYTES", 500_000),
                 ):
@@ -143,9 +141,15 @@ def main() -> int:
                     print("PASS: Multi-part 1080p upload master restored byte for byte from private storage.")
                 size = (720, 1280)
                 portrait_meta = metadata(client.table("videos").select("*").eq("id", render_id).single().execute().data)
-                assert portrait_meta["scene_timeline"][1]["narration_cards"] > 0
-                assert not portrait_meta["scene_timeline"][1]["footage"]
-                print("PASS: An unmatched scene rendered with animated words, timed captions and intact narration.")
+                assert portrait_meta["scene_timeline"][1]["footage"]
+                assert portrait_meta["visual_quality"]["stock_fraction"] >= .75
+                from worker import validate_visual_coverage
+                try:
+                    validate_visual_coverage([(8, True), (8, False)])
+                except ValueError:
+                    print("PASS: Excessive fallback text is rejected before storage upload.")
+                else:
+                    raise AssertionError("The visual-quality guard accepted a half-text video")
             path = ROOT / render_id / "preview_from_storage.mp4"
             path.write_bytes(client.storage.from_(os.getenv("SUPABASE_VIDEO_BUCKET", "renders")).download(render_id + ".mp4"))
             poster = path.with_suffix(".jpg")
@@ -184,10 +188,10 @@ def main() -> int:
         visual_row = client.table("videos").insert({**payload, "scenes": visual_draft}).execute().data[0]
         visual_id = str(visual_row["id"])
         disposable_ids.append(visual_id)
-        def intermittent_footage(*args):
+        def intermittent_footage(*args, **kwargs):
             if footage.call_count == 1:
                 raise TemporaryRenderError("Injected provider timeout for the retry check.")
-            return fetch_broll(*args)
+            return fetch_broll(*args, **kwargs)
 
         with (
             patch("worker.make_audio", side_effect=AssertionError("Footage-only edits must reuse narration")),

@@ -68,8 +68,16 @@ class VisualQualityTests(unittest.TestCase):
                 async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(429, headers={"X-RateLimit-Reset": "30"}))) as client:
                     await fetch_pixabay({"narration": "A student studies in class.", "search_queries": ["student classroom"]},
                                         Path(tmp) / "stock.mp4", set(), set(), {}, shared_client=client)
-        with patch.dict(os.environ, {"PIXABAY_API_KEY": "fixture"}), self.assertRaises(TemporaryRenderError):
+        with patch.dict(os.environ, {"PIXABAY_API_KEY": "fixture"}), self.assertRaises(TemporaryRenderError) as caught:
             asyncio.run(perform())
+        self.assertGreaterEqual(caught.exception.retry_after, 29)
+
+    def test_worker_respects_media_rate_limit_before_retrying_cached_work(self):
+        from worker import render_job
+        with (patch("worker.process", side_effect=[TemporaryRenderError("Rate limited", retry_after=30), None]),
+              patch("worker.save_fields"), patch("worker.time.sleep") as sleep):
+            self.assertTrue(render_job({"id": "fixture", "status": "rendering"}, None))
+        sleep.assert_called_once_with(30)
 
     def test_medical_ai_benchmark_does_not_fill_education_slot(self):
         benchmark = Source("1", "Medical image reasoning", "Journal", "2026", "Radiologists benchmark AI diagnosis.")

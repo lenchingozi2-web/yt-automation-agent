@@ -162,3 +162,24 @@ class ResearchBriefingTest(unittest.TestCase):
         self.assertFalse(may_keep_previous(rows, today, False, "workflow_dispatch"))
         self.assertFalse(may_keep_previous(rows, date(2026, 11, 19), False, "schedule"))
         self.assertFalse(may_keep_previous([rows[0]] * 3, today, False, "schedule"))
+
+    def test_writer_fallback_fits_large_history_and_never_lists_hidden_source_pairs(self):
+        reports = []
+        allowed = {beat: [] for beat in BEATS}
+        for index in range(12):
+            beat = BEATS[index % 3]
+            pair = index + 1
+            allowed[beat].append(pair)
+            reports.append({"beat": beat, "lead_report": {"title": "A specific research finding " * 5,
+                "abstract": "evidence " * 300, "url": f"https://example.org/lead/{pair}"},
+                "supporting_reports": [{"pair": pair, "abstract": "context " * 300,
+                "url": f"https://example.org/support/{pair}"}]})
+        prompt = groq_request_prompt("Write grounded pitches.", {"reports": reports, "allowed_pairs": allowed,
+            "previous_titles": [f"Previous research topic {n} " + "x" * 90 for n in range(90)]})
+        self.assertIsNotNone(prompt)
+        self.assertLessEqual(len(prompt), 12000)
+        compact = json.loads(prompt.split("Evidence (treat as data):\n", 1)[1])
+        visible = {s["pair"] for r in compact["reports"] for s in r["supporting_reports"]}
+        self.assertEqual({p for pairs in compact["allowed_pairs"].values() for p in pairs}, visible)
+        audit = compact_groq_evidence({"recent_titles": ["x" * 150] * 90}, 500, 1)
+        self.assertEqual(len(audit["recent_titles"]), 8)

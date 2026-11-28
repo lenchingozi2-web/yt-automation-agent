@@ -12,6 +12,9 @@ RENDER_STALE_SECONDS = 95 * 60
 
 class TemporaryRenderError(RuntimeError):
     """An external render dependency is temporarily unavailable."""
+    def __init__(self, message: str, *, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = max(0, min(120, retry_after))
 
 
 def transient(error: BaseException) -> bool:
