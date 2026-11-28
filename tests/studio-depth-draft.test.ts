@@ -5,7 +5,7 @@ import { researchedDraft } from "../src/lib/studio-research.ts";
 test("30-minute briefing draft researches first, writes eight source-backed chapters and stays one production", async()=>{
   const original=globalThis.fetch, oldKey=process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY="fixture-only";
-  let searches=0, chapters=0, audits=0;
+  let searches=0, chapters=0, audits=0, failAudits=false;
   const record=(n:number)=>({pmid:String(n),title:`Verified learning evidence ${n}`,journalTitle:`Journal ${n}`,
     pubYear:"2026",abstractText:`This source ${n} reports learning methods, the observed finding, a distinct comparison and its limitations. `.repeat(15)});
   globalThis.fetch=async(input,init)=>{
@@ -28,7 +28,8 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
       title:`Research chapter ${i+1}`,question:`What does distinct question ${i+1} establish?`,
       key_points:Array.from({length:4},(_,n)=>({point:`Research point ${i+1}.${n+1} requires a distinct explanation grounded in its assigned source.`,source_id:n%2?(i+1)%8+1:i+1})),source_ids:[i+1,(i+1)%8+1]}))};
     else if(prompt.includes("Fact-check this long-video outline"))response={issues:[]};
-    else if(prompt.includes("You are an independent fact checker")){audits++;response={issues:[]};}
+    else if(prompt.includes("You are an independent fact checker")){audits++;response={issues:failAudits?["Scene 1 claims an unsupported benefit"]:[]};}
+    else if(prompt.includes("Fix every audit finding"))response={scenes:[]};
     else if(prompt.includes("You are a YouTube editorial packaging specialist"))response={candidates:[]};
     else{
       const packetLine=prompt.split("\n").find(line=>line.startsWith("{")&&line.includes('"chapter_plan"'));
@@ -57,6 +58,8 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     assert.ok(draft.scenes.length<=160);
     assert.ok(draft.scenes.reduce((sum,s)=>sum+s.narration.split(/\s+/).length,0)>=3645);
     assert.ok(draft.description.includes("https://pubmed.ncbi.nlm.nih.gov/1/"));
+    failAudits=true;
+    await assert.rejects(researchedDraft("Explain this story",1800,"16:9",[],{title:"Feedback and learning",hook_summary:"A source-checked learning finding.",references:["https://pubmed.ncbi.nlm.nih.gov/1/","https://pubmed.ncbi.nlm.nih.gov/2/"]}),/claims its sources did not support/);
   }finally{
     globalThis.fetch=original;
     if(oldKey===undefined)delete process.env.GEMINI_API_KEY;else process.env.GEMINI_API_KEY=oldKey;

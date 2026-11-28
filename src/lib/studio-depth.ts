@@ -113,7 +113,7 @@ export async function deepenResearch(brief: string, seed: DepthEvidence[], secon
   ].join("\n");
   let problem = "";
   let previousOutline: ResearchChapter[] | undefined;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     const checked = await services.plan(assessment() + (problem ? "\nRepair the exact flagged points below using the current evidence. Keep the verified points, chapter progression and source coverage. Return the complete corrected outline in the requested schema. " + JSON.stringify({issues:problem,previous_chapters:previousOutline}) : ""), 3600);
     if (checked.sufficient !== true) {
       console.warn("[studio depth]", JSON.stringify({sources:evidence.length,queries:searched,sufficient:checked.sufficient,reason:clean(checked.reason).slice(0,700),fields:Object.keys(checked)}));
@@ -143,7 +143,14 @@ export async function deepenResearch(brief: string, seed: DepthEvidence[], secon
       }
       // Some providers return structured objections despite the string schema.
       // Preserve every objection for the repair pass; none can count as a pass.
-      if (audit.issues.length) throw new Error(audit.issues.map(issue=>typeof issue==="string"?issue:JSON.stringify(issue)).join(" | ").slice(0,2600));
+      if (audit.issues.length) {
+        const issues=audit.issues.map(issue=>typeof issue==="string"?issue:JSON.stringify(issue)).join(" | ").slice(0,2600);
+        const repaired=await services.plan(assessment()+"\nRevise only the flagged points in this preliminary editorial review. Keep the remaining supported outline intact. Return the complete corrected outline with sufficient:true and chapters. "+JSON.stringify({issues,previous_chapters:chapters}),3600);
+        if(repaired.sufficient!==true)throw new Error("The corrected research outline was insufficient.");
+        // This is a preliminary editing pass. The finished narration still goes
+        // through the mandatory independent source audit and scene-level repair.
+        return {evidence,chapters:validateResearchChapters(repaired.chapters,evidence,seconds)};
+      }
       return { evidence, chapters };
     }
     catch (error) {

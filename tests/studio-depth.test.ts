@@ -25,18 +25,19 @@ test("long research excerpts preserve results and limitations at the end",()=>{
   assert.equal(excerpt.length,2000);
 });
 
-test("unsupported outline points fail before any script writing with bounded audit retries",async()=>{
+test("outline objections receive one targeted editorial repair before the mandatory script audit",async()=>{
   let calls=0;
-  await assert.rejects(deepenResearch("Selected research",sources.slice(0,2),1800,{
+  const result=await deepenResearch("Selected research",sources.slice(0,2),1800,{
     plan:async instruction=>{calls++;return instruction.includes("Fact-check this long-video outline")?{issues:["Chapter 1 turns reported beliefs into measured benefits"]}:calls===1?proposal:{sufficient:true,chapters:outline()};},
     search:async()=>sources,
-  }),/source-backed chapter plan/);
-  assert.equal(calls,7);
+  });
+  assert.equal(result.chapters.length,8);
+  assert.equal(calls,4);
 });
 
-test("structured audit objections are preserved and cannot pass as verified evidence",async()=>{
+test("structured outline objections are preserved for the targeted repair",async()=>{
   let calls=0,repair="";
-  await assert.rejects(deepenResearch("Selected research",sources.slice(0,2),1800,{
+  const result=await deepenResearch("Selected research",sources.slice(0,2),1800,{
     plan:async instruction=>{
       calls++;
       if(instruction.includes("Fact-check this long-video outline"))return {issues:[{chapter:1,reason:"Reported beliefs are not measured benefits"}]};
@@ -44,10 +45,11 @@ test("structured audit objections are preserved and cannot pass as verified evid
       repair=instruction;
       return {sufficient:true,chapters:outline()};
     },search:async()=>sources,
-  }),/source-backed chapter plan/);
+  });
+  assert.equal(result.chapters.length,8);
   assert.ok(repair.includes("Reported beliefs are not measured benefits"));
   assert.ok(repair.includes('"previous_chapters":[{"title":"A distinct chapter 1"'));
-  assert.equal(calls,7);
+  assert.equal(calls,4);
 });
 
 test("research depth grows with selected duration and short videos remain cheap",()=>{
