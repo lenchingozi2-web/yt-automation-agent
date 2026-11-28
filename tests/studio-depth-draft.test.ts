@@ -6,6 +6,7 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
   const original=globalThis.fetch, oldKey=process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY="fixture-only";
   let searches=0, chapters=0, audits=0, failAudits=false;
+  const writtenChapters=new Set<string>();
   const record=(n:number)=>({pmid:String(n),title:`Verified learning evidence ${n}`,journalTitle:`Journal ${n}`,
     pubYear:"2026",abstractText:`This source ${n} reports learning methods, the observed finding, a distinct comparison and its limitations. `.repeat(15)});
   globalThis.fetch=async(input,init)=>{
@@ -35,11 +36,12 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
       const packetLine=prompt.split("\n").find(line=>line.startsWith("{")&&line.includes('"chapter_plan"'));
       assert.ok(packetLine,"Chapter writer did not receive its research packet");
       const packet=JSON.parse(packetLine!);
+      writtenChapters.add(packet.chapter_plan.title);
       assert.ok(packet.evidence.length<=5,"Chapter prompts must not resend the entire packet");
       const id=packet.chapter_plan.source_ids[0];
       chapters++;
       const requested=/Plan around (\d+) scenes and (\d+) total spoken words/.exec(prompt)!;
-      const sceneCount=Number(requested[1]), wordsPerScene=Math.round(Number(requested[2])/sceneCount);
+      const sceneCount=Number(requested[1]), wordsPerScene=Math.round(Number(requested[2])/sceneCount*((chapters===5||chapters===6)?.6:1));
       const narration=(n:number)=>`Journal 1 explains this illustrative learning example ${n}. The learner compares two study approaches, checks the reasoning carefully, then considers a distinct limitation before drawing a cautious conclusion from the available evidence.`.split(" ").slice(0,wordsPerScene).join(" ")+".";
       response={title:"How feedback changes what students learn",description:"A careful explanation of learning evidence.",tags:["learning"],thumbnail_title:"The Feedback Gap",
         chapter_title:packet.chapter_plan.title,scenes:Array.from({length:sceneCount},(_,i)=>({narration:narration((chapters-1)*sceneCount+i+1),search_queries:["student learning"],source_ids:[1,id]}))};
@@ -50,7 +52,8 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     const draft=await researchedDraft("Explain this story",1800,"16:9",[],{title:"Feedback and learning",hook_summary:"A source-checked learning finding.",references:["https://pubmed.ncbi.nlm.nih.gov/1/","https://pubmed.ncbi.nlm.nih.gov/2/"]});
     assert.equal(draft.duration_seconds,1800);
     assert.equal(draft.format,"16:9");
-    assert.equal(chapters,8);
+    assert.equal(writtenChapters.size,8);
+    assert.ok(chapters<=16);
     assert.ok(searches>=3&&searches<=6);
     assert.ok(audits>=8);
     assert.ok(draft.sources!.length>=8);

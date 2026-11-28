@@ -440,7 +440,9 @@ export async function researchedDraft(brief: string, duration: number, format: D
     let priorContext = "";
     for (const [index, chapter] of chapters.entries()) {
       const researched = researchChapters[index];
-      const plannedWords=researched?chapterTargets[index]:chapter.count*perScene;
+      const writtenWords=segments.reduce((sum,segment)=>sum+list(segment.scenes).reduce<number>((total,scene)=>total+words(usableNarration(object(scene))),0),0);
+      const remainingWeight=chapterTargets.slice(index).reduce((sum,value)=>sum+value,0);
+      const plannedWords=researched?Math.max(chapter.count*14,Math.min(chapter.count*38,Math.round((totalTarget-writtenWords)*chapterTargets[index]/remainingWeight))):chapter.count*perScene;
       const chapterPerScene=researched?Math.round(plannedWords/chapter.count):perScene;
       const selectedIds = new Set([1, ...(researched?.source_ids ?? [])]);
       const chapterEvidence = evidence.filter(source => selectedIds.has(source.id || 0));
@@ -461,12 +463,12 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const chapterWords = (value: Json) => list(value.scenes).reduce<number>((total, scene) => total + words(usableNarration(object(scene))), 0);
       const first = await modelJson(instruction, budget, 30000);
       const enough = chapterWords(first) >= plannedWords * (researchChapters.length ? .9 : .76) && (index !== 0 || text(first.title));
-      const completed = enough ? first : await modelJson(instruction +
+      const retried = enough ? first : await modelJson(instruction +
         `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${plannedWords} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000);
+      const completed=chapterWords(first)>chapterWords(retried)?first:retried;
       trace(`Chapter ${index+1}: ${chapterWords(completed)} spoken words; target ${plannedWords}.`);
-      if (researchChapters.length && chapterWords(completed) < plannedWords * .9) {
-        throw new Error(`Studio could not develop chapter ${index + 1} to the selected duration without padding. No video was queued.`);
-      }
+      // Let chapters differ naturally in length. Remaining chapters inherit any
+      // shortfall; the complete script must still meet its strict runtime floor.
       segments.push(completed);
       priorContext = list(completed.scenes).slice(-2)
         .map((entry) => usableNarration(object(entry))).filter(Boolean).join(" ").slice(-800);
