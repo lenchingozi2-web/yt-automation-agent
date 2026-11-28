@@ -77,7 +77,27 @@ test("an independent depth rejection stops drafting even when eight sources were
   await assert.rejects(deepenResearch("Narrow story",sources.slice(0,2),1800,{
     plan:async()=>++plans===1?proposal:{sufficient:false,reason:"The sources repeat one preliminary finding"},search:async()=>sources,
   }),/without padding/);
-  assert.equal(plans,2);
+  assert.equal(plans,3);
+});
+
+test("a thin first packet triggers the remaining research budget before drafting",async()=>{
+  let plans=0,searches=0;
+  const result=await deepenResearch("Selected research",sources.slice(0,2),1800,{
+    plan:async instruction=>{
+      plans++;
+      if(instruction.includes("Fact-check this long-video outline"))return {issues:[]};
+      if(plans===1)return proposal;
+      if(plans===2)return {sufficient:false,reason:"Missing mechanisms and comparisons",additional_queries:["learning mechanisms","study comparison","teaching context"]};
+      assert.ok(instruction.includes('https://pubmed.ncbi.nlm.nih.gov/9/'));
+      return {sufficient:true,chapters:outline()};
+    },
+    search:async()=>{searches++;return searches<=3?sources.slice(2,8):sources.slice(8);},
+  });
+  assert.equal(searches,6);
+  assert.equal(plans,4);
+  assert.ok(result.evidence.some(source=>source.url.endsWith('/9/')));
+  assert.equal(result.evidence[0].url,sources[0].url);
+  assert.ok(result.evidence.length<=12);
 });
 
 test("chapter plans reject repeated topics, repeated points and invented citations",()=>{
