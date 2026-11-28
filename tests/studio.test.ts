@@ -1,6 +1,52 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canRetryYouTubeThumbnail, durationFromBrief, normalizeVideo, normalizeDraft, youtubePublishAction, youtubeStudioUrl } from '../src/lib/studio.ts';
+import { VIDEO_DURATION_OPTIONS, validVideoDuration } from '../src/lib/studio-limits.ts';
+import { selectPackaging } from '../src/lib/studio-packaging.ts';
+import { freshBriefing, lagosDay, scheduledResearch } from '../src/lib/studio-schedule.ts';
+
+test('briefing durations include 20 and 30 minutes and require an explicit valid choice', () => {
+  assert.ok(VIDEO_DURATION_OPTIONS.includes(1800));
+  assert.ok(VIDEO_DURATION_OPTIONS.includes(1200));
+  for (const value of [undefined, null, "1800", NaN, Infinity, 1801, 0]) assert.equal(validVideoDuration(value), false);
+  assert.equal(validVideoDuration(1800), true);
+  assert.equal(normalizeDraft({ duration_seconds: 1800, scenes: [{ narration: "Full length video." }] }).duration_seconds, 1800);
+});
+
+test('packaging rejects hype, duplicate headlines and recent angles', () => {
+  const candidates = [
+    {title: "Exploring the future of AI learning", thumbnail_title: "AI Learning"},
+    {title: "Why AI Tutors Can Change How Students Learn at Home", thumbnail_title: "AI Tutors"},
+    {title: "Why AI Tutors Can Miss What Students Actually Learn", thumbnail_title: "The Feedback Gap"},
+  ];
+  assert.equal(selectPackaging(candidates, "AI tutors and students learning", [])?.thumbnail_title, "The Feedback Gap");
+  assert.equal(selectPackaging([candidates[2]], "AI tutors", [candidates[2].title]), undefined);
+});
+
+test('daily research uses Lagos date, verifies every topic, and skips fresh briefings', async () => {
+  const now = new Date("2026-11-27T23:11:00Z");
+  assert.equal(lagosDay(now), "2026-11-28");
+  const rows = ["health", "education", "intelligence"].map(topic_area => ({ topic_area, briefing_date: "2026-11-28", references: ["a", "b"] }));
+  assert.equal(freshBriefing(rows.slice(0, 2), "2026-11-28"), false);
+  assert.equal(freshBriefing(rows, "2026-11-28"), true);
+  const calls: string[] = [];
+  const request: typeof fetch = async input => { calls.push(String(input)); return Response.json(rows); };
+  assert.deepEqual(await scheduledResearch({url:"https://studio.invalid",key:"sb_secret_fixture",token:"fixture"}, now, request), {dispatched:false,fresh:true});
+  assert.equal(calls.length, 1);
+  assert.ok(!calls[0].includes("scenes"));
+});
+
+test('stale briefing dispatches research and exposes dispatch failures', async () => {
+  const config = {url:"https://studio.invalid",key:"sb_secret_fixture",token:"fixture"};
+  const request: typeof fetch = async (input, init) => {
+    if (String(input).includes("research_ideas?")) return Response.json([]);
+    assert.deepEqual(JSON.parse(String(init?.body)), {ref:"main",inputs:{preview_only:"false"}});
+    return new Response(null, {status:204});
+  };
+  assert.equal((await scheduledResearch(config, new Date(), request)).dispatched, true);
+  const denied: typeof fetch = async input => String(input).includes("research_ideas?") ? Response.json([]) : new Response(null, {status:403});
+  await assert.rejects(scheduledResearch(config, new Date(), denied), /dispatch failed: HTTP 403/);
+});
 
 test('saved settings beat database defaults and measured geometry describes the finished preview', () => {
   const row = { format: '16:9', duration_seconds: 180, scenes: [{ narration: 'Keep the selected settings.', _studio: {

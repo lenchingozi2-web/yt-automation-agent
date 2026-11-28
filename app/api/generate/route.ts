@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { normalizeDraft, normalizeVideo, toSafeMessage } from "@/src/lib/studio";
 import { researchedDraft } from "@/src/lib/studio-research";
-import { MAX_VIDEO_SECONDS } from "@/src/lib/studio-limits";
+import { MAX_VIDEO_SECONDS, validVideoDuration } from "@/src/lib/studio-limits";
 import { getResearchIdea, markBriefingQueued } from "@/src/lib/studio-briefing";
 import { dispatchStudioWorker, errorResponse, findVideo, jobIdOf, quotaOf, recentTitles, requestObject, safeInsertVideo, statusFor, studioContext, StudioRequestError } from "@/src/lib/studio-server";
 
@@ -24,6 +24,7 @@ export async function POST(request: Request) {
       const quota = await quotaOf(client);
       if (quota.used >= quota.limit) return NextResponse.json({ ok: false, error: "Daily production allowance reached. You can retry existing failed videos." }, { status: 429 });
     }
+    if (storyId && !validVideoDuration(body.duration)) throw new StudioRequestError("Select a video length between 1 and 30 minutes before drafting this story.", 400);
     const seconds = Math.round(Math.max(60, Math.min(MAX_VIDEO_SECONDS, Number(body.duration) || 180)));
     const format = body.format === "9:16" ? "9:16" : "16:9";
     const story = storyId ? await getResearchIdea(client, storyId) : undefined;

@@ -44,7 +44,7 @@ export function statusFor(error: unknown) {
 export async function requestObject(request: Request): Promise<Record<string, unknown>> {
   const value = await request.json().catch(() => null);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new StudioRequestError("Send a valid JSON object.", 400);
-  return value;
+  return value as Record<string, unknown>;
 }
 
 export const jobIdOf = (value: unknown) => typeof value === "string" &&

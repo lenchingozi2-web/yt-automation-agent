@@ -54,7 +54,7 @@ def generate_researched_draft(brief: str, seconds: int, ratio: str, recent: list
 def queue_daily(client, *, now: datetime | None = None) -> dict | None:
     now = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Africa/Lagos"))
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    recent = client.table("videos").select("*").order("created_at", desc=True).limit(100).execute().data or []
+    recent = client.table("videos").select("title,user_id").order("created_at", desc=True).limit(100).execute().data or []
     job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "lenxiq-studio-daily:" + daily_automation_key(
         now, os.getenv("GITHUB_EVENT_NAME", ""), os.getenv("GITHUB_RUN_ID", ""))))
     existing = client.table("videos").select("*").eq("id", job_id).execute().data or []
@@ -62,7 +62,7 @@ def queue_daily(client, *, now: datetime | None = None) -> dict | None:
         print("[automation] Daily video already queued; no duplicate created.", flush=True)
         return existing[0]
     limit = max(1, min(20, int(os.getenv("STUDIO_DAILY_LIMIT", "6"))))
-    quota = client.table("videos").select("id", count="exact").gte("created_at", start).execute()
+    quota = client.table("videos").select("id", count="exact", head=True).gte("created_at", start).execute()
     if (quota.count or 0) >= limit:
         print("[automation] Daily allowance reached; keeping existing jobs.", flush=True)
         return None

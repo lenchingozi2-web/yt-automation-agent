@@ -75,8 +75,8 @@ class LocalKokoroTests(unittest.TestCase):
             self.assertEqual(model.calls[0][2], "en-us")
 
     def test_faster_voice_settings_invalidate_previous_audio_cache(self):
-        self.assertAlmostEqual(speech_speed(), 1.06, places=2)
-        self.assertIn("speed=1.060", voice_profile())
+        self.assertAlmostEqual(speech_speed(), 1.0, places=2)
+        self.assertIn("speed=1.000", voice_profile())
         model = FakeKokoro()
         scene = {"scene_number": 18, "narration": "A slightly faster but consistent narrator.", "format": "16:9"}
         with tempfile.TemporaryDirectory() as tmp, patch("studio_kokoro._model", return_value=model):
@@ -97,6 +97,13 @@ class LocalKokoroTests(unittest.TestCase):
             self.assertEqual({call[1] for call in model.calls}, {"am_michael"})
             self.assertIn("Each numbered example", captions.read_text())
             self.assertGreater(validate_audio(audio, words=len(passage.split())), 20)
+
+    def test_british_voice_keeps_its_native_pronunciation(self):
+        from studio_kokoro import generate
+        model = FakeKokoro()
+        with tempfile.TemporaryDirectory() as tmp, patch("studio_kokoro._model", return_value=model):
+            generate("The teacher explains this example clearly.", Path(tmp) / "voice.wav", "bm_george")
+        self.assertEqual(model.calls[0][2], "en-gb")
 
 
 if __name__ == "__main__":
