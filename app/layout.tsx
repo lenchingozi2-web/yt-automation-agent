@@ -3,6 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "LenxiQ Production Studio",
+  manifest: "/manifest.webmanifest",
   description: "Create, review, render, and upload YouTube videos from your LenxiQ workspace.",
   icons: { icon: "/icon-192.png", apple: "/apple-touch-icon.png" },
   appleWebApp: { capable: true, title: "LenxiQ Studio", statusBarStyle: "black-translucent" },

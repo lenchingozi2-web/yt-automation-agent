@@ -162,8 +162,10 @@ def narration_duration(path: Path) -> float:
 async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], recent: set[str], catalog: dict, *, shared_client=None) -> str | None:
     """Choose stock media by relevance and usable detail after cropping."""
     key = os.getenv("PIXABAY_API_KEY", "").strip()
-    if not key or catalog.get("pixabay_unavailable"):
-        return None
+    if not key:
+        raise ValueError("Stock media key is missing. No text-only video will be produced.")
+    if catalog.get("pixabay_unavailable"):
+        raise ValueError("Stock media authorization is unavailable. Restore Pixabay access before retrying.")
     output = scene.get("picture_size") or video_size(scene)
     portrait = output[1] > output[0]
     narration = scene["narration"]
@@ -173,23 +175,27 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
     interrupted = False
     tried = set()
     async with stock_http_client(shared_client) as client:
-        async def search(kind: str, query: str) -> list:
+        async def search(kind: str, query: str, page: int = 1) -> list:
             nonlocal interrupted
-            cache_key = (kind, query)
+            cache_key = (kind, query, page)
             if cache_key in catalog:
-                return catalog[cache_key]
+                hits = catalog[cache_key]
+                if hits and page < 3 and all((f"photo-{hit.get('id')}" if kind == "image" else str(hit.get("id"))) in used | recent for hit in hits):
+                    return await search(kind, query, page + 1)
+                return hits
             if catalog.get("pixabay_unavailable") or catalog.get("pixabay_cooldown", 0) > time.monotonic():
                 return []
             endpoint = "https://pixabay.com/api/" + ("videos/" if kind == "video" else "")
             try:
                 response = await client.get(endpoint, params={
-                    "key": key, "q": query[:100], "safesearch": "true", "per_page": 40,
-                    **({"video_type": "all"} if kind == "video" else {"image_type": "photo"}),
+                    "key": key, "q": query[:100], "safesearch": "true", "per_page": 40, "page": page,
+                    **({"video_type": "all"} if kind == "video" else {"image_type": "all"}),
                 })
                 if response.status_code == 429:
                     reset = response.headers.get("X-RateLimit-Reset", "60")
                     seconds = min(120, max(1, int(reset))) if reset.isdigit() else 60
                     catalog["pixabay_cooldown"] = time.monotonic() + seconds
+                    interrupted = True
                     return []
                 response.raise_for_status()
                 payload = response.json()
@@ -199,12 +205,14 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             except httpx.HTTPStatusError as error:
                 if error.response.status_code in (401, 403):
                     catalog["pixabay_unavailable"] = True
-                    print("[b-roll] Pixabay access unavailable; using local graphics where needed.", flush=True)
-                    return []
+                    raise ValueError("Stock media authorization failed. No text-only video will be produced.") from None
                 interrupted |= transient(error)
             except (httpx.TransportError, ValueError):
                 interrupted = True
-            return catalog.get(cache_key, [])
+            hits = catalog.get(cache_key, [])
+            if hits and page < 3 and all((f"photo-{hit.get('id')}" if kind == "image" else str(hit.get("id"))) in used | recent for hit in hits):
+                return await search(kind, query, page + 1)
+            return hits
 
         async def video(terms: list[str], groups: list, words: set, contextual_match: bool) -> str | None:
             nonlocal interrupted
@@ -215,7 +223,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                     if not isinstance(hit, dict):
                         continue
                     tags = str(hit.get("tags", ""))
-                    score = footage_relevance(tags, groups, words, query, override or contextual_match)
+                    score = footage_relevance(tags, groups, words, query, override or contextual_match, contextual=contextual_match)
                     clip_id = str(hit.get("id") or "")
                     if not score or not clip_id or clip_id in used or clip_id in recent:
                         continue
@@ -263,7 +271,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
                 for hit in await search("image", query):
                     if not isinstance(hit, dict):
                         continue
-                    score = footage_relevance(str(hit.get("tags", "")), groups, words, query, override or contextual_match)
+                    score = footage_relevance(str(hit.get("tags", "")), groups, words, query, override or contextual_match, contextual=contextual_match)
                     url = hit.get("largeImageURL") or hit.get("webformatURL")
                     clip_id = f"photo-{hit.get('id', '')}"
                     width, height = hit.get("imageWidth"), hit.get("imageHeight")
@@ -292,8 +300,11 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
         if scene.get("thumbnail_search"):
             # The cover is its own visual asset, not a random opening frame.
             return await photo(queries, subjects, local, False) or await video(queries, subjects, local, False)
-        result = (await video(queries, subjects, local, False)
-                  or await photo(queries, subjects, local, False))
+        # Alternate stills and footage for visual rhythm. Both use the same
+        # bounded, per-render search cache and independent reuse ledger.
+        photo_first = int(scene.get("scene_number", 1)) % 2 == 0
+        result = ((await photo(queries, subjects, local, False) or await video(queries, subjects, local, False)) if photo_first
+                  else (await video(queries, subjects, local, False) or await photo(queries, subjects, local, False)))
         if result:
             return result
         for query in contextual:
@@ -303,7 +314,7 @@ async def fetch_pixabay(scene: dict[str, Any], target: Path, used: set[str], rec
             if result:
                 print("[b-roll] selected contextual stock media", flush=True)
                 return result
-    if interrupted:
+    if interrupted or catalog.get("pixabay_cooldown", 0) > time.monotonic():
         raise TemporaryRenderError("Pixabay search or download was interrupted.")
     return None
 
@@ -312,7 +323,7 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
     target = directory / f"raw_{int(scene['scene_number']):02d}_{shot:02d}.mp4"
     receipt = target.with_suffix(".pixabay")
     fingerprint = hashlib.sha256(json.dumps([
-        "narration-match-v4", scene.get("picture_size"), scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
+        "narration-match-v5", scene.get("picture_size"), scene.get("format"), scene["narration"], scene.get("spoken"), scene.get("video_title"),
         scene["search_queries"], bool(scene.get("footage_override")),
     ]).encode()).hexdigest()
     if receipt.is_file():
@@ -338,6 +349,25 @@ def fetch_broll(scene: dict[str, Any], directory: Path, used: set[str], recent: 
 
 def video_size(scene):
     return (1080, 1920) if scene.get("format") == "9:16" else (1920, 1080)
+
+
+def validate_visual_coverage(windows):
+    """Measure actual screen time, not scene count. No media is uploaded on failure."""
+    total = fallback = run = longest = 0.0
+    for seconds, stock in windows:
+        total += seconds
+        if stock:
+            run = 0.0
+        else:
+            fallback += seconds
+            run += seconds
+            longest = max(longest, run)
+    fraction = fallback / total if total else 1.0
+    if fraction > .25 or longest > 20:
+        raise ValueError(f"Visual quality check: {fraction:.0%} fallback text, longest run {longest:.0f}s. "
+                         "Not saved as a finished video. Retry with more concrete scene searches.")
+    return {"stock_fraction": round(1 - fraction, 4), "fallback_seconds": round(fallback, 2),
+            "longest_fallback_seconds": round(longest, 2)}
 
 
 def scene_durations(natural: list[float], target: float | None, *, approximate: bool = False,
@@ -1134,8 +1164,7 @@ def process(video: dict[str, Any], supabase) -> None:
                 next_engine, _ = voices_to_try[index + 1]
                 print(f"[narration] {engine} speech unavailable; restarting all scenes with {next_engine} neural speech to keep the voice consistent.", flush=True)
         durations = scene_durations([item[2] for item in audio_plan], target, approximate=not parent,
-                                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else (1800 if not parent else None),
-                                    words=sum(len(scene["narration"].split()) for scene in selected))
+                    ceiling=180 if not parent and ratio == "9:16" and (target or 180) <= 180 else (1800 if not parent else None))
     print(f"[timing] narration/preparation: {time.monotonic()-phase_started:.1f}s", flush=True)
     phase_started = time.monotonic()
     if mode != "audio":
@@ -1149,6 +1178,7 @@ def process(video: dict[str, Any], supabase) -> None:
     rendered = []
     voices = []
     replacement_timeline = []
+    visual_windows = []
     def collect_scene(clip, metadata):
         # Only the coordinator updates the ordered timeline and removes input files.
         for footage in metadata["raw"]:
@@ -1164,7 +1194,10 @@ def process(video: dict[str, Any], supabase) -> None:
             "duration": round(round(metadata["seconds"] * 30) / 30, 6),
             "captions": metadata["srt"].read_text(encoding="utf-8"),
             "footage": metadata["clip_ids"], "narration_cards": metadata["cards"],
+            "fallback_seconds": metadata["fallback_seconds"],
+            "longest_fallback_seconds": metadata["longest_fallback_seconds"],
         })
+        visual_windows.extend(metadata["visual_windows"])
 
     workers = 1 if parent else render_parallelism()
     print(f"[pipeline] {workers} encoder(s); sequential stock selection, ordered output", flush=True)
@@ -1200,30 +1233,41 @@ def process(video: dict[str, Any], supabase) -> None:
                 srt = retime_srt(srt, srt.with_suffix(".timed.srt"), tempo, seconds)
             windows = spoken_shots(srt, seconds, SHOT_SECONDS, scene["narration"])
             raw, clip_ids, lengths = [], [], []
+            fallback_seconds = fallback_run = longest_fallback = 0.0
+            scene_windows = []
             for shot, (frames, spoken) in enumerate(windows):
                 try:
                     match = fetch_broll({**scene, "spoken": spoken, "picture_size": size or video_size(scene), "video_title": details.get("title", "")}, directory, used_footage, recent_footage, catalog, shot, session=stock)
                 except TemporaryRenderError:
-                    if keep_audio and scene.get("footage_override") and not raw:
-                        raise
-                    match = None
+                    # The runner's bounded retry resumes cached audio/media.
+                    # A provider outage must not become a text-only production.
+                    raise
                 if match:
                     source, clip_id = match
                     clip_ids.append(clip_id)
+                    fallback_run = 0.0
                 else:
                     source = narration_motion(spoken, directory / f"spoken_{number:02d}_{shot:02d}.mp4",
                                               size or video_size(scene), frames)
+                    fallback_seconds += frames / 30
+                    fallback_run += frames / 30
+                    longest_fallback = max(longest_fallback, fallback_run)
                 raw.append(source)
                 lengths.append(frames)
+                scene_windows.append((frames / 30, bool(match)))
             if keep_audio and scene.get("footage_override") and not clip_ids:
                 raise ValueError(f"No stock media matched your requested footage for scene {logical}. Try a different search term.")
             metadata = {"raw": raw, "logical": logical, "seconds": seconds, "srt": srt,
-                        "clip_ids": clip_ids, "cards": len(windows) - len(clip_ids)}
+                        "clip_ids": clip_ids, "cards": len(windows) - len(clip_ids),
+                        "fallback_seconds": fallback_seconds, "longest_fallback_seconds": longest_fallback,
+                        "visual_windows": scene_windows}
             pipeline.submit(render_scene, metadata, scene, raw, audio, srt, directory, duration=seconds,
                             normalized_audio=keep_audio, size=size, bitrate=bitrate, tempo=tempo, shot_frames=lengths)
         for result, metadata in pipeline.drain():
             collect_scene(result, metadata)
     print(f"[timing] footage and scene encoding: {time.monotonic()-phase_started:.1f}s", flush=True)
+    if not parent:
+        save_fields(supabase, video, visual_quality=validate_visual_coverage(visual_windows))
     phase_started = time.monotonic()
     save_fields(supabase, video, progress_note="Joining scenes")
     if parent:

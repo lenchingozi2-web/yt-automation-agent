@@ -24,11 +24,11 @@ FILES = {
     "voices-v1.0.bin": ("bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d", 20_000_000),
 }
 DEFAULT_VOICE = "am_michael"
-DEFAULT_SPEED = 1.06
-SENTENCE_PAUSE = 0.17
-CLAUSE_PAUSE = 0.055
+DEFAULT_SPEED = 1.0
+SENTENCE_PAUSE = 0.23
+CLAUSE_PAUSE = 0.085
 FRAGMENT_PAUSE = 0.07
-VOICE_PROFILE = "studio-natural-v2"
+VOICE_PROFILE = "studio-natural-v3"
 VOICE_ALLOWLIST = {
     "af_heart", "af_bella", "af_sarah", "af_nicole", "af_aoede", "af_kore",
     "am_michael", "am_fenrir", "am_puck", "bf_emma", "bf_isabella", "bm_george",
@@ -195,7 +195,7 @@ def generate(text: str, wav: Path, voice: str = DEFAULT_VOICE,
     for index, fragment in enumerate(_fragments(text)):
         try:
             audio, rate, timings = model.create_timed(
-                fragment, voice=voice, speed=speed, lang="en-us",
+                fragment, voice=voice, speed=speed, lang="en-gb" if voice.startswith("b") else "en-us",
                 sentence_pause=SENTENCE_PAUSE, clause_pause=CLAUSE_PAUSE, continuous=True,
             )
         except Exception as error:

@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 
 
 THUMBNAIL_MAX_BYTES = 2_000_000
@@ -66,7 +66,7 @@ def footage_intent(spoken: str, narration: str, queries: list[str], override: bo
     return list(dict.fromkeys(primary + related + alternate + derived))[:4], subjects, local
 
 
-def footage_relevance(tags: str, subjects: list, local: set, query: str, override: bool = False) -> int:
+def footage_relevance(tags: str, subjects: list, local: set, query: str, override: bool = False, *, contextual: bool = False) -> int:
     if re.search(r"green.?screen|chroma|subscribe|like button|countdown|logo reveal|\b(?:intro|outro)\b", tags, re.I):
         return 0
     words = set(visual_words(tags))
@@ -74,9 +74,13 @@ def footage_relevance(tags: str, subjects: list, local: set, query: str, overrid
     overlap = len(words & local)
     requested = set(visual_words(query))
     hit = len(words & requested)
-    if (subjects and not matches) or (not subjects and (not overlap or overlap < min(2, len(local)))):
+    # Stock tags often contain the visible noun, without the modifier used in
+    # the query ("laboratory" instead of "laboratory equipment"). Keep exact
+    # medical subject checks, but accept a concrete query anchor for context.
+    anchored = bool(hit) and len(requested) <= 3
+    if (subjects and not matches) or (not subjects and not overlap):
         return 0
-    if override and (not hit or hit < min(2, len(requested))):
+    if override and (not hit or (hit < min(2, len(requested)) and not (contextual and anchored and not subjects))):
         return 0
     return matches * 20 + overlap * 3 + hit
 
@@ -97,9 +101,12 @@ CONTEXT_FOOTAGE = (
 
 def contextual_searches(spoken: str, narration: str, title: str = "") -> list[str]:
     for text in (spoken, narration, title):
+        matches = []
         for pattern, searches in CONTEXT_FOOTAGE:
             if re.search(pattern, text, re.I):
-                return list(searches)
+                matches.extend(searches)
+        if matches:
+            return list(dict.fromkeys(matches))[:4]
     return ["desk notebook", "abstract light"]
 
 
@@ -212,9 +219,17 @@ def prepare_stock_image(data: bytes, path: Path, size: tuple[int, int]) -> None:
         if source.width * source.height > 16_000_000 or min(source.size) < 320:
             raise ValueError("Unsuitable stock photo dimensions")
         picture = ImageOps.exif_transpose(source).convert("RGB")
-        if min(picture.width / size[0], picture.height / size[1]) < .62:
-            raise ValueError("Stock photo is too small for this crop")
-        ImageOps.fit(picture, size, method=Image.Resampling.LANCZOS).save(path, "PNG")
+        if min(picture.width / size[0], picture.height / size[1]) >= .62:
+            result = ImageOps.fit(picture, size, method=Image.Resampling.LANCZOS)
+        else:
+            # Preserve a useful landscape photo in a portrait video. A soft
+            # backdrop fills the frame without discarding its visible subject.
+            if max(picture.width / size[0], picture.height / size[1]) < .62:
+                raise ValueError("Stock photo is too small")
+            result = ImageOps.fit(picture, size, method=Image.Resampling.BILINEAR).filter(ImageFilter.GaussianBlur(24))
+            foreground = ImageOps.contain(picture, size, method=Image.Resampling.LANCZOS)
+            result.paste(foreground, ((size[0] - foreground.width) // 2, (size[1] - foreground.height) // 2))
+        result.save(path, "PNG")
 
 
 def thumbnail_size(ratio: str) -> tuple[int, int]:
@@ -309,6 +324,12 @@ def create_thumbnail(source_video: Path | list[Path], headline: str, output: Pat
     portrait = ratio == "9:16"
     sources = source_video if isinstance(source_video, list) else [source_video]
     background = best_frame(sources, output, (width, height), timestamps)
+    background = ImageEnhance.Color(ImageEnhance.Contrast(background).enhance(1.10)).enhance(1.12)
+    # Put type on the less detailed half, leaving the subject unobscured.
+    def detail(box):
+        region = ImageOps.grayscale(background.crop(box).resize((96, 96)))
+        return ImageStat.Stat(region.filter(ImageFilter.FIND_EDGES)).mean[0]
+    text_right = not portrait and detail((0, 0, width // 2, height)) > detail((width // 2, 0, width, height)) * 1.15
     # Keep the photographic subject visible and darken only the title region.
     gradient_size = (1, height) if portrait else (width, 1)
     gradient = Image.new("L", gradient_size)
@@ -319,12 +340,16 @@ def create_thumbnail(source_video: Path | list[Path], headline: str, output: Pat
         for i in range(steps)
     ])
     dark = Image.new("RGB", (width, height), "#071119")
-    result = Image.composite(dark, background, gradient.resize((width, height)))
+    mask = gradient.resize((width, height))
+    if text_right:
+        mask = ImageOps.mirror(mask)
+    result = Image.composite(dark, background, mask)
     draw = ImageDraw.Draw(result)
     # Mobile-first hierarchy: a compact headline with a strong contrast edge.
-    text_width = 872 if portrait else 710
+    text_width = 872 if portrait else 640
     lines, title_font = fit_headline(draw, headline, text_width, 158 if portrait else 136, 3)
-    accent_x = 104 if portrait else 64
+    text_x = width - text_width - 64 if text_right else 64
+    accent_x = 104 if portrait else text_x
     accent_y = round(height * (.45 if portrait else .22))
     draw.rounded_rectangle((accent_x, accent_y, accent_x + (100 if portrait else 92), accent_y + 9),
                            radius=4, fill="#dff478")
@@ -332,7 +357,7 @@ def create_thumbnail(source_video: Path | list[Path], headline: str, output: Pat
     top = (round(height * .67) - len(lines) * line_height // 2 if portrait
            else round(height * .53) - len(lines) * line_height // 2)
     for index, line in enumerate(lines):
-        x = round((width - draw.textlength(line, font=title_font)) / 2) if portrait else 64
+        x = round((width - draw.textlength(line, font=title_font)) / 2) if portrait else text_x
         draw.text((x, top + index * line_height), line, font=title_font,
                   fill="#dff478" if index == len(lines) - 1 else "white",
                   stroke_width=4, stroke_fill="#071119")

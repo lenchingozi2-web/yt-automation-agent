@@ -18,9 +18,9 @@ from studio_kokoro import generate as generate_kokoro_speech, voice_profile as k
 
 VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
 BACKUP_VOICE = os.getenv("EDGE_TTS_BACKUP_VOICE", "en-US-AndrewNeural")
-RATE = os.getenv("EDGE_TTS_RATE", "+3%")
-PITCH = os.getenv("EDGE_TTS_PITCH", "-3Hz")
-AUDIO_VERSION = "natural-phrases-v6"
+RATE = os.getenv("EDGE_TTS_RATE", "+0%")
+PITCH = os.getenv("EDGE_TTS_PITCH", "+0Hz")
+AUDIO_VERSION = "natural-phrases-v7"
 MIN_NARRATION_WPM = 140
 
 

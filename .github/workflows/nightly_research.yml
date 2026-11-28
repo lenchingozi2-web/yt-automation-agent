@@ -1,11 +1,12 @@
 name: LenxiQ Daily Briefing
 on:
   schedule:
-    - cron: '8 3 * * *'
-    - cron: '41 3 * * *'
-    - cron: '19 5 * * *'
-    - cron: '23 8 * * *'
-    - cron: '37 13 * * *'
+    # Lagos midnight research, two early retries, then two daytime recovery slots.
+    - cron: '11 23 * * *'
+    - cron: '41 23 * * *'
+    - cron: '19 1 * * *'
+    - cron: '23 5 * * *'
+    - cron: '37 9 * * *'
   push:
     branches: [main]
     paths: [research_fetcher.py, src/lib/studio-research.ts, .github/workflows/nightly_research.yml]

@@ -6,6 +6,7 @@ import { ArrowLeft, ExternalLink, Film, LoaderCircle, RefreshCw } from "lucide-r
 import { getSupabaseClient } from "@/src/lib/supabase";
 import { isBriefingSource, toSafeMessage } from "@/src/lib/studio";
 import type { ResearchIdea } from "@/src/lib/studio-briefing";
+import { VIDEO_DURATION_OPTIONS } from "@/src/lib/studio-limits";
 import { Brand, Notice, PolicyLinks, SignIn, type Feedback } from "../components/studio-shell";
 
 type BriefingData = { ideas: ResearchIdea[]; today: string };
@@ -18,7 +19,7 @@ async function studioRequest<T>(path: string, init: RequestInit = {}): Promise<T
     ...init, cache: "no-store",
     headers: { Authorization: `Bearer ${data.session.access_token}`, ...(init.body ? { "Content-Type": "application/json" } : {}) },
   });
-  const result = await response.json().catch(() => null);
+  const result = await response.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
   if (!response.ok || result?.ok !== true) throw new Error(toSafeMessage(result?.error, "Studio could not complete the request."));
   return result as T;
 }
@@ -27,7 +28,7 @@ function Briefing() {
   const [data, setData] = useState<BriefingData | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [loading, setLoading] = useState(true);
-  const [duration, setDuration] = useState(60);
+  const [duration, setDuration] = useState<number | null>(null);
   const [requesting, setRequesting] = useState(false);
   const [drafting, setDrafting] = useState<string | null>(null);
   const draftLock = useRef(false);
@@ -64,6 +65,7 @@ function Briefing() {
   }
 
   async function draftVideo(idea: ResearchIdea) {
+    if (duration === null) return;
     if (draftLock.current) return;
     draftLock.current = true;
     setDrafting(idea.id);
@@ -108,13 +110,12 @@ function Briefing() {
       {data && day !== data.today && <button type="button" className="button button-secondary self-start" onClick={() => void requestBriefing()} disabled={requesting || !!drafting}>
         {requesting ? "Starting research…" : "Request today’s briefing"}
       </button>}
-      {!!data?.ideas.length && <label className="self-start">Video length
-        <select value={duration} onChange={(event) => setDuration(Number(event.target.value))} disabled={!!drafting}>
-          <option value={60}>About 1 minute · Portrait</option>
-          <option value={180}>About 3 minutes · Portrait</option>
-          <option value={300}>About 5 minutes · Landscape</option>
-          <option value={600}>About 10 minutes · Landscape</option>
-          <option value={720}>About 12 minutes · Landscape</option>
+      {!!data?.ideas.length && <label className="self-start">Choose video length before drafting
+        <select required value={duration ?? ""} onChange={(event) => setDuration(event.target.value ? Number(event.target.value) : null)} disabled={!!drafting}>
+          <option value="" disabled>Select a duration…</option>
+          {VIDEO_DURATION_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>
+            About {seconds / 60} {seconds === 60 ? "minute" : "minutes"} · {seconds <= 180 ? "Portrait" : "Landscape"}
+          </option>)}
         </select>
       </label>}
       <div className="grid gap-4">
@@ -131,8 +132,8 @@ function Briefing() {
           </ul>
           <div className="flex flex-wrap gap-3">
             {idea.status === "queued" ? <Link className="button button-secondary" href="/#queue">Open production queue</Link> :
-              <button className="button button-primary" onClick={() => void draftVideo(idea)} disabled={!!drafting || loading}>
-                {drafting === idea.id ? <><LoaderCircle className="spinner" size={17} /> Drafting and checking…</> : <><Film size={17} /> Draft Video</>}
+              <button className="button button-primary" onClick={() => void draftVideo(idea)} disabled={duration === null || !!drafting || loading}>
+                {drafting === idea.id ? <><LoaderCircle className="spinner" size={17} /> Drafting and checking…</> : <><Film size={17} /> {duration === null ? "Choose duration above" : `Draft ${duration / 60}-minute video`}</>}
               </button>}
           </div>
         </article>)}

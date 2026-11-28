@@ -35,3 +35,4 @@ jobs:
       - run: python3 -m unittest discover -s tests -p "test_pipeline.py" -v
       - run: python3 -m unittest discover -s tests -p "test_voice_fallback.py" -v
       - run: python3 -m unittest discover -s tests -p "test_kokoro.py" -v
+      - run: python3 -m unittest discover -s tests -p "test_visual_quality.py" -v
