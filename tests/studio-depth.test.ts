@@ -34,6 +34,21 @@ test("unsupported outline points fail before any script writing with bounded aud
   assert.equal(calls,5);
 });
 
+test("structured audit objections are preserved and cannot pass as verified evidence",async()=>{
+  let calls=0,repair="";
+  await assert.rejects(deepenResearch("Selected research",sources.slice(0,2),1800,{
+    plan:async instruction=>{
+      calls++;
+      if(instruction.includes("Fact-check this long-video outline"))return {issues:[{chapter:1,reason:"Reported beliefs are not measured benefits"}]};
+      if(calls===1)return proposal;
+      repair=instruction;
+      return {sufficient:true,chapters:outline()};
+    },search:async()=>sources,
+  }),/source-backed chapter plan/);
+  assert.ok(repair.includes("Reported beliefs are not measured benefits"));
+  assert.equal(calls,5);
+});
+
 test("research depth grows with selected duration and short videos remain cheap",()=>{
   assert.equal(depthProfile(60),undefined);
   assert.equal(depthProfile(720),undefined);
