@@ -2,6 +2,7 @@ import { addViewerPrompt, communityQuestion, withoutViewerPrompt } from "./studi
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 import { rankTopicOptions, type TopicOption } from "./studio-topic-scoring.ts";
 import { selectPackaging } from "./studio-packaging.ts";
+import { deepenResearch, depthProfile, type ResearchChapter } from "./studio-depth.ts";
 
 type Json = Record<string, unknown>;
 type Evidence = ResearchSource & { text: string; year?: string };
@@ -130,7 +131,7 @@ function clean(value: unknown, limit: number) {
   return text(value).replace(/<[^>]+>/g, " ").replace(/&(?:amp|lt|gt|nbsp|quot);/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
-async function medicalSearch(query: string, clinical: boolean): Promise<Evidence[]> {
+async function medicalSearch(query: string, clinical: boolean, deep = false): Promise<Evidence[]> {
   const terms = query.match(/[\p{L}\p{N}][\p{L}\p{N}-]*/gu)?.filter((term) => term.length > 2) || [];
   if (!terms.length) return [];
   const fields = terms.map((term) => 'TITLE_ABS:"' + term + '"').join(" AND ");
@@ -142,9 +143,9 @@ async function medicalSearch(query: string, clinical: boolean): Promise<Evidence
     const title = clean(hit.title, 220);
     const id = text(hit.pmid || hit.id);
     const abstract = clean(hit.abstractText, 8000);
-    const excerpt = abstract.length <= 1800 ? abstract : abstract.slice(0, 700) + " […] " + abstract.slice(-1100);
+    const excerpt = deep ? abstract.slice(0, 4000) : abstract.length <= 1800 ? abstract : abstract.slice(0, 700) + " […] " + abstract.slice(-1100);
     return title && /^\d+$/.test(id) && excerpt.length >= 100
-      ? [{ title, url: "https://pubmed.ncbi.nlm.nih.gov/" + id + "/", publisher: text(hit.journalTitle) || "PubMed", year: text(hit.pubYear), text: excerpt }] : [];
+      ? [{ title, url: "https://pubmed.ncbi.nlm.nih.gov/" + id + "/", publisher: text(hit.journalTitle || object(object(hit.journalInfo).journal).title) || "PubMed", year: text(hit.pubYear), text: excerpt }] : [];
   });
 }
 
@@ -346,10 +347,13 @@ function normalizeWrittenScenes(raw: Json, evidence: Evidence[], briefing?: Brie
 
 export async function researchedDraft(brief: string, duration: number, format: Draft["format"], recent: string[], briefing?: BriefingEvidence) {
   const selectedEvidence = briefing ? await briefingEvidence(briefing, duration >= 300) : undefined;
-  const { angle, evidence } = selectedEvidence
+  const initial = selectedEvidence
     ? { angle: selectedEvidence[0].title, evidence: selectedEvidence }
     : await research(brief, recent);
-  if (briefing && duration >= 300) {
+  const angle = initial.angle;
+  let evidence = initial.evidence;
+  let researchChapters: ResearchChapter[] = [];
+  if (briefing && duration >= 300 && !depthProfile(duration)) {
     const lead = evidence[0];
     const terms = lead.title.split(/[:;–]/)[0].match(/[a-z][a-z-]{4,}/gi) || [];
     const search = terms.filter((term) => !/^(among|effects?|using|study|systematic|review|based|analysis)$/i.test(term)).slice(0, 3).join(" ");
@@ -365,6 +369,23 @@ export async function researchedDraft(brief: string, duration: number, format: D
         }
       }
     }
+  }
+  if (depthProfile(duration)) {
+    trace("Expanding research for the selected " + duration / 60 + "-minute video.");
+    const expanded = await deepenResearch(briefing ? briefing.title + ". " + briefing.hook_summary : brief,
+      evidence, duration, {
+        plan: (instruction, budget) => modelJson(instruction, budget, 24000),
+        search: async query => {
+          const responses = await Promise.allSettled([medicalSearch(query, false, true), educationSearch(query)]);
+          const lists = responses.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+          const sources: Evidence[] = [];
+          for (let index = 0; index < 5; index++) for (const entries of lists) if (entries[index]) sources.push(entries[index]);
+          return sources;
+        },
+      });
+    evidence = expanded.evidence;
+    researchChapters = expanded.chapters;
+    trace("Research depth verified: " + evidence.length + " sources, " + researchChapters.length + " distinct chapters.");
   }
   const storyContext = briefing ? { references: briefing.references, leadTitle: evidence[0].title } : undefined;
   const count = Math.max(4, Math.min(120, Math.ceil(duration / (duration >= 300 ? 15 : 12))));
@@ -392,13 +413,14 @@ export async function researchedDraft(brief: string, duration: number, format: D
     "Do not copy previous titles or closely paraphrase their angle unless the user specifically requests it. Avoid repeating a location, prop, or setup across adjacent scenes.",
     `Plan around ${count} scenes with ${lower}–${upper} words of narration per scene. Aim for ${totalTarget} spoken words in total.`,
     `The video is ${duration} seconds and ${format}. Expand short scenes with a concrete example or a clearer explanation. Do not use markdown or speaker labels.`,
-    JSON.stringify({ brief, angle, recent, evidence, briefing: storyContext }),
+    ...(researchChapters.length ? ["Research packet and chapter assignment follow separately. Use only the supplied source IDs for factual claims."]
+      : [JSON.stringify({ brief, angle, recent, evidence, briefing: storyContext })]),
   ].join("\n");
   const writeDraft = async (correction: string) => {
     if (duration < 300) return await modelJson(prompt + correction, Math.max(4200, Math.ceil(duration * 22)), 24000);
     // Long videos are written as successive chapters of ONE coherent script,
     // not as independent video productions. Small chapters fit provider output limits.
-    const chapterSize = duration > 900 ? 15 : Math.ceil(count / 3);
+    const chapterSize = researchChapters.length ? Math.ceil(count / researchChapters.length) : duration > 900 ? 15 : Math.ceil(count / 3);
     const chapters: { count: number; purpose: string }[] = [];
     for (let offset = 0; offset < count; offset += chapterSize) {
       const chapterIndex: number = chapters.length;
@@ -414,8 +436,15 @@ export async function researchedDraft(brief: string, duration: number, format: D
     const segments = [];
     let priorContext = "";
     for (const [index, chapter] of chapters.entries()) {
+      const researched = researchChapters[index];
+      const selectedIds = new Set([1, ...(researched?.source_ids ?? [])]);
+      const chapterEvidence = evidence.filter(source => selectedIds.has(source.id || 0));
       const instruction = [
         chapterPrompt,
+        ...(researched ? [JSON.stringify({ brief, angle, briefing: storyContext,
+          chapter_plan: researched, covered_chapters: researchChapters.slice(0, index).map(c => ({title:c.title,question:c.question})),
+          evidence: chapterEvidence.map(source => ({...source, text: source.text.slice(0, 2600)})) }),
+          "Answer only this chapter's question, developing its distinct key points. Do not repeat earlier chapters, pad the runtime, or turn contextual studies into the selected study's findings."] : []),
         `Write only chapter ${index + 1} of one video. Plan around ${chapter.count} scenes and ${chapter.count * perScene} total spoken words in this chapter. Individual scenes can vary between ${lower} and ${upper} words, with flexibility for complete sentences. ${chapter.purpose}`,
         "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
         "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
@@ -436,7 +465,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
     return { ...segments[0],
       viewer_prompt: segments[segments.length - 1]?.viewer_prompt || segments[0]?.viewer_prompt,
       scenes: segments.flatMap((segment, chapter) => list(segment.scenes).map((scene, index) => ({
-      ...object(scene), chapter_title: index === 0 ? text(segment.chapter_title) || (chapter === 0 ? "The question" : chapter === segments.length - 1 ? "Putting it into practice" : "Continuing the explanation") : undefined,
+      ...object(scene), chapter_title: index === 0 ? researchChapters[chapter]?.title || text(segment.chapter_title) || (chapter === 0 ? "The question" : chapter === segments.length - 1 ? "Putting it into practice" : "Continuing the explanation") : undefined,
     }))).map((scene, i) => ({
       ...scene, scene_number: i + 1,
     })) };
@@ -491,7 +520,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
         throw new DraftStructureError("title", "Choose a title and angle distinct from the previous productions.");
       }
       const total = draft.scenes.reduce((sum, scene) => sum + words(scene.narration), 0);
-      if (total < duration * 1.65 || total > duration * 2.85) {
+      if (total < (researchChapters.length ? totalTarget * .9 : duration * 1.65) || total > duration * 2.85) {
         throw new DraftStructureError("length", "The previous draft has " + total + " spoken words. Rewrite it with about " + totalTarget + " spoken words.");
       }
       const uniqueLines = new Map<string, number>();
@@ -508,6 +537,13 @@ export async function researchedDraft(brief: string, duration: number, format: D
       }
       if (!draft.scenes.some((scene) => scene.source_ids?.some((id) => !briefing || id === 1))) {
         throw new DraftStructureError("source_ids", "Cite the lead report as source ID 1 when explaining its specific findings.");
+      }
+      if (researchChapters.length) {
+        const cited = new Set(draft.scenes.flatMap(scene => scene.source_ids ?? []));
+        if (cited.size < depthProfile(duration)!.minSources) {
+          auditedDraft = draft;
+          throw new DraftStructureError("source_ids", "Develop the distinct chapter research instead of repeating the lead study. Use the planned sources across the complete video.");
+        }
       }
       checkedClaims = true;
       lastStage = "format";

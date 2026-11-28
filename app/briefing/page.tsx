@@ -118,6 +118,9 @@ function Briefing() {
           </option>)}
         </select>
       </label>}
+      {duration !== null && duration >= 900 && <p className="text-sm text-[var(--muted)]" role="status">
+        Studio will expand the research and plan distinct chapters for your {duration / 60}-minute video before writing it.
+      </p>}
       <div className="grid gap-4">
         {data?.ideas.map((idea) => <article key={idea.id} className="panel grid gap-4 p-5 sm:p-6">
           {idea.topic_area && <p className="text-sm text-[var(--accent)]">{topicLabels[idea.topic_area]}</p>}
