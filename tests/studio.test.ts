@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import './studio-depth.test.ts';
+import './studio-depth-draft.test.ts';
 import assert from 'node:assert/strict';
 import { canRetryYouTubeThumbnail, durationFromBrief, normalizeVideo, normalizeDraft, youtubePublishAction, youtubeStudioUrl } from '../src/lib/studio.ts';
 import { VIDEO_DURATION_OPTIONS, validVideoDuration } from '../src/lib/studio-limits.ts';

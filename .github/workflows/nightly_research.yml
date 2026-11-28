@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]') || contains(github.event.head_commit.message, '[verify-30-minute-draft]')
         with:
           node-version: '24'
       - uses: actions/setup-python@v5
@@ -50,7 +50,7 @@ jobs:
           RESEARCH_PREVIEW_ONLY: ${{ inputs.preview_only || 'false' }}
         run: python research_fetcher.py
       - name: Verify a sourced briefing script without queueing a video
-        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]')
+        if: contains(github.event.head_commit.message, '[verify-briefing-writer]') || contains(github.event.head_commit.message, '[verify-health-draft]') || contains(github.event.head_commit.message, '[verify-draft-matrix]') || contains(github.event.head_commit.message, '[verify-30-minute-draft]')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -58,6 +58,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
           STUDIO_SCRIPT_TRACE: '1'
           STUDIO_PUBLIC_FIXTURE_TRACE: '1'
+          LONG_DRAFT_CHECK: ${{ contains(github.event.head_commit.message, '[verify-30-minute-draft]') }}
           DRAFT_MATRIX: ${{ contains(github.event.head_commit.message, '[verify-draft-matrix]') }}
           HEALTH_DRAFT_CHECK: ${{ contains(github.event.head_commit.message, '[verify-health-draft]') }}
         run: |
@@ -78,6 +79,8 @@ jobs:
           health_check = os.getenv("HEALTH_DRAFT_CHECK") == "true"
           by_topic = {idea["topic_area"]: idea for idea in ideas}
           fixtures = [(300, "16:9", by_topic["health"])] if health_check else [(720, "16:9", by_topic["education"])]
+          if os.getenv("LONG_DRAFT_CHECK") == "true":
+              fixtures = [(1800, "16:9", by_topic["education"])]
           if os.getenv("DRAFT_MATRIX") == "true":
               reported_story = {"topic_area": "health", "title": "Gut bacteria and CAR T-cell therapy",
                                 "hook_summary": "The lead study examined gut bacteria in a mouse lymphoma model.",
@@ -90,7 +93,7 @@ jobs:
               result = subprocess.run(["node", "--experimental-strip-types", "src/lib/studio-daily.ts"],
                                       input=json.dumps(dict(brief="Explain the selected study using its exact findings and limitations.",
                                           seconds=target, ratio=ratio, recent=[], briefing=lead)),
-                                      text=True, stdout=subprocess.PIPE, timeout=240, check=True)
+                                      text=True, stdout=subprocess.PIPE, timeout=600 if target >= 900 else 240, check=True)
               draft = json.loads(result.stdout)
               assert draft["duration_seconds"] == target and draft["format"] == ratio
               assert all(link in draft["description"] for link in lead["references"])
@@ -101,7 +104,11 @@ jobs:
               if target >= 300:
                   ctas = [index for index, scene in enumerate(draft["scenes"])
                           if "like" in scene["narration"].lower() and "subscribe" in scene["narration"].lower()]
-                  assert len(ctas) == 1 and 0.25 <= ctas[0] / len(draft["scenes"]) <= 0.65, (ctas, len(draft["scenes"]))
+                  assert len(ctas) == 1 and 0.5 <= ctas[0] / len(draft["scenes"]) <= 0.95, (ctas, len(draft["scenes"]))
                   assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 3
+              if target == 1800:
+                  assert count >= 3645
+                  assert len(draft.get("sources", [])) >= 8
+                  assert sum(bool(scene.get("chapter_title")) for scene in draft["scenes"]) >= 8
               print(f"PASS: {lead['topic_area']} {target // 60}-minute draft, {len(draft['scenes'])} scenes, {count} words, exact source links.", flush=True)
           PYTHON
