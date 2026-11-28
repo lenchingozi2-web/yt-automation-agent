@@ -190,9 +190,17 @@ def compact_groq_evidence(payload: object, excerpt_chars: int, reports_per_topic
                 filtered.append(report)
                 counts[beat] = count + 1
         compact["reports"] = filtered
-    titles = compact.get("previous_titles")
-    if isinstance(titles, list):
-        compact["previous_titles"] = titles[:40]
+    for title_field in ("previous_titles", "recent_titles"):
+        titles = compact.get(title_field)
+        if isinstance(titles, list):
+            compact[title_field] = titles[:max(8, min(40, reports_per_topic * 2))]
+    # The fallback must not choose a pair belonging to a report removed from
+    # its evidence budget. IDs and exact source URLs remain unchanged.
+    if isinstance(compact.get("allowed_pairs"), dict) and isinstance(compact.get("reports"), list):
+        visible = {source.get("pair") for report in compact["reports"] if isinstance(report, dict)
+                   for source in report.get("supporting_reports", []) if isinstance(source, dict)}
+        compact["allowed_pairs"] = {beat: [pair for pair in numbers if pair in visible]
+                                    for beat, numbers in compact["allowed_pairs"].items()}
     return compact
 
 
@@ -203,7 +211,7 @@ def groq_request_prompt(instruction: str, payload: object, limit: int = 12000) -
     if len(full) <= limit:
         return full
     for excerpt_chars, reports_per_topic in ((900, 18), (700, 12), (500, 8),
-                                            (360, 5), (240, 3)):
+                                            (360, 5), (240, 3), (500, 1), (320, 1)):
         compact = compact_groq_evidence(payload, excerpt_chars, reports_per_topic)
         prompt = prefix + json.dumps(compact, ensure_ascii=False)
         if len(prompt) <= limit:
@@ -416,8 +424,12 @@ def validate_batch(raw: list, evidence: dict[str, list[Source]], recent_titles: 
             raise ValueError("Title and summary must be text")
         title, summary = " ".join(title.split()), " ".join(summary.split())
         title_key = " ".join(phrase_tokens(title))
-        if title_key in titles or not 10 <= len(title) <= 160 or not 80 <= len(summary) <= 700:
-            raise ValueError("A story was repeated or outside length limits")
+        if title_key in titles:
+            raise ValueError("A story was repeated; choose a different title and angle")
+        if not 10 <= len(title) <= 160:
+            raise ValueError(f"Title has {len(title)} characters; use 10–160 characters")
+        if not 80 <= len(summary) <= 700:
+            raise ValueError(f"Summary has {len(summary)} characters; rewrite in 80–700 characters, keeping attribution and limitations")
         if (not isinstance(refs, list) or not 2 <= len(refs) <= 3
                 or any(not isinstance(url, str) for url in refs) or len(set(refs)) != len(refs)):
             raise ValueError("Expected two or three distinct article URLs")
@@ -464,7 +476,8 @@ def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], rece
             options.append({"pair": pair, **source.evidence()})
         reports.append({"beat": lead.beat, "lead_report": lead.evidence(), "supporting_reports": options})
     ordered_pairs = {beat: [number for number, (lead, _) in pairs.items() if lead.beat == beat] for beat in BEATS}
-    story_fields = {"title": {"type": "string"}, "hook_summary": {"type": "string"}}
+    story_fields = {"title": {"type": "string", "minLength": 10, "maxLength": 160},
+                    "hook_summary": {"type": "string", "minLength": 80, "maxLength": 700}}
     approved: dict[str, dict] = {}
     feedback: dict[str, str] = {}
     rejected_pairs: dict[str, set[int]] = {beat: set() for beat in BEATS}
@@ -480,15 +493,17 @@ def write_briefing(gemini: genai.Client, evidence: dict[str, list[Source]], rece
         raw = ask(gemini, """
 Create one true, distinct YouTube story pitch per requested topic, in the exact requested order.
 Lead the title with a concrete subject, tension, surprising finding or practical question; aim for 45–75 characters, no generic "Exploring", "Understanding", "The future of" or academic paper-style phrasing. Do not exaggerate or hide critical limitations. The title must make sense without its summary.
-Choose only a source pair listed for that topic. Use only the supplied records. Name the actual lead
-journal or institution in the summary alongside the finding. State the concrete observation, what was
+Choose only a source pair listed for that topic. Use only the supplied records.
+The integer pair belongs to its enclosing lead_report: the title and central finding must describe
+that exact lead_report, never a different report in the list. Keep the summary around 350–550 characters.
+Name the actual lead journal or institution in the summary alongside the finding. State the concrete observation, what was
 discovered and why it matters. Explicitly include relevant context supported by the second report.
 Do not imply contextual sources independently replicated the lead finding. Avoid copied wording,
 stock hooks, invented details, medical advice without guideline or review support, and overclaims.
 Preserve the actual population, comparison, endpoints, inputs and limitations. Do not repeat earlier
 angles. On a retry fix the specific rejection reason or choose stronger evidence. Return a raw JSON
 array of objects with title (10–160 characters), hook_summary (80–700 characters) and integer pair.
-""", {"requested_topics": pending, "reports": [r for r in reports if r["beat"] in pending],
+""", {"requested_topics": pending, "reports": [dict(r, supporting_reports=[s for s in r["supporting_reports"] if s["pair"] in allowed[r["beat"]]]) for r in reports if r["beat"] in pending],
        "allowed_pairs": allowed, "previous_titles": titles, "previous_check": feedback},
             schema=schema, prefer_groq=attempt == 1)
         candidates: dict[str, tuple[dict, int]] = {}
