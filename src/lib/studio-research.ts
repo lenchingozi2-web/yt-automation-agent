@@ -135,7 +135,8 @@ function clean(value: unknown, limit: number) {
 async function medicalSearch(query: string, clinical: boolean, deep = false): Promise<Evidence[]> {
   const terms = query.match(/[\p{L}\p{N}][\p{L}\p{N}-]*/gu)?.filter((term) => term.length > 2) || [];
   if (!terms.length) return [];
-  const fields = terms.map((term) => 'TITLE_ABS:"' + term + '"').join(" AND ");
+  const fields = (deep ? terms.filter(term => !/^(with|from|among|using|study|studies|review|effects?|the|and|for)$/i.test(term)).slice(0,3) : terms)
+    .map((term) => 'TITLE_ABS:"' + term + '"').join(" AND ");
   const params = new URLSearchParams({ query: "(" + fields + ") AND SRC:MED NOT PUB_TYPE:\"retracted publication\"" +
     (clinical ? ' AND (PUB_TYPE:review OR PUB_TYPE:"practice guideline" OR PUB_TYPE:"meta-analysis")' : ""),
     resultType: "core", format: "json", pageSize: "5" });
@@ -150,11 +151,11 @@ async function medicalSearch(query: string, clinical: boolean, deep = false): Pr
   });
 }
 
-async function educationSearch(query: string): Promise<Evidence[]> {
+async function educationSearch(query: string, deep = false): Promise<Evidence[]> {
   const terms = query.match(/[a-z][a-z-]{3,}/gi) || [];
   if (terms.length < 2) return [];
   const data = await fetchJson<{ response?: { docs?: Json[] } }>("https://api.ies.ed.gov/eric/?" + new URLSearchParams({
-    search: "(" + terms.slice(0, 6).map((term) => '"' + term + '"').join(" AND ") + ") AND peerreviewed:T",
+    search: "(" + terms.slice(0, deep ? 3 : 6).map((term) => '"' + term + '"').join(" AND ") + ") AND peerreviewed:T",
     fields: "id,title,source,description,publicationdateyear", format: "json", rows: "5",
   }));
   return (data.response?.docs || []).flatMap((hit) => {
@@ -377,7 +378,7 @@ export async function researchedDraft(brief: string, duration: number, format: D
       evidence, duration, {
         plan: (instruction, budget) => modelJson(instruction, budget, 24000),
         search: async query => {
-          const responses = await Promise.allSettled([medicalSearch(query, false, true), educationSearch(query)]);
+          const responses = await Promise.allSettled([medicalSearch(query, false, true), educationSearch(query, true)]);
           const lists = responses.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
           const sources: Evidence[] = [];
           for (let index = 0; index < 5; index++) for (const entries of lists) if (entries[index]) sources.push(entries[index]);

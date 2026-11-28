@@ -12,7 +12,10 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     const url=String(input);
     if(url.includes("europepmc")){
       const exact=new URL(url).searchParams.get("query")?.includes("EXT_ID:");
-      if(!exact)searches++;
+      if(!exact){
+        searches++;
+        assert.ok((new URL(url).searchParams.get("query")?.match(/TITLE_ABS:/g)??[]).length<=3,"Over-specific deep search can miss relevant context");
+      }
       return Response.json({resultList:{result:exact?[record(1),record(2)]:Array.from({length:5},(_,i)=>record(3+(searches-1)*5+i))}});
     }
     if(url.includes("api.ies.ed.gov"))return Response.json({response:{docs:[]}});
@@ -20,7 +23,7 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     const body=JSON.parse(String(init?.body));
     const prompt:string=body.contents[0].parts[0].text;
     let response:unknown;
-    if(prompt.includes("Plan deeper research for ONE"))response={queries:["learning methods", "feedback comparison", "independent replication", "retention mechanism", "classroom application", "study limitations"]};
+    if(prompt.includes("Plan deeper research for ONE"))response={queries:["retrieval practice classroom learning memory outcomes", "feedback comparison", "independent replication", "retention mechanism", "classroom application", "study limitations"]};
     else if(prompt.includes("Act as an independent long-video research editor"))response={sufficient:true,chapters:Array.from({length:8},(_,i)=>({
       title:`Research chapter ${i+1}`,question:`What does distinct question ${i+1} establish?`,
       key_points:Array.from({length:4},(_,n)=>({point:`Research point ${i+1}.${n+1} requires a distinct explanation grounded in its assigned source.`,source_id:n%2?(i+1)%8+1:i+1})),source_ids:[i+1,(i+1)%8+1]}))};
