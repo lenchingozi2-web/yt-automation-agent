@@ -110,14 +110,17 @@ function Briefing() {
       {data && day !== data.today && <button type="button" className="button button-secondary self-start" onClick={() => void requestBriefing()} disabled={requesting || !!drafting}>
         {requesting ? "Starting research…" : "Request today’s briefing"}
       </button>}
-      {!!data?.ideas.length && <label className="self-start">Choose video length before drafting
-        <select required value={duration ?? ""} onChange={(event) => setDuration(event.target.value ? Number(event.target.value) : null)} disabled={!!drafting}>
-          <option value="" disabled>Select a duration…</option>
-          {VIDEO_DURATION_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>
-            About {seconds / 60} {seconds === 60 ? "minute" : "minutes"} · {seconds <= 180 ? "Portrait" : "Landscape"}
-          </option>)}
-        </select>
-      </label>}
+      {!!data?.ideas.length && <fieldset disabled={!!drafting} className="duration-options grid gap-3">
+        <legend className="mb-3">Choose video length before drafting</legend>
+        <div className="flex flex-wrap gap-2">
+          {VIDEO_DURATION_OPTIONS.map((seconds) => <label key={seconds} className={`button ${duration === seconds ? "button-primary" : "button-secondary"}`}>
+            <input type="radio" name="briefing-duration" value={seconds} checked={duration === seconds}
+              onChange={() => setDuration(seconds)} required />
+            About {seconds / 60} {seconds === 60 ? "minute" : "minutes"}
+          </label>)}
+        </div>
+        <p className="text-sm text-[var(--muted)]">1–3 minutes use portrait. Longer videos use landscape.</p>
+      </fieldset>}
       {duration !== null && duration >= 900 && <p className="text-sm text-[var(--muted)]" role="status">
         Studio will expand the research and plan distinct chapters for your {duration / 60}-minute video before writing it.
       </p>}
