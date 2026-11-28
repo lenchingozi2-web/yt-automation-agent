@@ -111,6 +111,19 @@ test("chapter plans reject repeated topics, repeated points and invented citatio
   assert.throws(()=>validateResearchChapters(sparse,sources,1800),/at least 8/);
 });
 
+test("a study-specific chapter can use one source while the complete video retains broad evidence",()=>{
+  const chapters=outline();
+  chapters[1].source_ids=[2];
+  chapters[1].key_points=chapters[1].key_points.map(point=>({...point,source_id:2}));
+  assert.equal(validateResearchChapters(chapters,sources,1800).length,8);
+});
+
+test("listing unused citations cannot fake a broad research outline",()=>{
+  const chapters=outline().map((chapter,index)=>({...chapter,source_ids:[1,2,index%6+3],
+    key_points:chapter.key_points.map((point,i)=>({...point,source_id:i%2+1}))}));
+  assert.throws(()=>validateResearchChapters(chapters,sources,1800),/uses 2 distinct sources/);
+});
+
 test("depth packet sizes and outline repair requests stay bounded",async()=>{
   let plans=0;
   const result=await deepenResearch("Selected topic",sources.slice(0,2),1800,{
