@@ -34,18 +34,19 @@ export function validateResearchChapters(raw: unknown, evidence: DepthEvidence[]
       const fact = value && typeof value === "object" ? value as Json : {};
       return {point: clean(fact.point), source_id: Number(fact.source_id)};
     }) : [];
-    const ids = Array.isArray(row.source_ids) ? [...new Set(row.source_ids.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && valid.has(id)))] : [];
-    if (title.length < 8 || question.length < 15 || facts.length < (seconds >= 1800 ? 4 : 3) || facts.length > 6 || ids.length < 2 || ids.length > 4 ||
-        new Set(facts.map(fact => key(fact.point))).size !== facts.length ||
-        titles.has(key(title)) || questions.has(key(question)) || facts.some(fact => fact.point.length < 20 || points.has(key(fact.point)) || !ids.includes(fact.source_id)) ||
-        new Set(facts.map(fact => fact.source_id)).size < 2) {
-      throw new Error("Research chapters must have distinct questions, substantive points and verified sources.");
-    }
+    const ids = Array.isArray(row.source_ids) ? [...new Set(row.source_ids.map(Number).filter(id => Number.isInteger(id) && valid.has(id)))] : [];
+    if(title.length<8||question.length<15)throw new Error(`Chapter '${title}' needs a descriptive title and a specific question.`);
+    if(facts.length<(seconds>=1800?4:3)||facts.length>6)throw new Error(`Chapter '${title}' has ${facts.length} points; supply ${seconds>=1800?4:3}–6 substantive points.`);
+    if(ids.length<2||ids.length>4)throw new Error(`Chapter '${title}' needs 2–4 valid source_ids; received ${ids.length}.`);
+    if(new Set(facts.map(fact=>key(fact.point))).size!==facts.length||facts.some(fact=>points.has(key(fact.point))))throw new Error(`Chapter '${title}' repeats a point; replace it with a distinct, supported explanation.`);
+    if(titles.has(key(title))||questions.has(key(question)))throw new Error(`Chapter '${title}' repeats another chapter's title or question.`);
+    if(facts.some(fact=>fact.point.length<20||!ids.includes(fact.source_id)))throw new Error(`Chapter '${title}' has an incomplete point or a point assigned to a source outside its source_ids.`);
+    if(new Set(facts.map(fact=>fact.source_id)).size<2)throw new Error(`Chapter '${title}' lists several sources but its points use only one; develop verified points from at least two sources.`);
     titles.add(key(title)); questions.add(key(question)); facts.forEach(fact => points.add(key(fact.point))); ids.forEach(id => used.add(id));
     return { title, question, key_points: facts, source_ids: ids };
   });
   if (used.size < profile.minSources || !chapters[0].source_ids.includes(evidence[0].id!)) {
-    throw new Error("The research outline does not cover enough sources or its lead finding.");
+    throw new Error(`The outline uses ${used.size} distinct sources; use at least ${profile.minSources} and include the lead report (source 1) in the opening chapter.`);
   }
   return chapters;
 }
@@ -128,7 +129,10 @@ export async function deepenResearch(brief: string, seed: DepthEvidence[], secon
       if (audit.issues.length) throw new Error(audit.issues.join(" | ").slice(0,2000));
       return { evidence, chapters };
     }
-    catch (error) { problem = error instanceof Error ? error.message : "Incomplete chapter coverage"; }
+    catch (error) {
+      problem = error instanceof Error ? error.message : "Incomplete chapter coverage";
+      console.warn("[studio depth outline]",problem.slice(0,1400));
+    }
   }
   throw new Error("Studio could not complete the source-backed chapter plan. No video was queued.");
 }

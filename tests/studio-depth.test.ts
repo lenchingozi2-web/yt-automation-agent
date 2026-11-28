@@ -108,7 +108,7 @@ test("chapter plans reject repeated topics, repeated points and invented citatio
     (chapters:ReturnType<typeof outline>)=>{chapters[1].key_points=[chapters[1].key_points[0],chapters[1].key_points[0]];},
   ]){const chapters=outline();change(chapters);assert.throws(()=>validateResearchChapters(chapters,sources,1800));}
   const sparse=outline().map(c=>({...c,source_ids:[1,2],key_points:c.key_points.map((p,n)=>({...p,source_id:n%2+1}))}));
-  assert.throws(()=>validateResearchChapters(sparse,sources,1800),/enough sources/);
+  assert.throws(()=>validateResearchChapters(sparse,sources,1800),/at least 8/);
 });
 
 test("depth packet sizes and outline repair requests stay bounded",async()=>{
