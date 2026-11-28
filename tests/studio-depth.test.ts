@@ -31,7 +31,7 @@ test("unsupported outline points fail before any script writing with bounded aud
     plan:async instruction=>{calls++;return instruction.includes("Fact-check this long-video outline")?{issues:["Chapter 1 turns reported beliefs into measured benefits"]}:calls===1?proposal:{sufficient:true,chapters:outline()};},
     search:async()=>sources,
   }),/source-backed chapter plan/);
-  assert.equal(calls,5);
+  assert.equal(calls,7);
 });
 
 test("structured audit objections are preserved and cannot pass as verified evidence",async()=>{
@@ -47,7 +47,7 @@ test("structured audit objections are preserved and cannot pass as verified evid
   }),/source-backed chapter plan/);
   assert.ok(repair.includes("Reported beliefs are not measured benefits"));
   assert.ok(repair.includes('"previous_chapters":[{"title":"A distinct chapter 1"'));
-  assert.equal(calls,5);
+  assert.equal(calls,7);
 });
 
 test("research depth grows with selected duration and short videos remain cheap",()=>{
