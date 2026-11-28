@@ -46,6 +46,7 @@ test("structured audit objections are preserved and cannot pass as verified evid
     },search:async()=>sources,
   }),/source-backed chapter plan/);
   assert.ok(repair.includes("Reported beliefs are not measured benefits"));
+  assert.ok(repair.includes('"previous_chapters":[{"title":"A distinct chapter 1"'));
   assert.equal(calls,5);
 });
 
