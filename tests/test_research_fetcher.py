@@ -112,6 +112,18 @@ class ResearchBriefingTest(unittest.TestCase):
         self.assertEqual(write_briefing(None, self.groups, []), self.stories)
 
     @patch("research_fetcher.ask")
+    def test_overlong_summary_is_repaired_without_replacing_sources_then_audited(self, ask):
+        overlong = [dict(item) for item in self.numbered]
+        overlong[1]["hook_summary"] = "A long but grounded summary. " * 32
+        ask.side_effect = [overlong, [{"hook_summary": self.stories[1]["hook_summary"]}], [{"passed": True}] * 3]
+        self.assertEqual(write_briefing(None, self.groups, []), self.stories)
+        repair = ask.call_args_list[1]
+        self.assertTrue(repair.kwargs["prefer_groq"])
+        self.assertEqual([source["url"] for source in repair.args[2]["sources"]], self.stories[1]["references"])
+        audit = ask.call_args_list[2].args[2]
+        self.assertEqual(audit[1]["story"]["hook_summary"], self.stories[1]["hook_summary"])
+
+    @patch("research_fetcher.ask")
     def test_only_rejected_topic_is_regenerated(self, ask):
         ask.side_effect = [
             self.numbered,
