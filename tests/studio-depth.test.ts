@@ -1,13 +1,30 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deepenResearch, depthProfile, validateResearchChapters, type DepthEvidence } from "../src/lib/studio-depth.ts";
+import { deepenResearch, depthExcerpt, depthProfile, validateResearchChapters, type DepthEvidence } from "../src/lib/studio-depth.ts";
 
 const source = (id: number): DepthEvidence => ({id, title:`Evidence ${id}`, url:`https://pubmed.ncbi.nlm.nih.gov/${id}/`,
   publisher:`Journal ${id}`, text:`The independently indexed research record ${id} reports its population, methods, findings and limitations. `.repeat(5)});
 const sources = Array.from({length:12},(_,i)=>source(i+1));
 const outline = () => Array.from({length:8},(_,i)=>({title:`A distinct chapter ${i+1}`, question:`What does evidence question ${i+1} establish?`,
-  key_points:[`Specific finding number ${i+1} is supported by the assigned research.`, `Limitation number ${i+1} requires a separate careful explanation.`],source_ids:[i+1]}));
+  key_points:Array.from({length:4},(_,n)=>({point:`Chapter ${i+1} point ${n+1} requires its own source-grounded explanation.`,source_id:n%2?(i+1)%8+1:i+1})),source_ids:[i+1,(i+1)%8+1]}));
 const proposal = {queries:["study methods", "mechanism background", "independent comparison", "practical interpretation", "evidence limitations", "related experiments"]};
+
+test("long research excerpts preserve results and limitations at the end",()=>{
+  const passage="STUDY METHODS " + "background ".repeat(1000) + "RESULTS AND LIMITATIONS";
+  const excerpt=depthExcerpt(passage,2000);
+  assert.ok(excerpt.startsWith("STUDY METHODS"));
+  assert.ok(excerpt.endsWith("RESULTS AND LIMITATIONS"));
+  assert.equal(excerpt.length,2000);
+});
+
+test("unsupported outline points fail before any script writing with bounded audit retries",async()=>{
+  let calls=0;
+  await assert.rejects(deepenResearch("Selected research",sources.slice(0,2),1800,{
+    plan:async instruction=>{calls++;return instruction.includes("Fact-check this long-video outline")?{issues:["Chapter 1 turns reported beliefs into measured benefits"]}:calls===1?proposal:{sufficient:true,chapters:outline()};},
+    search:async()=>sources,
+  }),/source-backed chapter plan/);
+  assert.equal(calls,5);
+});
 
 test("research depth grows with selected duration and short videos remain cheap",()=>{
   assert.equal(depthProfile(60),undefined);
@@ -20,11 +37,11 @@ test("research depth grows with selected duration and short videos remain cheap"
 test("30-minute selection expands two briefing sources and preserves the original source IDs",async()=>{
   let plans=0, searches=0;
   const result=await deepenResearch("The selected story",sources.slice(0,2),1800,{
-    plan:async()=> ++plans===1 ? proposal : {sufficient:true,chapters:outline()},
+    plan:async instruction=> {plans++;return instruction.includes("Fact-check this long-video outline")?{issues:[]}:plans===1?proposal:{sufficient:true,chapters:outline()};},
     search:async()=>{searches++;return sources.slice(2,8);},
   });
   assert.equal(searches,3); // second wave is unnecessary once evidence is sufficient
-  assert.equal(plans,2);
+  assert.equal(plans,3);
   assert.equal(result.evidence.length,8);
   assert.equal(result.evidence[0].url,sources[0].url);
   assert.equal(result.evidence[1].id,2);
@@ -70,17 +87,17 @@ test("chapter plans reject repeated topics, repeated points and invented citatio
     (chapters:ReturnType<typeof outline>)=>{chapters[1].source_ids=[99];},
     (chapters:ReturnType<typeof outline>)=>{chapters[1].key_points=[chapters[1].key_points[0],chapters[1].key_points[0]];},
   ]){const chapters=outline();change(chapters);assert.throws(()=>validateResearchChapters(chapters,sources,1800));}
-  const sparse=outline().map(c=>({...c,source_ids:[1]}));
+  const sparse=outline().map(c=>({...c,source_ids:[1,2],key_points:c.key_points.map((p,n)=>({...p,source_id:n%2+1}))}));
   assert.throws(()=>validateResearchChapters(sparse,sources,1800),/enough sources/);
 });
 
 test("depth packet sizes and outline repair requests stay bounded",async()=>{
   let plans=0;
   const result=await deepenResearch("Selected topic",sources.slice(0,2),1800,{
-    plan:async()=>{plans++;return plans===1?proposal:plans===2?{sufficient:true,chapters:[]}:{sufficient:true,chapters:outline()};},
+    plan:async instruction=>{plans++;return instruction.includes("Fact-check this long-video outline")?{issues:[]}:plans===1?proposal:plans===2?{sufficient:true,chapters:[]}:{sufficient:true,chapters:outline()};},
     search:async()=>Array.from({length:40},(_,i)=>({...source(i+1),text:"evidence ".repeat(2000)})),
   });
   assert.ok(result.evidence.length>=8 && result.evidence.length<=12);
-  assert.equal(plans,3);
+  assert.equal(plans,4);
   assert.ok(result.evidence.every(s=>s.text.length<=4000));
 });

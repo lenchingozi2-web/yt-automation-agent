@@ -2,7 +2,7 @@ import { addViewerPrompt, communityQuestion, withoutViewerPrompt } from "./studi
 import { ERIC_SOURCE, PUBMED_SOURCE, isBriefingSource, normalizeDraft, type Draft, type ResearchSource, type Scene } from "./studio.ts";
 import { rankTopicOptions, type TopicOption } from "./studio-topic-scoring.ts";
 import { selectPackaging } from "./studio-packaging.ts";
-import { deepenResearch, depthProfile, type ResearchChapter } from "./studio-depth.ts";
+import { deepenResearch, depthExcerpt, depthProfile, type ResearchChapter } from "./studio-depth.ts";
 
 type Json = Record<string, unknown>;
 type Evidence = ResearchSource & { text: string; year?: string };
@@ -41,6 +41,7 @@ const EDITORIAL = [
   "Do not infer efficacy, diagnosis, safety, or causation from a technical capability, an association, or an early study. Never invent a citation.",
   "For experiments on animals or cells, identify the study population in the opening, and keep every experimental result scoped to that population. Develop practical scientific interpretation and clearly hypothetical illustrations. Avoid giving medical advice.",
   "Preserve the exact comparator, shared inputs, population and endpoint. If a model and baseline both use one test's results, describe a comparison between calculations rather than between the model and the test itself.",
+  "When a source interviews people, its themes describe what those participants believe or report. Never present these as measured benefits, causal effects, or conclusions about every institution. Keep the actual country, population and limitations alongside the finding. Do not move a finding from one source to another.",
   "Visual search terms must be 2–4 words describing concrete visible actions, objects or settings. Give each scene an identifiable visual idea. Avoid green screens, brands, logos and generic filler.",
 ].join("\n");
 
@@ -143,7 +144,7 @@ async function medicalSearch(query: string, clinical: boolean, deep = false): Pr
     const title = clean(hit.title, 220);
     const id = text(hit.pmid || hit.id);
     const abstract = clean(hit.abstractText, 8000);
-    const excerpt = deep ? abstract.slice(0, 4000) : abstract.length <= 1800 ? abstract : abstract.slice(0, 700) + " […] " + abstract.slice(-1100);
+    const excerpt = deep ? depthExcerpt(abstract, 4000) : abstract.length <= 1800 ? abstract : abstract.slice(0, 700) + " […] " + abstract.slice(-1100);
     return title && /^\d+$/.test(id) && excerpt.length >= 100
       ? [{ title, url: "https://pubmed.ncbi.nlm.nih.gov/" + id + "/", publisher: text(hit.journalTitle || object(object(hit.journalInfo).journal).title) || "PubMed", year: text(hit.pubYear), text: excerpt }] : [];
   });
@@ -443,8 +444,8 @@ export async function researchedDraft(brief: string, duration: number, format: D
         chapterPrompt,
         ...(researched ? [JSON.stringify({ brief, angle, briefing: storyContext,
           chapter_plan: researched, covered_chapters: researchChapters.slice(0, index).map(c => ({title:c.title,question:c.question})),
-          evidence: chapterEvidence.map(source => ({...source, text: source.text.slice(0, 2600)})) }),
-          "Answer only this chapter's question, developing its distinct key points. Do not repeat earlier chapters, pad the runtime, or turn contextual studies into the selected study's findings."] : []),
+          evidence: chapterEvidence.map(source => ({...source, text: depthExcerpt(source.text,2600)})) }),
+          "Answer only this chapter's question. Develop each vetted point with its exact source_id, explaining its methods, finding and limitation. Add only explicitly hypothetical examples when useful. Do not invent additional benefits, generalize interviewee beliefs, repeat earlier chapters, or turn contextual studies into the selected study's findings."] : []),
         `Write only chapter ${index + 1} of one video. Plan around ${chapter.count} scenes and ${chapter.count * perScene} total spoken words in this chapter. Individual scenes can vary between ${lower} and ${upper} words, with flexibility for complete sentences. ${chapter.purpose}`,
         "Every scene must add a different detail, example or explanation. Do not repeat narration, transitions, or a conclusion.",
         "Return chapter_title as a plain, specific 3–7 word label for this chapter. No timestamps or numbers.",
@@ -455,9 +456,12 @@ export async function researchedDraft(brief: string, duration: number, format: D
       const budget = Math.max(2800, chapter.count * 210);
       const chapterWords = (value: Json) => list(value.scenes).reduce<number>((total, scene) => total + words(usableNarration(object(scene))), 0);
       const first = await modelJson(instruction, budget, 30000);
-      const enough = chapterWords(first) >= chapter.count * perScene * .76 && (index !== 0 || text(first.title));
+      const enough = chapterWords(first) >= chapter.count * perScene * (researchChapters.length ? .9 : .76) && (index !== 0 || text(first.title));
       const completed = enough ? first : await modelJson(instruction +
         `\nThe prior chapter had ${chapterWords(first)} words. Return the complete chapter with roughly ${chapter.count * perScene} narrated words. Include distinct source-supported explanations and explicitly hypothetical examples.`, budget, 30000);
+      if (researchChapters.length && chapterWords(completed) < chapter.count * perScene * .9) {
+        throw new Error(`Studio could not develop chapter ${index + 1} to the selected duration without padding. No video was queued.`);
+      }
       segments.push(completed);
       priorContext = list(completed.scenes).slice(-2)
         .map((entry) => usableNarration(object(entry))).filter(Boolean).join(" ").slice(-800);

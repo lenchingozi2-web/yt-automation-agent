@@ -23,7 +23,8 @@ test("30-minute briefing draft researches first, writes eight source-backed chap
     if(prompt.includes("Plan deeper research for ONE"))response={queries:["learning methods", "feedback comparison", "independent replication", "retention mechanism", "classroom application", "study limitations"]};
     else if(prompt.includes("Act as an independent long-video research editor"))response={sufficient:true,chapters:Array.from({length:8},(_,i)=>({
       title:`Research chapter ${i+1}`,question:`What does distinct question ${i+1} establish?`,
-      key_points:[`Research point ${i+1} requires a separate source-based explanation.`,`Limitation ${i+1} requires a careful distinction from the other findings.`],source_ids:[i+1]}))};
+      key_points:Array.from({length:4},(_,n)=>({point:`Research point ${i+1}.${n+1} requires a distinct explanation grounded in its assigned source.`,source_id:n%2?(i+1)%8+1:i+1})),source_ids:[i+1,(i+1)%8+1]}))};
+    else if(prompt.includes("Fact-check this long-video outline"))response={issues:[]};
     else if(prompt.includes("You are an independent fact checker")){audits++;response={issues:[]};}
     else if(prompt.includes("You are a YouTube editorial packaging specialist"))response={candidates:[]};
     else{
