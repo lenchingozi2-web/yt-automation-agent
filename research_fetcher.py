@@ -190,6 +190,12 @@ def compact_groq_evidence(payload: object, excerpt_chars: int, reports_per_topic
                 filtered.append(report)
                 counts[beat] = count + 1
         compact["reports"] = filtered
+        if reports_per_topic == 1:
+            for report in filtered:
+                if isinstance(report, dict) and isinstance(report.get("supporting_reports"), list):
+                    # One independent supporting report still gives a complete
+                    # source pair; do not spend the fallback budget on extras.
+                    report["supporting_reports"] = report["supporting_reports"][:1]
     for title_field in ("previous_titles", "recent_titles"):
         titles = compact.get(title_field)
         if isinstance(titles, list):

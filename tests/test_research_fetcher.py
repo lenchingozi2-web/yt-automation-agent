@@ -195,3 +195,16 @@ class ResearchBriefingTest(unittest.TestCase):
         self.assertEqual({p for pairs in compact["allowed_pairs"].values() for p in pairs}, visible)
         audit = compact_groq_evidence({"recent_titles": ["x" * 150] * 90}, 500, 1)
         self.assertEqual(len(audit["recent_titles"]), 8)
+
+    def test_minimum_fallback_preserves_one_complete_pair_per_topic(self):
+        payload = {"reports": [{"beat": beat, "lead_report": {"url": f"https://example.org/{beat}",
+                    "abstract": "lead " * 300}, "supporting_reports": [
+                        {"pair": i * 3 + n, "url": f"https://example.org/{beat}/{n}", "abstract": "context " * 300}
+                        for n in (1, 2, 3)]} for i, beat in enumerate(BEATS)],
+                   "allowed_pairs": {beat: [i * 3 + n for n in (1, 2, 3)] for i, beat in enumerate(BEATS)}}
+        compact = compact_groq_evidence(payload, 500, 1)
+        for i, beat in enumerate(BEATS):
+            self.assertEqual(len(compact["reports"][i]["supporting_reports"]), 1)
+            self.assertEqual(compact["reports"][i]["lead_report"]["url"], payload["reports"][i]["lead_report"]["url"])
+            self.assertEqual(compact["allowed_pairs"][beat], [i * 3 + 1])
+        self.assertEqual(len(payload["reports"][0]["supporting_reports"]), 3)
